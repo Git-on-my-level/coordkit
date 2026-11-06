@@ -338,8 +338,8 @@ def reconcile(manifest):
         for key in after-before:
             event, metadata, hook = json.loads(key)
             old = hook.get('command', '')
-            if ' deliver --hook' in old:
-                new = deliver.command(manifest)
+            if ' deliver --hook' in old or ' deliver --stop-hook' in old:
+                new = deliver.command(manifest, event)
             elif is_question_hook(old):
                 verb = next((v for e, m, v in QUESTION_EVENTS if e == event), None)
                 if not verb:
@@ -350,22 +350,37 @@ def reconcile(manifest):
             else:
                 continue
             if old != new:
-                replacements[old] = new
-        if not replacements:
+                replacements[key] = new
+        add_stop = path.name.startswith('hook-delivery-') and not any(
+            json.loads(key)[0] == 'Stop' and ' deliver --stop-hook' in json.loads(key)[2].get('command', '')
+            for key in after-before)
+        if not replacements and not add_stop:
             continue
-        def transform(current):
+        stop_command = deliver.command(manifest, 'Stop') if add_stop else None
+        def transform(current, check_stop=True):
             now = entries(current)
+            unowned_stop = check_stop and add_stop and any(
+                ' deliver --stop-hook' in json.loads(key)[2].get('command', '') for key in now)
             if any(now[key] != after[key] for key in (after-before).keys() | (before-after).keys()):
                 raise ManifestError('hook_rollback_conflict: managed hooks changed ' + str(target))
             updated = copy.deepcopy(current)
-            for groups in updated.get('hooks', {}).values():
+            for event, groups in updated.get('hooks', {}).items():
                 for group in groups:
+                    metadata = {k: v for k, v in group.items() if k != 'hooks'}
                     for hook in group.get('hooks', []):
-                        if hook.get('command') in replacements:
-                            hook['command'] = replacements[hook['command']]
+                        key = json.dumps([event, metadata, hook], sort_keys=True)
+                        if key in replacements:
+                            hook['command'] = replacements[key]
+            if add_stop:
+                if unowned_stop:
+                    raise ManifestError('delivery_hooks_present: unowned Stop hook')
+                updated.setdefault('hooks', {}).setdefault('Stop', []).append(
+                    {'hooks': [{'type': 'command', 'command': stop_command}]})
             return updated
         # Keep unrelated user settings outside the owned receipt transformation.
-        expected = transform(record['after'])
+        # The receipt projection is trusted; probe unowned Stop entries only
+        # once per live settings snapshot (and again if the transaction re-merges).
+        expected = transform(record['after'], check_stop=False)
         original = copy.deepcopy(record)
         intent = copy.deepcopy(record)
         intent['pending_after'] = expected

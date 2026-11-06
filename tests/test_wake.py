@@ -201,7 +201,7 @@ class HookCrashRecoveryTests(FakeCase):
         with patch('coordkit.paths.install_root',return_value=self.root/'old'):
             deliver.install(self.manifest,target)
         current=read_json(target)
-        current['hooks']['Stop']=[{'hooks':[{'type':'command','command':'user-owned'}]}]
+        current['hooks'].setdefault('Stop',[]).append({'hooks':[{'type':'command','command':'user-owned'}]})
         write_json(target,current)
         receipt=deliver.receipt_path(self.manifest,target)
         actual_write=hooks.write_json
@@ -216,7 +216,7 @@ class HookCrashRecoveryTests(FakeCase):
             hooks.reconcile(self.manifest)
         self.assertNotIn('pending_after',read_json(receipt))
         deliver.uninstall(self.manifest,target)
-        self.assertEqual(read_json(target)['hooks']['Stop'][0]['hooks'][0]['command'],'user-owned')
+        self.assertIn('user-owned',[h.get('command') for g in read_json(target)['hooks']['Stop'] for h in g['hooks']])
 
 class WakeChainTests(FakeCase):
     def setUp(self):
@@ -299,10 +299,10 @@ class WakeChainTests(FakeCase):
         adapter = Agentctl()
         client = Mock(binary='fake-agentctl')
         client.recent.return_value = [dict(id='running', state='running', labels=['lane-a', 'coordkit.lane.lane-a'])]
-        with patch.object(adapter, 'client', return_value=client), patch('coordkit.adapters.builtin.run') as run:
+        with patch.object(adapter, 'client', return_value=client), patch('coordkit.adapters.builtin.subprocess.Popen') as launch:
             self.assertTrue(adapter.listening(self.manifest, 'lane-a', []))
             self.assertEqual(adapter.wake(self.manifest, 'lane-a', [], 'key')['status'], 'listening')
-        run.assert_not_called()
+        launch.assert_not_called()
 
 class WakeIdempotencyTests(WakeChainTests):
     def test_crashed_pending_attempt_reuses_key_after_debounce(self):

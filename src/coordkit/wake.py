@@ -164,7 +164,7 @@ def notify(manifest, rows):
                 except Exception as exc:
                     attempt.update(status='failed', reason=str(exc))
                 write_json(path, record)
-                if attempt['status'] == 'woken':
+                if attempt['status'] in ('woken', 'listening'):
                     break
             record['status'] = (record['attempts'][-1]['status'] if record['attempts'] else 'unavailable')
             record['finished_at'] = time.time()

@@ -75,7 +75,8 @@ class FakeCase(unittest.TestCase):
                 target.write_text(content)
                 target.chmod(source.stat().st_mode)
         env = {key: str(fakes / key.lower()) for key in ("ANX", "AGENTCTL", "GH", "LAUNCHCTL")}
-        env.update(FAKE_LOG=str(self.log), FAKE_RESPONSES=str(self.responses), COORDKIT_STATE_HOME=str(self.root/'host-state'))
+        env.update(FAKE_LOG=str(self.log), FAKE_RESPONSES=str(self.responses),
+                   COORDKIT_STATE_HOME=str(self.root/'host-state'), XDG_STATE_HOME=str(self.root/'xdg-state'))
         self.environment = patch.dict(os.environ, env)
         self.environment.start()
         self.addCleanup(self.environment.stop)

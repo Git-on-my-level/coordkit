@@ -232,6 +232,10 @@ row('state.py', 'writer:_replace_json|writer:update_json', 'hashed settings tran
 row('hooks.py', 'writer:prepare|writer:finish|writer:finish_recovery', 'settings transaction saves migration intent', 'receipt finalized under the same settings lock', 'one re-merge before explicit conflict', 'owned-entry or receipt conflict leaves concurrent settings intact')
 row('deliver.py', 'writer:prepare|writer:finish', 'delivery install or uninstall settings transaction', 'receipt prepared before rename and finalized under lock', 'one re-merge before explicit conflict', 'concurrent managed edits refuse rollback without replacing settings')
 
+row('deliver.py', '.lock|writer:stop_hook', 'known session requests Stop', 'clean stop resets counter; kernel unlocks on exit', 'two blocks per session per ten minutes; five second hook deadline', 'errors and exhausted loop budget allow Stop')
+row('routing.py', '.wait|.wait.lock|state/cursors', 'Stop inspects waiter evidence', 'read-only; no cursor or lease renewal', 'waiter-refreshed cursor within deliver.waiter_fresh_seconds or held kernel lock', 'missing waiter blocks Stop within the loop budget')
+
+row('deliver.py', 'writer:prepare_recovery', 'retry an install with durable receipt and unchanged original settings', 'complete owned settings transform under the sibling lock', 'same original receipt; one re-merge on unrelated edit', 'receipt or managed-entry conflicts fail without overwriting edits')
 # Relay state is local to one durable site; it never carries reader cursors.
 row('relay.py', 'relay|state.sqlite3', 'configured sink or relay runner opens the local outbox',
     'rows marked sent on server acceptance; checkpoint advances only after durable apply/queue',

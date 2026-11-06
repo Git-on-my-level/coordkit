@@ -40,5 +40,15 @@ def load(path=None):
     agents, roles = addressed.get('agents', {}), addressed.get('roles', {})
     if not isinstance(agents, dict) or not isinstance(roles, dict):
         raise ManifestError('invalid_hook_roster')
-    return SimpleNamespace(file=file, mode='live', paths=SimpleNamespace(root=root, bus_log=bus),
-                           addressed=SimpleNamespace(agents=agents, roles=roles))
+    deliver = raw.get('deliver', {})
+    requires_waiter = deliver.get('stop_requires_waiter', True)
+    fresh = deliver.get('waiter_fresh_seconds', 180)
+    lanes = raw.get('lanes', [])
+    if (type(requires_waiter) is not bool or type(fresh) is not int or fresh < 0
+            or any('stop_requires_waiter' in lane and type(lane['stop_requires_waiter']) is not bool for lane in lanes)):
+        raise ManifestError('invalid_hook_deliver')
+    return SimpleNamespace(deliver=SimpleNamespace(stop_requires_waiter=requires_waiter, waiter_fresh_seconds=fresh),
+                           agents=[SimpleNamespace(**a) for a in raw.get('agents', [])],
+                           lanes=[SimpleNamespace(**lane) for lane in lanes],
+                           file=file, mode='live', paths=SimpleNamespace(root=root, bus_log=bus),
+                           addressed=SimpleNamespace(agents=agents, roles=roles, rearm_grace=addressed.get('rearm_grace', '3m')))

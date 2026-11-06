@@ -15,7 +15,7 @@ from coordkit.state import write_json, read_json
 from tests.test_addressed import AddressedCase
 
 
-class DeliveryTests(AddressedCase):
+class DeliveryCase(AddressedCase):
     def setUp(self):
         super().setUp()
         self.payload = {'hook_event_name': 'PostToolUse', 'session_id': 's1'}
@@ -36,6 +36,8 @@ class DeliveryTests(AddressedCase):
         self.assertEqual(deliver.run_hook(self.manifest, json.dumps(payload or self.payload), out), 0)
         return out.getvalue()
 
+
+class DeliveryTests(DeliveryCase):
     def test_actionable_names_roles_owners_and_broadcast_only(self):
         for kind in ('ask', 'ruling', 'handoff', 'blocker'):
             self.incumbent_row(kind, 'x', 'lead-a', kind)
@@ -215,7 +217,7 @@ class DeliveryTests(AddressedCase):
         self.assertEqual(deliver.main(['install', '--settings', str(target)], self.manifest), 0)
         record = read_json(deliver.receipt_path(self.manifest, target))
         after = read_json(target)
-        self.assertEqual(sum((hooks.entries(after)-hooks.entries(before)).values()), 2)
+        self.assertEqual(sum((hooks.entries(after)-hooks.entries(before)).values()), 3)
         self.assertEqual(record['before'], before)
         self.assertEqual(record['after'], after)
         deliver.install(self.manifest, target)  # owned installation is idempotent

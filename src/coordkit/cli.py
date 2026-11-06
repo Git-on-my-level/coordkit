@@ -24,6 +24,14 @@ def question_hook(argv):
 
 def main(argv=None):
     raw = sys.argv[1:] if argv is None else argv
+    if 'deliver' in raw and '--stop-hook' in raw:
+        try:
+            from .hook_runtime import hook_deadline
+            with hook_deadline():
+                from .deliver import bootstrap
+                return bootstrap(raw)
+        except BaseException:
+            return 0
     if 'deliver' in raw and '--hook' in raw:
         from .deliver import bootstrap
         return bootstrap(raw)

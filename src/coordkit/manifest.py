@@ -60,6 +60,12 @@ class Bus:
 
 
 @dataclass
+class Deliver:
+    stop_requires_waiter: bool = True
+    waiter_fresh_seconds: int = 180
+
+
+@dataclass
 class Agent:
     label: str
     actor: str
@@ -74,6 +80,8 @@ class UsageLane:
     effort: str
     session_id: str = ""   # optional: pins the lane's current Claude Code session
     pane: str = ""
+    resume: str = ""      # only "headless" permits Claude Code resume
+    stop_requires_waiter: bool | None = None  # absent inherits [deliver]
 
 
 @dataclass
@@ -293,8 +301,8 @@ def _table(cls, data, section, required=()):
     # Dataclass annotations are postponed; these schema field names carry uniform types.
     lists = {"flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders"}
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects"}
-    booleans = {"live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
-    integers = {"heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
+    booleans = {"stop_requires_waiter", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
+    integers = {"waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
     numbers = {"wake_debounce_minutes", "idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
     for key, value in data.items():
         ok = (isinstance(value, list) and all(type(x) is (int if key == "ci" else str) for x in value)) if key in lists else (
@@ -333,6 +341,7 @@ class Manifest:
     anx: Anx
     paths: Paths
     bus: Bus
+    deliver: Deliver
     agents: list[Agent]
     agentctl: Agentctl
     lane: Lane
@@ -434,7 +443,7 @@ def load(path: str | Path | None = None) -> Manifest:
         question_data["delivery_cli"] = question_data.get("delivery_cli") or legacy_delivery_cli
         raw["questions"] = question_data
     config = {name: _table(cls, raw.get(name, {}), name) for name, cls in
-              (("bus", Bus), ("agentctl", Agentctl), ("lane", Lane), ("loop", Loop), ("reconciler", Reconciler),
+              (("deliver", Deliver), ("bus", Bus), ("agentctl", Agentctl), ("lane", Lane), ("loop", Loop), ("reconciler", Reconciler),
                ("wait", Wait), ("merge", Merge), ("launchd", Launchd), ("rc_host", RcHost), ("shadow", Shadow), ("limits", Limits), ("escalation", Escalation), ("obligations", Obligations), ("addressed", Addressed), ("review", Review), ("questions", Questions), ("mcp", Mcp), ("services", Services))}
     if config["services"].manager not in ("", "launchd", "systemd"):
         raise ManifestError("invalid_value: services.manager")
@@ -539,6 +548,8 @@ def load(path: str | Path | None = None) -> Manifest:
         if "pane" in row and (
                 not lane.pane or any(ch.isspace() for ch in lane.pane)):
             raise ManifestError("invalid_value: lanes.pane must be nonempty without whitespace")
+        if lane.resume not in ("", "headless"):
+            raise ManifestError("invalid_value: lanes.resume must be headless or absent")
         lane.config_dir = str((file.parent / Path(lane.config_dir).expanduser()).resolve())
         lane.cwd = str((file.parent / Path(lane.cwd).expanduser()).resolve())
         if lane.session_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", lane.session_id):

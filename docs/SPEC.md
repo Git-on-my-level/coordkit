@@ -47,7 +47,8 @@ Optional configuration groups:
 | `launchd` | macOS lifecycle labels, absolute Python and PATH. PATH must include expanded `~/.local/bin`; generated jobs do not inherit an interactive shell. |
 | `rc_host` | Optional internal deployment integration; disabled by default. |
 | `shadow` | Read-only source paths and observation freshness; a 24-hour clean window is required for eligibility. |
-| `lanes` | Optional per-session usage metadata; shared account/cwd pairs remain ambiguous. |
+| `deliver` | `stop_requires_waiter=true` requires a held wait lock or a waiter-refreshed cursor within `waiter_fresh_seconds=180` at Claude Stop; unread actionable rows always block within the loop budget. |
+| `lanes` | Optional per-session usage metadata; `session_id` pins a Claude session. Only `resume="headless"` permits Claude resume; absent/empty never resumes. A lane can override `stop_requires_waiter`; absent inherits `[deliver]`. Shared account/cwd pairs remain ambiguous. |
 | `mcp` | Connector identity, archive boundaries, optional train metadata, and a manifest registry; details below. |
 
 `mode = "live"` is the default top-level setting. `mode = "shadow"` blocks live write verbs before their external-tool calls. Shadow sweeps can write local dedupe state and relay output; MCP serving requires live mode.

@@ -58,7 +58,7 @@ def _snapshot(path):
     return data, hashlib.sha256(data).digest() if data is not None else None
 
 
-def update_json(path, transform, *, before_replace=None, after_replace=None):
+def update_json(path, transform, *, before_replace=None, after_replace=None, require_exists=False):
     """Optimistic settings transaction, with one re-merge and a shared sibling lock.
 
     Compute from a byte-hashed snapshot. Under the exclusive sibling lock, stage
@@ -71,6 +71,8 @@ def update_json(path, transform, *, before_replace=None, after_replace=None):
     from .errors import ManifestError
     def read():
         data, digest = _snapshot(path)
+        if require_exists and data is None:
+            raise FileNotFoundError(path)
         return (json.loads(data) if data is not None else {}), digest
     current, digest = read()
     updated = transform(copy.deepcopy(current))

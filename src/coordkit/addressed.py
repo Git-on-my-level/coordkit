@@ -132,13 +132,16 @@ def incumbent_listener(args):
 PROBE = incumbent_waiters  # tests replace this
 
 
-def listening(manifest, name, at=None, probe=None, rows=None):
+def listening(manifest, name, at=None, probe=None, rows=None, *, waiter_only=False):
     """(live, evidence). Busy sessions can hear hooks without an armed waiter."""
     at = time.time() if at is None else at
     from .wake import retired
     retirement = retired(manifest, name)
     if retirement:
         return False, 'retired; redirect to ' + retirement.get('owner', 'lead')
+    if waiter_only:
+        from .routing import waiter_evidence
+        return waiter_evidence(manifest, name, at)
     if is_human(manifest, name):
         return True, 'human recipient'
     lease = read_lease(manifest, name)

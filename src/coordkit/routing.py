@@ -49,7 +49,35 @@ def locked(path, blocking=True):
 
 
 
+def waiter_evidence(manifest, name, at=None):
+    """Bounded evidence only: kernel wait lock or a waiter-refreshed wait cursor."""
+    import time
+    from .state import name_key
+    at = time.time() if at is None else at
+    directory = manifest.paths.bus_log.parent/'state/cursors'
+    lock = directory/(name_key(name) + '.wait.lock')
+    if lock.exists():
+        with lock.open('a') as stream:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True, 'armed bus wait lock'
+    for base in {directory, manifest.paths.root/'state/cursors'}:
+        cursor = base/(name_key(name) + '.wait')
+        try:
+            age = at - cursor.stat().st_mtime
+            with cursor.open() as stream:
+                position = stream.read(64).strip()
+            if position.isdecimal() and 0 <= age <= manifest.deliver.waiter_fresh_seconds:
+                return True, 'fresh bus wait cursor'
+        except FileNotFoundError:
+            pass
+    return False, 'no armed wait lock or fresh wait cursor'
+
+
 def listening(manifest, name, *args, **kwargs):
     """Compatibility lookup; ordinary hook delivery never imports this engine."""
+    if kwargs.pop('waiter_only', False):
+        return waiter_evidence(manifest, name, *args, **kwargs)
     from .addressed import listening as observe
     return observe(manifest, name, *args, **kwargs)

@@ -52,10 +52,9 @@ class HookConcurrencyTests(FakeCase):
         record = read_json(self.receipt)
         record['pending_after'] = copy.deepcopy(record['after'])
         with patch('coordkit.paths.install_root', return_value=self.root/'new'):
-            command = deliver.command(self.manifest)
-        for groups in record['pending_after']['hooks'].values():
-            for group in groups:
-                group['hooks'][0]['command'] = command
+            for event, groups in record['pending_after']['hooks'].items():
+                for group in groups:
+                    group['hooks'][0]['command'] = deliver.command(self.manifest, event)
         write_json(self.receipt, record)
         actual_reverse = hooks.reverse
         def race(*args):
@@ -100,7 +99,7 @@ class HookConcurrencyTests(FakeCase):
                 fired = True
                 current = read_json(self.target)
                 current['theme'] = 'uninstall edit'
-                current['hooks']['Stop'] = [{'hooks': [{'type': 'command', 'command': 'user-hook'}]}]
+                current['hooks'].setdefault('Stop', []).append({'hooks': [{'type': 'command', 'command': 'user-hook'}]})
                 write_json(self.target, current)
             return result
         with patch.object(hooks, 'reverse', side_effect=race) as reverse:
@@ -108,7 +107,7 @@ class HookConcurrencyTests(FakeCase):
         self.assertEqual(reverse.call_count, 2)
         self.assertTrue(read_json(self.receipt)['restored'])
         self.assertEqual(read_json(self.target)['theme'], 'uninstall edit')
-        self.assertEqual(read_json(self.target)['hooks']['Stop'][0]['hooks'][0]['command'], 'user-hook')
+        self.assertIn('user-hook', [h.get('command') for g in read_json(self.target)['hooks']['Stop'] for h in g['hooks']])
 
     def test_uninstall_concurrent_owned_edit_aborts_without_marking_restored(self):
         actual_reverse = hooks.reverse
