@@ -1,0 +1,749 @@
+"""Append-only typed coordination bus, extracted from the proven protocol."""
+import hashlib
+import tempfile
+from .state import name_key, read_json
+import argparse, datetime as dt, fcntl, json, os, pathlib, re, secrets, subprocess, sys, collections, time
+from .actl import AgentctlClient
+from .manifest import ManifestError
+from .process import ToolError, parse_ts
+from .mirror import mirror
+
+CONFIG = None
+BUS = STATE = None
+IDLE_HOURS = 3
+LIVE_BUS_MINUTES = 120
+TEXT_CAP = 400
+NO_MIRROR = False
+
+
+def configure(manifest, no_mirror=False):
+    global CONFIG, BUS, STATE, IDLE_HOURS, TEXT_CAP, NO_MIRROR, _EXECUTIONS
+    CONFIG = manifest
+    BUS, STATE = manifest.paths.bus_log, manifest.paths.root / 'state'
+    IDLE_HOURS, TEXT_CAP = manifest.bus.idle_hours, manifest.bus.text_cap
+    NO_MIRROR, _EXECUTIONS = no_mirror, None
+
+
+FYI_REMIND_HOURS = 6  # an fyi identical to the sender's last fyi to that recipient on that topic is held this long
+KINDS = ['msg', 'ask', 'answer', 'ruling', 'handoff', 'fyi', 'lesson', 'debt', 'fail', 'signal', 'ack',
+         'apply_request', 'hold', 'unhold', 'state', 'blocker', 'decision']
+STATES = ('RUNNING', 'WAITING', 'DONE', 'FAILED', 'IDLE')
+SUBJECT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:#/@+-]{0,99}$')
+BLOCKER_CLOSERS = ('decision', 'answer')  # a later row of these kinds with --re <blocker id> closes it
+# Structured signals. Waiters that trigger writes match
+# the `signal` field of kind=signal posts only.
+SIGNAL_NAME = re.compile(r'^[A-Z][A-Z0-9_]{1,63}$')
+WAKE_KINDS = 'ask,handoff,ruling,fail,apply_request,blocker,decision'
+def now(): return dt.datetime.now(dt.timezone.utc)
+def since(s):
+    if not s: return None
+    m = re.fullmatch(r'(\d+)([mhd])', s)
+    if not m:
+        raise ManifestError(f'invalid_since: {s}')
+    return now() - dt.timedelta(**{{'m': 'minutes', 'h': 'hours', 'd': 'days'}[m.group(2)]: int(m.group(1))})
+REQUIRED = ('ts', 'frm', 'to', 'kind')
+EPOCH_TS = '1970-01-01T00:00:00+00:00'
+_LEGACY = {'id': 0, 'invalid': 0, 'reported': False}
+def normalize(index, row):
+    """The single read boundary for rows another writer may have shaped differently (legacy rows may lack IDs). Positions never move, because line-count cursors index the row list. A row keeps its
+    content and only missing or invalid required fields are filled: `id` -> `legacy-L<line>`, `ts` -> the epoch,
+    `frm`/`to`/`kind` -> ''. Content is never dropped, so a malformed hold still vetoes a merge (fail closed).
+    A line that is not an object becomes an inert `legacy_invalid` row. In memory only; the log is never rewritten."""
+    if not isinstance(row, dict):
+        _LEGACY['invalid'] += 1
+        return {'id': f'legacy-L{index}', 'ts': EPOCH_TS, 'frm': '', 'to': '', 'kind': 'legacy_invalid', 'topic': '',
+                'text': '', 'legacy': 'invalid'}
+    fixed = {f: (EPOCH_TS if f == 'ts' else '') for f in REQUIRED if not isinstance(row.get(f), str)}
+    if 'ts' not in fixed:
+        try: parse_ts(row['ts'])
+        except (ValueError, TypeError): fixed['ts'] = EPOCH_TS
+    if not isinstance(row.get('id'), str) or not row['id']:
+        fixed['id'] = f'legacy-L{index}'
+    if not fixed:
+        return row
+    _LEGACY['id' if set(fixed) == {'id'} else 'invalid'] += 1
+    return dict(row, **fixed, legacy=','.join(sorted(fixed)))
+def parse_lines(lines, start=0):
+    """[(index, normalized row)] for lines[start:]."""
+    out = []
+    for i in range(start, len(lines)):
+        try: out.append((i, normalize(i, json.loads(lines[i]))))
+        except ValueError as exc: raise ValueError(f'bus_invalid_json: {exc}') from exc
+    if (_LEGACY['id'] or _LEGACY['invalid']) and not _LEGACY['reported']:
+        _LEGACY['reported'] = True
+        print(f"BUS_LEGACY_ROWS synthesized_id={_LEGACY['id']} invalid={_LEGACY['invalid']} (normalized in memory)",
+              file=sys.stderr)
+    return out
+def adopted_row(row, since):
+    """True when a row counts toward obligations: coordkit wrote it, or another writer (an incumbent still
+    posting) wrote it at or after the adoption baseline. since=None (never adopted) counts every row."""
+    return (since is None or row.get('origin') == 'coordkit' or 'text_hash' in row
+            or parse_ts(row['ts']).timestamp() >= since)
+def read(cut=None):
+    return read_path(BUS, cut)
+def read_path(path, cut=None, *, complete=False):
+    """Read a manifest-owned log without changing process-global CLI configuration."""
+    if not path.exists(): return []
+    if complete:
+        data = path.read_bytes()
+        if data and not data.endswith(b'\n'):
+            data = data[:data.rfind(b'\n') + 1]
+        text = data.decode('utf-8')
+    else:
+        text = path.read_text()
+    rows = [r for _, r in parse_lines(text.splitlines())]
+    return [r for r in rows if parse_ts(r['ts']) >= cut] if cut else rows
+def read_from(start):
+    """(line count, [(index, row)...]) for rows at or after line `start`; the log is append-only, so a line count
+    is a stable per-reader cursor."""
+    if not BUS.exists(): return 0, []
+    lines = BUS.read_text().splitlines()
+    return len(lines), parse_lines(lines, start)
+def cursor_path(lane, kind): return STATE / 'cursors' / f"{name_key(lane)}.{kind}"
+def get_cursor(lane, kind, default):
+    try: return int(cursor_path(lane, kind).read_text().strip())
+    except FileNotFoundError: return default
+def set_cursor(lane, kind, value):
+    path = cursor_path(lane, kind); path.parent.mkdir(parents=True, exist_ok=True)
+    replace_text(path, f'{value}\n')
+def replace_text(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as stream:
+        tmp = pathlib.Path(stream.name)
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    tmp.replace(path)
+
+
+class ExactParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **dict(kwargs, allow_abbrev=False))
+
+
+def for_lane(r, lane):
+    # Every blocker also reaches the lead, whoever it is addressed to.
+    return (lane == 'all' or r['to'] in (lane, 'all') or r.get('owner') == lane
+            or (lane == 'lead' and r.get('kind') == 'blocker'))
+def prs_tag(r):
+    tags = f" prs={','.join('#' + p for p in r['prs'])}" if r.get('prs') else ''
+    for key in ('state', 'subject', 'needs', 'evidence', 'rollback'):
+        if r.get(key): tags += f' {key}={r[key]}'
+    if r.get('irreversible'): tags += ' IRREVERSIBLE'
+    if r.get('re') and r.get('kind') == 'decision': tags += f" re={r['re']}"
+    return tags
+def brief(r):
+    tag = f" id={r['id']}" if r.get('id') else ''
+    return (f"{r['ts'][11:16]}Z {r['frm']} {r['kind']}/{r['topic']}{tag}{prs_tag(r)} "
+            f"{' '.join((r.get('text') or '').split())[:120]}")
+def append(recs, project=True):
+    """Append rows durably, then (unless project=False) run the ANX projection, which may exit 1.
+    Callers that must act after the append whatever ANX does (addressed escalation) pass
+    project=False and call project() last."""
+    CONFIG.writable()
+    BUS.parent.mkdir(parents=True, exist_ok=True)
+    with open(BUS, 'a') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        for rec in recs:
+            f.write(json.dumps(rec) + '\n')
+        f.flush()
+        os.fsync(f.fileno())
+        fcntl.flock(f, fcntl.LOCK_UN)
+    if project:
+        project_pending()
+
+
+def project_pending():
+    if NO_MIRROR or not CONFIG.bus.mirror:
+        return
+    # Serialize append + projection with the command lock. Never skip a row that failed for a transient reason; a definite card absence is dead-lettered.
+    cursor = STATE / 'mirror.cursor'
+    start = int(cursor.read_text()) if cursor.exists() else 0
+    all_rows = read()
+    for index in range(start, len(all_rows)):
+        row = all_rows[index]
+        # Project only rows coordkit wrote (origin, or the text_hash every coordkit post carries). On a shared
+        # bus (an incumbent tool still writing during a transition) other writers' rows are theirs: skipping them keeps a historic or
+        # foreign row from blocking coordkit's own posts.
+        ours = row.get('origin') == 'coordkit' or 'text_hash' in row
+        from . import addressed  # pickup wakes/alerts are bus-only, never cards
+        if ours and not addressed.is_escalation(row) and (row['kind'] in CONFIG.bus.mirror_kinds or row['kind'] == 'ack'):
+            try:
+                mirror(CONFIG, row, all_rows[:index + 1])
+            except (ToolError, ManifestError, OSError, ValueError) as exc:
+                from . import addressed
+                missing = str(getattr(exc, 'detail', '')).split(':', 2)
+                handle = missing[1] if len(missing) > 1 and missing[0] == 'card' else ''
+                if getattr(exc, 'category', '') == 'card_unresolved' and (handle in addressed.known_names(CONFIG)
+                        or (row['kind'] == 'ack' and 'not_found' in str(exc))):
+                    # An ack only notes the ruling's card; a missing subject card loses nothing (the ack is on the bus).
+                    # A registered bus name is not a card: such rows (acks and asks between agents, coordkit's own
+                    # internal asks) live on the bus only. Skip without a dead letter, or the dead-letter report
+                    # (itself an ask to that name) would feed itself every reconcile.
+                    why = 'is a bus name' if handle in addressed.known_names(CONFIG) else 'does not exist (ack: bus only)'
+                    print(f"MIRROR_SKIPPED {row['kind']} {row['id']}: card:{handle} {why}", file=sys.stderr)
+                elif getattr(exc, 'category', '') == 'card_unresolved' and 'not_found' in str(exc):
+                    # A definite absence: dead-letter this one row
+                    # with its reason and keep projecting. Outages still stop and retry.
+                    STATE.mkdir(parents=True, exist_ok=True)
+                    with open(STATE / 'mirror-dead-letters.jsonl', 'a') as dead:
+                        dead.write(json.dumps({'at': now().isoformat(timespec='seconds'), 'id': row['id'],
+                                               'kind': row['kind'], 'reason': str(exc)}) + '\n')
+                    print(f"MIRROR_DEAD_LETTER {row['kind']} {row['id']} {exc}", file=sys.stderr)
+                else:
+                    print(f"MIRROR_FAILED {row['kind']} {row['id']} {exc}", file=sys.stderr)
+                    raise SystemExit(1) from exc
+        STATE.mkdir(parents=True, exist_ok=True)
+        tmp = cursor.with_suffix('.tmp')
+        tmp.write_text(str(index + 1) + '\n')
+        tmp.replace(cursor)
+
+
+_EXECUTIONS = None
+LAST_POST = None  # (row, addressed outcome) of the last post in this process, for `coordkit send`
+
+def aliases():
+    result = dict(CONFIG.bus.aliases)
+    for path in (BUS.parent/'aliases.json', BUS.parent/'state'/'aliases.json'):
+        try:
+            doc = read_json(path, {})
+        except (OSError, ValueError):
+            continue
+        values = doc.get('aliases', doc) if isinstance(doc, dict) else {}
+        if isinstance(values, dict):
+            result.update({k:v for k,v in values.items() if isinstance(v, str) and v})
+    return result
+
+
+def resolve(name, book=None):
+    book, seen = (aliases() if book is None else book), set()
+    while name in book and name not in seen:
+        seen.add(name); name = book[name]
+    if name in seen:
+        raise ValueError('alias cycle: '+name)
+    return name
+
+def known_recipients(rows):
+    known = {'lead', 'all'} | {r['frm'] for r in rows} | set(aliases().values())
+    known |= {a.label for a in CONFIG.agents}
+    known |= {label for e in agentctl_recent() if e.get('state') in ('running', 'starting')
+              for label in e.get('labels') or []}
+    return known
+
+def agentctl_recent():
+    global _EXECUTIONS
+    if not CONFIG.bus.live_check:
+        return []
+    if _EXECUTIONS is None:
+        executions = AgentctlClient(CONFIG)
+        # Liveness only needs recent history: ended executions older than the bus's live window
+        # say nothing that 'no live execution' does not.
+        since = (now() - dt.timedelta(hours=6)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        by_id = {e['id']: e for e in [*executions.recent(since=since), *executions.recent(nonterminal=True)]}
+        _EXECUTIONS = list(by_id.values())
+    return _EXECUTIONS
+def label_matches(label, to):
+    """A recipient owns its exact label and labels it prefixes with '-' or '.' ('worker-a' owns worker-a-task)."""
+    return label == to or label.startswith((to + '-', to + '.'))
+def launched_at(to):
+    """Newest agentctl created_at for executions labelled `to`, or None."""
+    times = [parse_ts(e['created_at']) for e in agentctl_recent()
+             if any(label_matches(l, to) for l in e.get('labels') or []) and e.get('created_at')]
+    return max(times, default=None)
+def open_rulings(rows):
+    """Rulings that name an owner and have no ack from that owner yet."""
+    acked = {r.get('re') for r in rows if r.get('kind') == 'ack'}
+    return [r for r in rows if r.get('kind') == 'ruling' and r.get('owner') and r.get('id') not in acked]
+def open_blockers(rows):
+    """Blockers with no later decision/answer that names them with --re."""
+    closed = {r.get('re') for r in rows if r.get('kind') in BLOCKER_CLOSERS and r.get('re')
+              and not r.get('auto_received')}
+    return [r for r in rows if r.get('kind') == 'blocker' and r.get('id') not in closed]
+def latest_states(rows):
+    """{(lane, subject): newest state row}."""
+    out = {}
+    for r in rows:
+        if r.get('kind') == 'state' and r.get('subject'):
+            out[(r['frm'], r['subject'])] = r
+    return out
+def lane_liveness(to, rows):
+    """Agentctl labels are authoritative; recent bus activity covers native sessions."""
+    if not CONFIG.bus.live_check:
+        return None, 'live check disabled'
+    executions = agentctl_recent()
+    mine = [e for e in executions if any(label_matches(label, to) for label in e.get('labels') or [])]
+    if any(e.get('state') in ('running', 'starting') for e in mine):
+        return True, 'running agentctl execution'
+    last_post = max((parse_ts(r['ts']) for r in rows if r['frm'] == to), default=None)
+    if mine:
+        ended = max(parse_ts(e.get('updated_at', '1970-01-01T00:00:00Z')) for e in mine)
+        if last_post and last_post > ended:
+            return True, 'posted after execution ended'
+        return False, f"execution is {mine[0].get('state', 'not running')}"
+    if last_post and last_post >= now() - dt.timedelta(minutes=LIVE_BUS_MINUTES):
+        return True, 'recent bus post'
+    return False, 'no live execution or recent bus post'
+def age_minutes(r): return int((now() - parse_ts(r['ts'])).total_seconds() // 60)
+def line(r, full=False):
+    text = r.get('text') or ''
+    if not full:
+        return f"{r.get('id', '-')} {r.get('kind', 'msg')} {r['frm']}→{r['to']}: {' '.join(text.split())[:200]}"
+    spill = re.search(r' … \[full: (.+)\]$', text)
+    if spill:
+        path = pathlib.Path(spill.group(1))
+        if not path.is_absolute():
+            path = BUS.parent/path
+        try:
+            text = path.read_text().removesuffix('\n')
+        except (OSError, UnicodeError):
+            pass
+    return f"{r.get('id', '-')} {r['ts']} {r['frm']}→{r['to']} [{r.get('kind', 'msg')}/{r.get('topic', 'general')}] {text}"
+
+def _main(argv):
+    p = ExactParser(); s = p.add_subparsers(dest='cmd', required=True)
+    a = s.add_parser('post'); a.add_argument('--from', dest='frm', required=True); a.add_argument('--to', required=True)
+    a.add_argument('--topic', default='general'); a.add_argument('--kind', default='msg', choices=[k for k in KINDS if k != 'ack'])
+    a.add_argument('--owner', help='kind=ruling: the ONE lane that must act on it and ack it (mandatory); '
+                                   'kind=blocker: the ONE lane that can unblock it (mandatory)')
+    a.add_argument('--state', help=f'kind=state: one of {"/".join(STATES)}')
+    a.add_argument('--subject', help='kind=state (mandatory), decision, handoff: the train/run/card/PR it is about')
+    a.add_argument('--needs', help='kind=blocker: what would unblock it, one line (mandatory)')
+    a.add_argument('--rollback', help='kind=decision: how to undo it (or pass --irreversible)')
+    a.add_argument('--irreversible', action='store_true', help='kind=decision: there is no rollback')
+    a.add_argument('--evidence', help='kind=handoff: the SHA, run id or path that shows it is done')
+    a.add_argument('--re', help='id of the ask/ruling this replies to')
+    a.add_argument('--force', action='store_true', help='post to a recipient the bus has never seen')
+    a.add_argument('--ref', help=f'file with the full detail (post text is capped at {TEXT_CAP} chars)')
+    a.add_argument('--signal', help='kind=signal: the event name (UPPER_SNAKE), the only thing signal waiters match')
+    a.add_argument('--pr', help='kind=hold/unhold: the PR number(s) it covers, comma-separated (e.g. 123,124)')
+    a.add_argument('--id', help='stable publication id for retry recovery')
+    a.add_argument('--priority', choices=['urgent', 'normal'], help='urgent: 5-minute ack deadline and a page if nobody listens')
+    a.add_argument('text')
+    k = s.add_parser('ack'); k.add_argument('id'); k.add_argument('--from', dest='frm', required=True)
+    k.add_argument('--force', action='store_true', help='ack a ruling you do not own (recorded as such)')
+    k.add_argument('--owner', help='handoff/ask only: reassign the obligation to this owner (clock restarts)')
+    k.add_argument('note', nargs='?', default='')
+    r = s.add_parser('open-rulings'); r.add_argument('--min-age', type=int, default=0, help='minutes')
+    r.add_argument('--full', action='store_true', help='complete message bodies')
+    r.add_argument('--new-only', metavar='SEEN_FILE', help='print only ids not in SEEN_FILE, then record them there')
+    r.add_argument('--json', action='store_true')
+    b = s.add_parser('inbox'); b.add_argument('lane'); b.add_argument('--since')
+    b.add_argument('--full', action='store_true', help='complete message bodies')
+    b.add_argument('--unread', action='store_true', help="only messages since this lane's last --unread read (advances its cursor)")
+    b.add_argument('--brief', action='store_true', help='one short line per message (time from kind/topic first 120 chars)')
+    w = s.add_parser('wait', help='block until a message of an actionable kind reaches --to (fyi never wakes anyone)')
+    w.add_argument('--full', action='store_true', help='complete message bodies')
+    w.add_argument('--to', help='lane to wait for (required unless --signal)'); w.add_argument('--kinds', default=WAKE_KINDS)
+    w.add_argument('--signal', help='wait for a kind=signal post with this signal name (text is never matched)')
+    w.add_argument('--from', dest='frm', help='with --signal/--subject: only from this poster')
+    w.add_argument('--since', help='with --signal/--subject: also accept posts in this window (e.g. 30m); default from now')
+    w.add_argument('--subject', help='wait for a kind=state post about this subject (text is never matched)')
+    w.add_argument('--state', help='with --subject: comma-separated states to accept (default DONE,FAILED)')
+    w.add_argument('--timeout', type=float, default=240, help='minutes'); w.add_argument('--poll', type=float, default=15, help='seconds')
+    st = s.add_parser('state', help='latest kind=state row per (lane, subject)')
+    st.add_argument('--full', action='store_true', help='complete message bodies')
+    st.add_argument('--lane'); st.add_argument('--subject'); st.add_argument('--json', action='store_true')
+    ob = s.add_parser('open-blockers', help='blockers that no decision/answer --re has closed, with age')
+    ob.add_argument('--full', action='store_true', help='complete message bodies')
+    ob.add_argument('--owner'); ob.add_argument('--json', action='store_true')
+    c = s.add_parser('tail'); c.add_argument('-n', type=int, default=30)
+    c.add_argument('--full', action='store_true', help='complete message bodies')
+    d = s.add_parser('stats'); d.add_argument('--since')
+    h = s.add_parser('harvest', help='lesson/debt posts not yet harvested into the KB; --mark advances the cursor')
+    h.add_argument('--full', action='store_true', help='complete message bodies')
+    h.add_argument('--mark', action='store_true')
+    o = p.parse_args(argv)
+    if ((o.cmd == 'wait' and o.to and not o.signal and not o.subject)
+            or (o.cmd == 'inbox' and o.unread) or (o.cmd == 'harvest' and o.mark)
+            or (o.cmd == 'open-rulings' and o.new_only)):
+        CONFIG.writable()
+        if o.cmd == 'open-rulings':
+            lock_path = pathlib.Path(o.new_only).with_name(pathlib.Path(o.new_only).name+'.lock')
+        elif o.cmd == 'harvest':
+            lock_path = STATE / 'harvest.lock'
+        else:
+            who = o.to if o.cmd == 'wait' else o.lane
+            lock_path = cursor_path(who, o.cmd).with_suffix('.'+o.cmd+'.lock')
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return dispatch(o)
+    return dispatch(o)
+
+
+def dispatch(o):
+    if o.cmd == 'post':
+        # Validate the recipient so work does not silently reach an unknown lane.
+        # Known but silent for IDLE_HOURS -> post it AND copy the lead so it isn't lost.
+        rows = read()
+        if resolve(o.to) != o.to:
+            print(f"note: '{o.to}' is an alias of '{resolve(o.to)}' (manifest aliases); posting to '{resolve(o.to)}'",
+                  file=sys.stderr)
+            o.to = resolve(o.to)
+        if o.owner and resolve(o.owner) != o.owner:
+            o.owner = resolve(o.owner)
+        if o.id:
+            old = next((r for r in rows if r.get('id') == o.id), None)
+            payload = {k: getattr(o,k) for k in ('frm','to','topic','kind','owner','state','subject','needs',
+                                                  'rollback','irreversible','evidence','re','signal')}
+            payload['text_hash'] = hashlib.sha256(o.text.encode()).hexdigest()
+            payload['prs'] = list(dict.fromkeys(o.pr.replace(' ', ',').split(','))) if o.pr else []
+            payload['ref'] = str(pathlib.Path(o.ref).resolve()) if o.ref else None
+            signature = hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
+            if old and old.get('publication_hash'):
+                if old['publication_hash'] != signature:
+                    raise ManifestError('publication_id_conflict: '+o.id)
+                append([])
+                print(f'already posted id={o.id}')
+                return
+            if old:
+                actual = {k: old.get(k) for k in payload}
+                actual['irreversible'] = bool(old.get('irreversible'))
+                actual['prs'] = old.get('prs', [])
+                actual['text_hash'] = old.get('text_hash', hashlib.sha256(old.get('text','').encode()).hexdigest())
+                # Auto-generated spill paths are transport detail, not publication identity.
+                if not o.ref and old.get('text_hash') and len(o.text) > TEXT_CAP:
+                    actual['ref'] = None
+                if actual != payload:
+                    raise ManifestError('publication_id_conflict: '+o.id)
+                append([])
+                print(f'already posted id={o.id}')
+                return
+        # Addressed bus (brief 8.2/8.3): a registered name or role is checked against waiter leases, never
+        # agentctl, and is never silently copied to the lead; deafness escalates to its declared fallback.
+        from . import addressed
+        target = addressed.target_kind(CONFIG, o.to)
+        role = None
+        if target == 'role':
+            role, member = o.to, addressed.first_live(CONFIG, o.to)
+            if member:
+                o.to = member
+        if target:
+            known = ({'lead', 'all'} | {r['frm'] for r in rows} | set(aliases().values())
+                     | {a.label for a in CONFIG.agents} | addressed.known_names(CONFIG))
+        else:
+            known = known_recipients(rows)
+        if o.to not in known and not o.force:
+            print(f"refused: unknown recipient '{o.to}'. Post to 'lead' (or pass --force). Known recent: "
+                  + ', '.join(sorted({r['frm'] for r in rows[-200:]})), file=sys.stderr)
+            sys.exit(2)
+        # A ruling names exactly one owner, who must acknowledge it; shared ownership loses accountability.
+        if o.kind == 'blocker':
+            # A blocker names the one lane that can clear it and what it needs, like a ruling's owner.
+            if not o.owner or not re.fullmatch(r'[A-Za-z0-9_.-]+', o.owner) or o.owner == 'all':
+                print("refused: a blocker needs exactly one --owner (the lane that can unblock it; 'lead' is fine)",
+                      file=sys.stderr); sys.exit(2)
+            if not (o.needs or '').strip():
+                print('refused: a blocker needs --needs "<what would unblock it>"', file=sys.stderr); sys.exit(2)
+            if o.owner not in known and not o.force:
+                print(f"refused: unknown blocker owner '{o.owner}' (or pass --force)", file=sys.stderr); sys.exit(2)
+        elif o.needs:
+            print('refused: --needs is only for --kind blocker', file=sys.stderr); sys.exit(2)
+        if o.kind == 'state':
+            if o.state not in STATES:
+                print(f"refused: --kind state needs --state {'|'.join(STATES)}", file=sys.stderr); sys.exit(2)
+            if not o.subject:
+                print('refused: --kind state needs --subject (the train/run/card it is about)', file=sys.stderr)
+                sys.exit(2)
+        elif o.state:
+            print('refused: --state is only for --kind state', file=sys.stderr); sys.exit(2)
+        if o.subject and not SUBJECT.match(o.subject):
+            print(f'refused: --subject {o.subject!r} must be one token (letters, digits, _.:#/@+-)', file=sys.stderr)
+            sys.exit(2)
+        if o.kind == 'decision':
+            if not (o.re or o.subject):
+                print('refused: a decision needs --re <ask/blocker id> or --subject', file=sys.stderr); sys.exit(2)
+            if bool((o.rollback or '').strip()) == o.irreversible:
+                print('refused: a decision needs exactly one of --rollback "<how to undo>" or --irreversible',
+                      file=sys.stderr); sys.exit(2)
+        elif o.rollback or o.irreversible:
+            print('refused: --rollback/--irreversible are only for --kind decision', file=sys.stderr); sys.exit(2)
+        if o.kind == 'handoff' and not o.evidence:
+            print('warning: a handoff should carry --evidence <SHA|run id|path>', file=sys.stderr)
+        elif o.evidence and o.kind != 'handoff':
+            print('refused: --evidence is only for --kind handoff', file=sys.stderr); sys.exit(2)
+        if o.kind == 'ruling':
+            if not o.owner or not re.fullmatch(r'[A-Za-z0-9_.-]+', o.owner) or o.owner in ('all', 'lead'):
+                print("refused: a ruling needs exactly one --owner (a single lane, not 'all'/'lead'). "
+                      "Split work between lanes = two rulings, one owner each.", file=sys.stderr)
+                sys.exit(2)
+            if o.owner not in known and not o.force:
+                print(f"refused: unknown ruling owner '{o.owner}' (or pass --force)", file=sys.stderr)
+                sys.exit(2)
+        elif o.owner and o.kind != 'blocker':
+            print('refused: --owner is only for --kind ruling or blocker', file=sys.stderr); sys.exit(2)
+        if (o.kind == 'signal') != bool(o.signal):
+            print('refused: --kind signal and --signal NAME go together', file=sys.stderr); sys.exit(2)
+        if o.signal and not SIGNAL_NAME.match(o.signal):
+            print(f"refused: signal name '{o.signal}' must be UPPER_SNAKE (e.g. RAMP5_ON)", file=sys.stderr); sys.exit(2)
+        # Structured merge holds avoid interpreting ordinary status prose as a blocking hold.
+        # Only explicit hold/unhold rows and authorized lead free text control the gate.
+        prs = []
+        if o.kind in ('hold', 'unhold'):
+            if not o.pr:
+                print(f'refused: --kind {o.kind} needs --pr N[,N] naming the PRs it covers', file=sys.stderr)
+                sys.exit(2)
+            for part in o.pr.replace(' ', ',').split(','):
+                if not re.fullmatch(r'\d{3,7}', part):
+                    print(f'refused: --pr wants comma-separated PR numbers, got {part!r}', file=sys.stderr)
+                    sys.exit(2)
+                if part not in prs:
+                    prs.append(part)
+        elif o.pr:
+            print('refused: --pr is only for --kind hold/unhold', file=sys.stderr); sys.exit(2)
+        # Reply to the asker so the answer reaches the lane that is waiting.
+        if o.re:
+            orig = next((r for r in rows if r.get('id') == o.re), None)
+            if orig is None:
+                print(f"warning: --re {o.re} matches no message id", file=sys.stderr)
+            elif orig.get('kind') == 'ask' and o.to not in (orig['frm'], 'all'):
+                print(f"warning: {o.re} was an ask from {orig['frm']}; answers go to the asker "
+                      f"(you posted to {o.to}). Forward with --kind fyi if someone else owns it.", file=sys.stderr)
+        last = max((parse_ts(r['ts']) for r in rows if r['frm'] == o.to), default=None)
+        launch = launched_at(o.to) if o.to not in ('lead', 'all') and not target else None
+        seen = max((t for t in (last, launch) if t is not None), default=None)
+        silent = not target and o.to not in ('lead', 'all') and (seen is None or now() - seen > dt.timedelta(hours=IDLE_HOURS))
+        live, why = (True, '') if o.to in ('lead', 'all') or target else lane_liveness(o.to, rows)
+        # A recipient with no live agent never reads the post: warn and copy the lead.
+        idle = silent or live is False
+        if live is False:
+            print(f'warning: {o.to} has no live agent ({why}); posting anyway and copying the lead. '
+                  'Re-home the work rather than waiting on an idle lane (rule 20).', file=sys.stderr)
+        if o.ref and not pathlib.Path(o.ref).is_file():
+            print(f'refused: --ref {o.ref} is not a file', file=sys.stderr); sys.exit(2)
+        # Latched fyi: an fyi identical to the sender's LAST fyi to this recipient
+        # on this topic is a repeat of a latched state. Hold it until the text changes, with one reminder every
+        # FYI_REMIND_HOURS; a short time window alone cannot suppress periodic unchanged reports.
+        if o.kind == 'fyi' and not o.force:
+            last = next((r for r in reversed(rows) if r.get('kind') == 'fyi' and r['frm'] == o.frm and r['to'] == o.to
+                         and r.get('topic') == o.topic), None)
+            if last and last.get('text_hash', hashlib.sha256(last.get('text', '').encode()).hexdigest()) == hashlib.sha256(o.text.encode()).hexdigest() and \
+                    now() - parse_ts(last['ts']) < dt.timedelta(hours=FYI_REMIND_HOURS):
+                print(f"deduped: same as your last fyi to {o.to} on {o.topic} (id={last['id']}, {age_minutes(last)} min ago); "
+                      f"held until the text changes or {FYI_REMIND_HOURS}h pass (--force posts anyway)")
+                return
+        # Latched state: only a transition posts. The same state for the same subject from the same lane is
+        # held, whatever the text says, with one reminder every FYI_REMIND_HOURS.
+        if o.kind == 'state' and not o.force:
+            last = latest_states(rows).get((o.frm, o.subject))
+            if last and last.get('state') == o.state and \
+                    now() - parse_ts(last['ts']) < dt.timedelta(hours=FYI_REMIND_HOURS):
+                print(f"deduped: {o.subject} is already {o.state} from {o.frm} (id={last['id']}, "
+                      f"{age_minutes(last)} min ago); only a state change posts (--force posts anyway)")
+                return
+        rid, text = o.id or secrets.token_hex(3), o.text
+        spill_ref = None
+        tag = (f'{o.to} silent >{IDLE_HOURS}h' if silent else f'{o.to} has no live agent') if idle else ''
+        copy_prefix = f'[copy: {tag}] ' if idle else ''
+        if len(copy_prefix) >= TEXT_CAP:
+            copy_prefix = ''
+        room = TEXT_CAP - len(copy_prefix)  # the lead copy must fit the cap too
+        if len(text) > room:
+            # Token budget: every reader pays for every post. Keep the post short, the detail on disk.
+            spill = STATE / 'refs' / f'{now():%m%d}-{rid}.txt'
+            spill.parent.mkdir(parents=True, exist_ok=True)
+            spill.write_text(text + '\n')
+            spill_ref = str(spill)
+            suffix = f' … [full: {spill}]'
+            if len(suffix) > room:
+                suffix = f' … [full: state/refs/{spill.name}]'
+            if len(suffix) > room:
+                suffix = ''
+            text = text[:max(0, room - len(suffix))].rstrip() + suffix
+            print(f'note: post text is capped at {TEXT_CAP} chars; the full text is in {spill}. '
+                  'Next time write detail to a file and pass --ref PATH.', file=sys.stderr)
+        rec = dict(ts=now().isoformat(timespec='seconds'), id=rid, origin='coordkit', frm=o.frm, to=o.to,
+                   topic=o.topic, kind=o.kind, text=text, text_hash=hashlib.sha256(o.text.encode()).hexdigest())
+        if o.id: rec['publication_hash'] = signature
+        if o.owner: rec['owner'] = o.owner
+        if o.re: rec['re'] = o.re
+        if spill_ref: rec['ref'] = spill_ref
+        if o.ref: rec['ref'] = str(pathlib.Path(o.ref).resolve())
+        if o.signal: rec['signal'] = o.signal
+        if prs: rec['prs'] = prs
+        for key in ('state', 'subject', 'needs', 'rollback', 'evidence'):
+            if getattr(o, key): rec[key] = getattr(o, key)
+        if o.irreversible: rec['irreversible'] = True
+        if o.priority: rec['priority'] = o.priority
+        if role: rec['role'] = role
+        recs = [rec]
+        if idle and o.kind != 'blocker':  # the lead already sees every blocker; a copy would be a second open one
+            recs.append(dict(rec, to='lead', id=secrets.token_hex(3), copy_of=rec['id'], orig_kind=o.kind,
+                             text=copy_prefix + text))
+            recs[-1].pop('owner', None)  # the copy is not a second ruling to ack
+            if o.kind == 'ruling': recs[-1]['kind'] = 'fyi'  # orig_kind still wakes `bus wait --to lead`
+        # Addressed escalation runs before the ANX projection: a mirror failure (exit 1) must never
+        # stop a deaf/vacant alert from reaching the fallback, relay file or pager.
+        append(recs, project=not target)
+        global LAST_POST
+        LAST_POST = (rec, addressed.after_post(CONFIG, rec, role) if target else None)
+        if target:
+            project_pending()
+        print('posted', rec['ts'], 'id=' + rec['id'] + (f' (recipient {o.to} idle; lead copied)' if len(recs) > 1 else '')
+              + (f' — {o.owner} must run: bus ack {rec["id"]} --from {o.owner}' if o.kind == 'ruling' else '')
+              + (f' — open until a decision/answer with --re {rec["id"]}' if o.kind == 'blocker' else ''))
+    elif o.cmd == 'ack':
+        rows = read()
+        work = next((r for r in rows if r.get('id') == o.id and r.get('kind') in ('handoff', 'ask')), None)
+        if work is not None:
+            # pick up (or reassign with --owner) a handoff or ask.
+            owner = o.owner or o.frm
+            append([dict(ts=now().isoformat(timespec='seconds'), id=secrets.token_hex(3), origin='coordkit', frm=o.frm, to=work['frm'],
+                         topic=work.get('topic', 'general'), kind='ack', re=o.id, owner=owner,
+                         text=o.note or (f'picked up by {owner}' if owner == o.frm else f'reassigned to {owner}'))])
+            print(f'acked {o.id} owner={owner}')
+            return
+        ruling = next((r for r in rows if r.get('id') == o.id and r.get('kind') == 'ruling'), None)
+        if ruling is None:
+            print(f'refused: no ruling with id {o.id}', file=sys.stderr); sys.exit(2)
+        if ruling.get('owner') != o.frm and not o.force:
+            print(f"refused: ruling {o.id} is owned by {ruling.get('owner')}, not {o.frm}. The owner acks; "
+                  "if it is really yours, ask the lead to re-rule (or pass --force).", file=sys.stderr)
+            sys.exit(2)
+        if any(r.get('kind') == 'ack' and r.get('re') == o.id for r in rows):
+            print(f'already acked: {o.id}'); return
+        append([dict(ts=now().isoformat(timespec='seconds'), id=secrets.token_hex(3), origin='coordkit', frm=o.frm, to=ruling['frm'],
+                     topic=ruling.get('topic', 'general'), kind='ack', re=o.id,
+                     text=(o.note or 'ack') + ('' if ruling.get('owner') == o.frm else f' [forced; owner {ruling.get("owner")}]'))])
+        print(f'acked {o.id} ({age_minutes(ruling)} min after the ruling)')
+    elif o.cmd == 'open-rulings':
+        rows = [r for r in open_rulings(read()) if age_minutes(r) >= o.min_age]
+        if o.new_only:
+            seen_path = pathlib.Path(o.new_only)
+            seen = set(seen_path.read_text().split()) if seen_path.exists() else set()
+            rows = [r for r in rows if r['id'] not in seen]
+            if rows:
+                seen_path.parent.mkdir(parents=True, exist_ok=True)
+                with seen_path.open('a') as f: f.write(''.join(r['id'] + '\n' for r in rows))
+        if o.json:
+            print(json.dumps([dict(r, age_minutes=age_minutes(r)) for r in rows]))
+        else:
+            for r in rows:
+                print(line(r, full=True) if o.full else f"{r['id']} age={age_minutes(r)}m owner={r['owner']} from={r['frm']} [{r['topic']}] {' '.join(r['text'].split())[:200]}")
+            if not rows and not o.new_only: print('no open rulings')
+    elif o.cmd == 'state':
+        rows = [r for (lane, subject), r in sorted(latest_states(read()).items(), key=lambda kv: kv[1]['ts'])
+                if (not o.lane or lane == o.lane) and (not o.subject or subject == o.subject)]
+        if o.json:
+            print(json.dumps([dict(r, age_minutes=age_minutes(r)) for r in rows]))
+        else:
+            for r in rows:
+                print(line(r, full=True) if o.full else f"{r.get('id', '-')} {r['frm']} {r['subject']} {r['state']} age={age_minutes(r)}m "
+                      f"{' '.join((r.get('text') or '').split())[:160]}")
+            if not rows: print('no state rows')
+    elif o.cmd == 'open-blockers':
+        rows = [r for r in open_blockers(read()) if not o.owner or r.get('owner') == o.owner]
+        if o.json:
+            print(json.dumps([dict(r, age_minutes=age_minutes(r)) for r in rows]))
+        else:
+            for r in rows:
+                print(line(r, full=True) if o.full else f"{r['id']} age={age_minutes(r)}m owner={r['owner']} from={r['frm']} needs={' '.join(r.get('needs', '').split())[:80]} "
+                      f"[{r['topic']}] {' '.join(r['text'].split())[:200]}")
+            if not rows: print('no open blockers')
+    elif o.cmd == 'wait' and o.subject:
+        # Stateless, like --signal, but judged on the LATEST state per (lane, subject): a DONE that a later RUNNING
+        # superseded never satisfies the wait. Match the structured state, never a quoted estimate in prose.
+        # Exit 0 on an accepted state, 4 when it
+        # ends on FAILED unless FAILED is the only state asked for (`wait && next` never runs after a failure),
+        # 3 on timeout.
+        accept = {x.strip().upper() for x in (o.state or 'DONE,FAILED').split(',') if x.strip()}
+        bad = accept - set(STATES)
+        if bad:
+            print(f"refused: --state {','.join(sorted(bad))} is not one of {'/'.join(STATES)}", file=sys.stderr)
+            sys.exit(2)
+        cut = since(o.since) or now()
+        deadline = time.time() + o.timeout * 60
+        while True:
+            latest = {}
+            for r in read():
+                if (r.get('kind') == 'state' and r.get('subject') == o.subject and not r.get('copy_of')
+                        and (not o.frm or r['frm'] == o.frm)):
+                    latest[r['frm']] = r
+            hits = sorted((r for r in latest.values() if r.get('state') in accept
+                           and parse_ts(r['ts']) >= cut), key=lambda r: r['ts'])
+            if hits:
+                r = hits[0]
+                print(f"BUS_STATE {o.subject} {r['state']} from={r['frm']} ts={r['ts']} id={r.get('id', '')}")
+                sys.exit(4 if r['state'] == 'FAILED' and accept != {'FAILED'} else 0)  # only a FAILED-only wait succeeds on it
+            if time.time() >= deadline:
+                print(f"BUS_WAIT timeout subject={o.subject} states={','.join(sorted(accept))}"); sys.exit(3)
+            time.sleep(o.poll)
+    elif o.cmd == 'inbox' and o.unread:
+        total, indexed = read_from(get_cursor(o.lane, 'inbox', 0))
+        cut = since(o.since)
+        rows = [r for _, r in indexed if for_lane(r, o.lane) and not (cut and parse_ts(r['ts']) < cut)]
+        for r in rows: print(line(r, full=True) if o.full else brief(r) if o.brief else line(r))
+        set_cursor(o.lane, 'inbox', total)
+    elif o.cmd == 'wait' and o.signal:
+        # Stateless: from the end of the log (or --since back), first kind=signal post whose signal field matches.
+        cut = since(o.since)
+        total, indexed = read_from(0 if cut else 10 ** 12)
+        deadline = time.time() + o.timeout * 60
+        while True:
+            for _, r in indexed:
+                if (r.get('kind') == 'signal' and r.get('signal') == o.signal and (not o.frm or r['frm'] == o.frm)
+                        and not (cut and parse_ts(r['ts']) < cut)):
+                    print(f"BUS_SIGNAL {o.signal} from={r['frm']} ts={r['ts']} id={r.get('id', '')}"); return
+            if time.time() >= deadline:
+                print(f'BUS_WAIT timeout signal={o.signal}'); sys.exit(3)
+            time.sleep(o.poll)
+            total, indexed = read_from(total) if total else read_from(0)
+    elif o.cmd == 'wait':
+        if not o.to:
+            print('refused: bus wait needs --to LANE, --signal NAME or --subject SUBJECT', file=sys.stderr); sys.exit(2)
+        kinds = {k.strip() for k in o.kinds.split(',') if k.strip()}
+        start = get_cursor(o.to, 'wait', None)
+        if start is None: start = read_from(10 ** 12)[0]  # first wait: only messages from now on
+        deadline = time.time() + o.timeout * 60
+        while True:
+            total, indexed = read_from(start)
+            hits = [r for _, r in indexed if (r.get('orig_kind') or r.get('kind')) in kinds and r['frm'] != o.to
+                    and for_lane(r, o.to)]
+            if hits:
+                set_cursor(o.to, 'wait', total)
+                for r in hits: print(line(r, full=o.full))
+                return
+            start = total
+            set_cursor(o.to, 'wait', total)
+            if time.time() >= deadline:
+                print(f'BUS_WAIT timeout {o.to} kinds={",".join(sorted(kinds))}'); sys.exit(3)
+            time.sleep(o.poll)
+    elif o.cmd in ('inbox', 'tail'):
+        rows = read(since(getattr(o, 'since', None)))
+        if o.cmd == 'inbox': rows = [r for r in rows if for_lane(r, o.lane)]
+        else: rows = rows[-o.n:]
+        for r in rows: print(line(r, full=True) if o.full else brief(r) if getattr(o, 'brief', False) else line(r))
+    elif o.cmd == 'harvest':
+        cur = STATE / 'harvest.cursor'
+        start = int(cur.read_text()) if cur.exists() else 0
+        total, indexed = read_from(start)
+        rows = [r for _, r in indexed if r['kind'] in ('lesson', 'debt')]
+        for r in rows: print(line(r, full=o.full))
+        if not rows: print('nothing to harvest')
+        if o.mark:
+            cur.parent.mkdir(parents=True, exist_ok=True)
+            replace_text(cur, str(total) + '\n')
+    else:
+        rows = read(since(o.since)); pairs = collections.Counter((r['frm'], r['to']) for r in rows); topics = collections.Counter(r['topic'] for r in rows)
+        print(f'{len(rows)} messages'); [print(f'  {a}→{b}: {n}') for (a, b), n in pairs.most_common(20)]
+        print('topics:'); [print(f'  {t}: {n}') for t, n in topics.most_common(15)]
+        via_lead = sum(n for (a, b), n in pairs.items() if 'lead' in (a, b)); print(f'through lead: {via_lead}/{len(rows)}')
+
+def main(argv=None, manifest=None):
+    argv = list(argv or [])
+    no_mirror = '--no-mirror' in argv
+    argv = [arg for arg in argv if arg != '--no-mirror']
+    configure(manifest, no_mirror)
+    command = argv[0] if argv else ''
+    tokens = [arg.partition('=')[0] for arg in argv]
+    if manifest.mode == 'shadow' and (command in ('post', 'ack') or '--unread' in argv
+                                      or '--mark' in tokens or '--new-only' in tokens
+                                      or (command == 'wait' and '--to' in tokens)):
+        manifest.writable()
+    if command in ('post', 'ack'):
+        manifest.writable()
+        STATE.mkdir(parents=True, exist_ok=True)
+        with (STATE / 'bus.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return _main(argv)
+    return _main(argv)

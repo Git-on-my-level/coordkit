@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+# Offline, read-only empty installation unless a test patches the lifecycle interface.
+import sys
+if sys.argv[1:2] == ['list']:
+    print('PID Status Label')
+    sys.exit(0)
+if sys.argv[1:2] == ['print']:
+    print('Could not find service', file=sys.stderr)
+    sys.exit(1)
+print('launchctl mutation requires an explicit test mock', file=sys.stderr)
+sys.exit(2)

@@ -1,0 +1,118 @@
+# Keep this manifest in coordkit throughout shadow and cutover. Root stays local.
+mode = "shadow"
+[project]
+name = "omi"
+git_repo = "example/project"
+[anx]
+workspace = "omi"
+board = "ck-omi"
+[paths]
+root = ".coordkit"
+bus_log = "~/workspace/omi/data/run-example/swarm/bus.jsonl"
+events = "~/scratch/lead-wait/events.ndjson"
+[agentctl.pools]
+implement = "pool:implement"
+review = "pool:review"
+plan = "pool:plan"
+[lane]
+initiative = "omi"
+# Omi long missions run for days (opus-2); hung runs are caught by hung_after instead.
+max_run_hours = 72
+[loop.loops.audit]
+[escalation]
+card = "card:loop-audit"
+internal_to = "bus-maintainer"
+internal_senders = ["bus-maintainer"]
+[reconciler]
+shared_git_dirs = ["~/workspace/omi/shared.git"]
+[wait]
+debounce = 300
+[launchd]
+label_prefix = "com.example.omi"
+path = ["~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+python = "~/.local/bin/python3.11"
+[shadow]
+incumbent_bus_source = "~/workspace/omi/data/run-example/swarm/bin/bus"
+incumbent_merge_source = "~/scratch/worktrees/sample-rollout-tools/infra/rollout/bin/merge_on_green.py"
+lane_records = "~/scratch/sample-lead/req"
+max_gap_seconds = 600
+[obligations]
+coordinator = "coordinator"
+# Coordinator owns auditor flags; 2h alerts reach it via the Haiku Relay thread.
+flag_owner = "coordinator"
+flag_sources = ["missedwork"]
+[addressed]
+# Addressed bus (briefs/addressed-bus.md section 8). Bus names from the 11-04 waiter brief.
+# A lane works 5-30 min after its waiter delivers; 3m made every busy lane read as deaf.
+rearm_grace = "20m"
+# the operator 14:24Z: no escalation wakes the lead; they batch into one digest an hour.
+lead_escalations = false
+# Pre-cutover (shadow): the sweep reads the live bus, counts incumbent `bus wait --to NAME`
+# processes as listening, and writes only coordkit-local state plus the relay file below.
+incumbent_waiters = true
+relay = "relay"
+relay_file = ".coordkit/pending-alerts.ndjson"
+[addressed.roles]
+coordinator = ["coordinator", "lead-a"]
+lead = ["lead-a", "coordinator"]
+[addressed.agents.coordinator]
+runtime = "claude-code"
+fallback = "lead"
+[addressed.agents.lead-a]
+runtime = "claude-code"
+fallback = "coordinator"
+[addressed.agents.relay]
+runtime = "claude-code"
+fallback = "coordinator"
+[addressed.agents.worker-cost]
+runtime = "claude-code"
+fallback = "coordinator"
+[addressed.agents.worker-search]
+runtime = "claude-code"
+fallback = "coordinator"
+[addressed.agents.worker-ui]
+runtime = "claude-code"
+fallback = "coordinator"
+[addressed.agents.worker-audio]
+runtime = "claude-code"
+fallback = "coordinator"
+[addressed.agents.worker-replay]
+runtime = "claude-code"
+fallback = "coordinator"
+[addressed.agents.worker-deploy]
+runtime = "claude-code"
+fallback = "coordinator"
+[addressed.agents.worker-remote]
+runtime = "claude-code"
+fallback = "coordinator"
+[addressed.agents.bus-maintainer]
+runtime = "claude-code"
+fallback = "coordinator"
+[review]
+family = "luna"
+# mergesweep G3: `coordkit review record` writes here at cutover; read-only in shadow.
+ledger = "~/workspace/omi/data/run-example/swarm/state/review-ledger.jsonl"
+# [merge].require_review_ship stays false until the operator rules on required review (mergesweep G1/G2).
+result_globs = ["~/scratch/sample-lead/review-*.md", "~/scratch/*-handoff/**/rresult*.out"]
+
+# Optional usage observation metadata; add one record per independently scoped lane.
+# Shared account/cwd pairs are ambiguous. This does not affect launching or waiting.
+# [[lanes]]
+# name = "worker"
+# config_dir = "~/.claude-1"
+# cwd = "/absolute/path/to/worktree"
+# model = "FAMILY_OR_EXACT_TRANSCRIPT_MODEL"
+# effort = "high"
+# [wait] already exists above; optional policy defaults are min_timeout_minutes = 0, backoff = 1.
+
+[questions]
+config_dirs = ["~/.claude", "~/.claude-1", "~/.claude-2"]
+guarded_patterns = ["\\bmerg(e|ing)\\b", "\\bship(ping)?\\b", "\\bdeploy", "\\bdelet(e|ing)\\b|\\bdrop (table|database)\\b", "\\bcredential|\\bsecret\\b|\\bpassword|\\bapi[ _-]?key|\\baccess token", "\\bspend|\\bbudget\\b|\\$\\d", "\\b(host|hosts|fleet|launchd|cluster|machine)\\b", "\\bprod(uction)? (user|data)|\\buser data\\b|\\busers?'? (data|conversations|audio)|\\bDavid's \\d+ conversations", "\\bproduct semantics|\\bpricing\\b"]
+fallback_role = "coordinator"
+human_actor = "david"
+
+[mcp]
+identity = "david-mcp"
+train_pattern = '\bcl2d-\d+[a-z]+\b'
+train_state_dir = "~/scratch/train/state"
+ref_roots = ["~/workspace/omi/data/run-example/swarm/state/refs", ".coordkit/state/refs", "~/workspace/omi/data/run-example"]

@@ -1,0 +1,14 @@
+[project]
+name = "sample"
+git_repo = "owner/repo"
+[anx]
+
+board = "ck-sample"
+[agentctl.pools]
+implement = "pool:implement"
+plan = "pool:plan"
+[bus]
+live_check = false
+[[agents]]
+label = "worker"
+actor = "ck-sample-worker"

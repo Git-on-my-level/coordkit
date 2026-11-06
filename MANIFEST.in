@@ -1,0 +1,14 @@
+include LICENSE NOTICE README.md CONTRIBUTING.md
+recursive-include docs *.md
+recursive-include examples *.toml *.md *.py *.sh *.plist
+include examples/omi/bin/coordkit
+recursive-include tests *.py *.toml *.jsonl *.ndjson
+recursive-include tests/fakes *
+recursive-include scripts *.sh *.txt
+recursive-include .github/workflows *.yml
+prune .oss
+prune .coordkit
+prune .venv
+prune briefs
+prune .zcode
+global-exclude __pycache__ *.py[cod]

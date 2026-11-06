@@ -1,0 +1,20 @@
+[project]
+name = "sample"
+git_repo = "owner/repo"
+[anx]
+workspace = "sample"
+board = "ck-sample"
+[agentctl.pools]
+implement = "pool:implement"
+plan = "pool:plan"
+[bus]
+live_check = false
+[[agents]]
+label = "worker"
+actor = "ck-sample-worker"
+
+[paths]
+bus_log = ".coordkit/bus.jsonl"
+events = ".coordkit/events.ndjson"
+out_dir = ".coordkit/sample-shadow"
+mode = "shadow"

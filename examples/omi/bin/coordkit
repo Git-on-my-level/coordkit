@@ -1,0 +1,30 @@
+#!/bin/sh
+# PATH entry point for bus, sweep, question, and delivery commands.
+# Defaults to the live Omi manifest; set COORDKIT_MANIFEST to use another. Installed as a symlink:
+#   ln -s $HOME/src/coordkit/examples/omi/bin/coordkit ~/.local/bin/coordkit
+BUS=${COORDKIT_BUS:-$HOME/workspace/omi/data/run-example/swarm/bin/bus}
+# Compatibility: 'coordkit wait --as NAME ...' and 'coordkit ack ID --as NAME STATE [NOTE]' were announced to
+# lanes on 11-05 and removed by the prune. Route them to the swarm bus, which owns them now.
+case "$1" in
+  wait)
+    case " $* " in *" --as "*)
+      shift; set -- "$@" END
+      while [ "$1" != END ]; do
+        if [ "$1" = --as ]; then set -- "$@" --to; else set -- "$@" "$1"; fi; shift
+      done; shift
+      exec "$BUS" wait "$@" ;;
+    esac ;;
+  ack)
+    case " $* " in *" --as "*)
+      shift; id=""; name=""; note=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --as) name=$2; shift 2 ;;
+          *) if [ -z "$id" ]; then id=$1; else note="${note:+$note: }$1"; fi; shift ;;
+        esac
+      done
+      exec "$BUS" ack "$id" --from "$name" "${note:-received}" ;;
+    esac ;;
+esac
+exec env PYTHONPATH="${COORDKIT_HOME:-$HOME/src/coordkit/src}" "${COORDKIT_PYTHON:-python3.11}" -m coordkit.cli \
+  --manifest "${COORDKIT_MANIFEST:-$HOME/workspace/omi/coordkit.toml}" "$@"

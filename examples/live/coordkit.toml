@@ -1,0 +1,28 @@
+# Copy to ~/project/coordkit.toml and customize before enabling integrations.
+mode = "live"
+[project]
+name = "sample"
+git_repo = "example/project"
+[anx]
+workspace = "anx"
+board = "ck-sample"
+[agentctl.pools]
+implement = "pool:implement"
+review = "pool:review"
+plan = "pool:plan"
+[lane]
+initiative = "sample"
+[loop.loops.audit]
+[escalation]
+card = "card:loop-audit"
+[wait]
+debounce = 300
+[launchd]
+label_prefix = "com.example.sample"
+path = ["~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+python = "~/.local/bin/python3.11"
+[rc_host]
+# Optional: claude-host-setup is unavailable on this host; enable only after provisioning it.
+enabled = false
+prefix = "example-host"
+env = "sample"
