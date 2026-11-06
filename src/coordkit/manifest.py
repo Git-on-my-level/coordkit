@@ -294,7 +294,7 @@ def _table(cls, data, section, required=()):
     lists = {"flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders"}
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects"}
     booleans = {"live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
-    integers = {"text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
+    integers = {"heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
     numbers = {"wake_debounce_minutes", "idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
     for key, value in data.items():
         ok = (isinstance(value, list) and all(type(x) is (int if key == "ci" else str) for x in value)) if key in lists else (
@@ -316,6 +316,14 @@ class Mcp:
     identity: str = ""
     train_pattern: str = ""
     ref_roots: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Relay:
+    url: str = ''
+    site: str = ''
+    secret_file: str = ''
+    heartbeat_seconds: int = 50
 
 
 @dataclass
@@ -344,6 +352,7 @@ class Manifest:
     lanes: list[UsageLane] = field(default_factory=list)
     mcp: Mcp = field(default_factory=Mcp)
     services: Services = field(default_factory=Services)
+    relay: Relay | None = None
     adapters: dict = field(default_factory=dict)
     mode: str = "live"
 
@@ -433,6 +442,11 @@ def load(path: str | Path | None = None) -> Manifest:
         raise ManifestError('invalid_value: mcp.projects names must be plain names')
     if not 1 <= config["shadow"].max_gap_seconds <= 600:
         raise ManifestError("invalid_value: shadow.max_gap_seconds must be 1..600")
+    config['relay'] = None
+    if 'relay' in raw:
+        config['relay'] = _table(Relay, raw['relay'], 'relay', ('url', 'site', 'secret_file'))
+        from .relay import validate
+        validate(config['relay'])
     actl = config["agentctl"]
     if "agentctl" in raw and not actl.pools.get("implement"):
         raise ManifestError("missing_key: agentctl.pools.implement")

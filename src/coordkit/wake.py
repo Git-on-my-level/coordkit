@@ -183,35 +183,37 @@ def scan(manifest, dry_run=False):
     Keeps a byte checkpoint beside the wake records. The first run, or a replaced or
     truncated log, starts at the current end, so no backlog is ever woken.
     """
-    import os
     from .addressed import locked
-    log = manifest.paths.bus_log
-    path = log.parent/'state/wakes/scan.json'
+    from .tail import TailReader
+    path = manifest.paths.bus_log.parent/'state/wakes/scan.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     with locked(path.with_suffix('.lock')):
-        stat = os.stat(log)
+        reader = TailReader(manifest.paths.bus_log)
         mark = read_json(path, {})
-        offset = mark.get('offset') if mark.get('ino') == stat.st_ino else None
-        if not isinstance(offset, int) or not 0 <= offset <= stat.st_size:
-            offset = stat.st_size
-        with open(log, 'rb') as stream:
-            stream.seek(offset)
-            data = stream.read(stat.st_size - offset)
-        end = data.rfind(b'\n') + 1
+        # A first/replaced/truncated log starts at its end. Subsequent scans use
+        # the same complete-line byte reader as relay and local bus readers.
+        stat = manifest.paths.bus_log.stat()
+        valid = (mark.get('file') == [stat.st_dev, stat.st_ino]
+                 and type(mark.get('offset')) is int
+                 and 0 <= mark['offset'] <= stat.st_size)
+        reader.state = mark if valid else None
+        _, lines = reader.read(mark.get('count', 0) if valid else 10 ** 18)
         rows = []
-        for line in data[:end].splitlines():
+        for _, line in lines:
             try:
                 row = json.loads(line)
             except ValueError:
                 continue
+            # Relayed rows are scanned too: a crash between the relay append and its
+            # wake would otherwise lose the wake. The debounce absorbs the repeat.
             if isinstance(row, dict):
                 for to in str(row.get('to', '')).split(','):
                     rows.append(dict(row, to=to.strip()))
         if dry_run:
-            print(f'WAKE_SCAN rows={len(rows)} offset={offset} end={offset + end} (dry run)')
+            print(f'WAKE_SCAN rows={len(rows)} (dry run)')
             return 0
         if rows:
             notify(manifest, rows)
-        write_json(path, {'ino': stat.st_ino, 'offset': offset + end, 'at': time.time()})
+        write_json(path, reader.state)
     print(f'WAKE_SCAN rows={len(rows)}')
     return 0

@@ -147,6 +147,9 @@ def templates(manifest):
         from .mcp_install import spec
         argv = mcp_job['ProgramArguments']
         jobs.append(spec(manifest, Path(argv[argv.index('--secret-file')+1]), int(argv[argv.index('--port')+1])))
+    if (manifest.paths.root/'relay/service.json').exists() and manifest.relay is not None:
+        from .relay import spec as relay_spec
+        jobs.append(relay_spec(manifest))
     for job in jobs:
         # A src checkout is runnable before installation; installed wheels need no override.
         job['EnvironmentVariables'].update(python_env())
@@ -271,7 +274,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
     def check(name, fn):
         try:
             detail=fn()
-            print(f'DOCTOR {name} green {detail if detail is not None else ""}')
+            level = 'warn' if isinstance(detail, str) and detail.startswith('WARN ') else 'green'
+            print(f'DOCTOR {name} {level} {detail if detail is not None else ""}')
         except (ToolError,ManifestError,OSError,ValueError,KeyError) as exc:
             findings.append(name)
             print(f'DOCTOR {name} red {exc}')
@@ -367,6 +371,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
     check('binaries',binaries); check('anx',identity); check('agentctl',pools)
     check('reconciler_age',reconciler_age)
     check('github',github); check('launchd',jobs); check('dead_letters',deadletters); check('shadow_guard',guard)
+    from .relay import health as relay_health
+    check('relay', lambda: relay_health(manifest))
     from .selfupdate import health
     check('selfupdate', health)
     from .adapters import available
@@ -460,6 +466,7 @@ def down(manifest):
     hooks.restore(manifest)
     hooks.restore_questions(manifest)
     (manifest.paths.root/'mcp-service.json').unlink(missing_ok=True)
+    (manifest.paths.root/'relay/service.json').unlink(missing_ok=True)
     state['hook_backups'] = []
     write_json(state_path,state)
     print('DOWN_OK')

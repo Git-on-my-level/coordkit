@@ -1,0 +1,18 @@
+# Copy and replace placeholders in your own deployment directory.
+name = "REPLACE_WORKER_NAME"
+main = "worker.mjs"
+compatibility_date = "2026-01-01"
+
+[vars]
+BUS_NAME = "REPLACE_BUS_NAME"
+RETAIN_ROWS = "256"
+
+[[durable_objects.bindings]]
+name = "BUSES"
+class_name = "BusRelay"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BusRelay"]
+
+# BUS_SECRET is set with wrangler secret put, never here.

@@ -75,6 +75,9 @@ def main(argv=None):
             from .ops import parser_for
             from .wake import scan
             return scan(manifest, dry_run=parser_for('wake-scan').parse_args(rest).dry_run)
+        if options.command == 'relay':
+            from .relay import main as relay_main
+            return relay_main(rest, manifest)
         if options.command == 'mcp':
             from .mcp_install import main as mcp_install_main
             return mcp_install_main(rest, manifest)

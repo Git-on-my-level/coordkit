@@ -163,7 +163,41 @@ def brief(r):
     tag = f" id={r['id']}" if r.get('id') else ''
     return (f"{r['ts'][11:16]}Z {r['frm']} {r['kind']}/{r['topic']}{tag}{prs_tag(r)} "
             f"{' '.join((r.get('text') or '').split())[:120]}")
-def append(recs, project=True):
+class ReplayIndex:
+    """Runner-owned source identity set, refreshed under the bus append lock.
+
+    The log remains the crash-recovery authority. TailReader reads it once, then
+    only newly committed lines, including appends by another process.
+    """
+    def __init__(self, path):
+        from .tail import TailReader
+        self.reader = TailReader(path)
+        self.seen = set()
+
+    @staticmethod
+    def key(row):
+        origin, source = row.get('origin'), row.get('_relay')
+        if (isinstance(origin, str) and origin.startswith('relay:')
+                and isinstance(source, dict) and type(source.get('seq')) is int):
+            return origin, source['seq']
+        return None
+
+    def sync(self):
+        start = (self.reader.state or {}).get('count', 0)
+        _, lines = self.reader.read(start)
+        if self.reader.reset:
+            self.seen.clear()
+        for _, line in lines:
+            try:
+                row = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            key = self.key(row) if isinstance(row, dict) else None
+            if key is not None:
+                self.seen.add(key)
+
+
+def append(recs, project=True, replay_index=None):
     """Append rows durably, then (unless project=False) run the ANX projection, which may exit 1.
     Callers that must act after the append whatever ANX does (addressed escalation) pass
     project=False and call project() last."""
@@ -173,7 +207,8 @@ def append(recs, project=True):
     from .addressed import locked
     with locked(state_path(CONFIG).with_suffix('.lock')):
         for rec in recs:
-            refuse_retired(CONFIG, resolve(rec.get('to', '')))
+            if not str(rec.get("origin", "")).startswith("relay:"):
+                refuse_retired(CONFIG, resolve(rec.get('to', '')))
         with open(BUS, 'a+b') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             from .tail import TailReader
@@ -183,12 +218,28 @@ def append(recs, project=True):
                 f.seek(-1, os.SEEK_END)
                 if f.read(1) != b'\n':
                     raise ManifestError('bus_incomplete_tail: repair the partial writer before appending')
+            # Refresh the runner's incremental index while holding the same
+            # lock as every writer. A restart rebuilds from fsynced log rows.
+            if any('_relay' in rec for rec in recs):
+                replay_index = replay_index or ReplayIndex(BUS)
+                replay_index.sync()
+                seen = set()
+                fresh = []
+                for rec in recs:
+                    key = replay_index.key(rec)
+                    if key is None or (key not in replay_index.seen and key not in seen):
+                        fresh.append(rec)
+                        seen.add(key)
+                recs = fresh
             for rec in recs:
                 rec.update(v=2, seq=total)
                 f.write((json.dumps(rec) + '\n').encode())
                 total += 1
             f.flush()
             os.fsync(f.fileno())
+            if replay_index is not None:
+                replay_index.seen.update(key for rec in recs
+                                         if (key := replay_index.key(rec)) is not None)
     # Named extension seam: committed rows only, never under the append lock.
     from .adapters import notify
     notify(CONFIG, recs)
@@ -208,7 +259,7 @@ def project_pending():
         # Project only rows coordkit wrote (origin, or the text_hash every coordkit post carries). On a shared
         # bus (an incumbent tool still writing during a transition) other writers' rows are theirs: skipping them keeps a historic or
         # foreign row from blocking coordkit's own posts.
-        ours = row.get('origin') == 'coordkit' or 'text_hash' in row
+        ours = not str(row.get('origin', '')).startswith('relay:') and (row.get('origin') == 'coordkit' or 'text_hash' in row)
         from . import addressed  # pickup wakes/alerts are bus-only, never cards
         if ours and not addressed.is_escalation(row) and (row['kind'] in CONFIG.bus.mirror_kinds or row['kind'] == 'ack'):
             try:

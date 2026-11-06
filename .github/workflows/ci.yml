@@ -24,6 +24,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Leak gate
         run: bash scripts/leak-check.sh
+      - name: Worker protocol tests
+        run: node --test relay/worker.test.mjs
       - name: Compile
         run: python -m compileall -q src tests
       - name: Unit tests

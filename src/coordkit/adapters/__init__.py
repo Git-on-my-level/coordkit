@@ -15,7 +15,7 @@ def __getattr__(name):
     raise AttributeError(name)
 
 
-SINKS = []  # In-process extension seam. No relay implementation is shipped.
+SINKS = []  # In-process extension seam.
 
 
 def available(manifest):
@@ -47,7 +47,11 @@ def notify(manifest, recs):
     if not recs:
         return
     from ..wake import notify as wake
-    sinks = [wake, *[s.notify for s in SINKS],
+    relay_sinks = []
+    if manifest.relay is not None:
+        from ..relay import notify as relay
+        relay_sinks.append(relay)
+    sinks = [wake, *relay_sinks, *[s.notify for s in SINKS],
              *[a.notify for a in available(manifest) if callable(getattr(a, 'notify', None))]]
     for sink in sinks:
         try:

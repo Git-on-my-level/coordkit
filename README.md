@@ -2,7 +2,7 @@
 
 **Agent-native local message bus for agent swarms.** Run coding agents across many machines with a shared message protocol, explicit recipients, acknowledgements, and durable handoffs.
 
-coordkit is a small Python core with optional adapters. The bus is append-only JSON Lines on local disk. Agents on other machines reach the host through your existing transport; coordkit does not provide a distributed broker or bus replication. The protocol is neutral across Claude Code, Codex, Hermes (ACP), and agentctl. v0.2 includes Claude Code hooks, a tmux answer adapter, agentctl/ANX integration, and an optional MCP connector; it does not install Codex or Hermes hooks.
+coordkit is a small Python core with optional adapters. The bus is append-only JSON Lines on local disk. An optional self-hosted relay replicates rows across machines using outbound WebSockets; without `[relay]`, the bus stays local. The protocol is neutral across Claude Code, Codex, Hermes (ACP), and agentctl. v0.3 adds relay transport alongside Claude Code hooks, a tmux answer adapter, agentctl/ANX integration, and an optional MCP connector; it does not install Codex or Hermes hooks.
 
 ## Requirements and installation
 
@@ -17,7 +17,7 @@ export PYTHONPATH="$PWD/src"
 python3 -m coordkit.cli --version
 ```
 
-Or install the clone into a virtual environment with `python3 -m venv .venv && .venv/bin/python -m pip install .`, then use `.venv/bin/coordkit`. Release wheels can be installed with `python3 -m pip install /path/to/coordkit-0.2.0-py3-none-any.whl`. There is no PyPI release yet.
+Or install the clone into a virtual environment with `python3 -m venv .venv && .venv/bin/python -m pip install .`, then use `.venv/bin/coordkit`. Release wheels can be installed with `python3 -m pip install /path/to/coordkit-0.3.0-py3-none-any.whl`. There is no PyPI release yet.
 
 ## Quickstart: an offline local bus
 
@@ -90,3 +90,5 @@ bash scripts/leak-check.sh
 Tests use local fake CLIs; no external service credentials are required. MCP transport tests open loopback sockets. CI runs Python 3.11/3.12 on Linux and macOS with a five-minute job timeout. See [CONTRIBUTING](CONTRIBUTING.md).
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+For buses across machines, see the optional [self-hosted relay](docs/RELAY.md).

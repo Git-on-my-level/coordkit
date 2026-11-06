@@ -206,6 +206,8 @@ def reconcile(manifest=None, services=True):
                 owned = {r['label'] for r in state.get('jobs', [])}
                 if (project.paths.root/'mcp-service.json').exists():
                     owned.add(project.launchd.label_prefix+'.mcp')
+                if (project.paths.root/'relay/service.json').exists():
+                    owned.add(project.launchd.label_prefix+'.relay')
                 specs = templates(project) if owned else []
                 service = manager(project)
                 for spec in specs:

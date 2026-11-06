@@ -14,6 +14,7 @@ class TailReader:
         self.path = Path(path)
         self.checkpoint = checkpoint
         self.state = None
+        self.reset = False
 
     def read(self, start=0):
         try:
@@ -36,6 +37,7 @@ class TailReader:
             if valid and offset:
                 stream.seek(max(0, offset - 128))
                 valid = hashlib.sha256(stream.read(min(offset, 128))).hexdigest() == prior.get('boundary')
+            self.reset = bool(prior) and not valid
             if not valid:
                 offset, count = 0, 0
             stream.seek(offset)

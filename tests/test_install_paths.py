@@ -81,8 +81,8 @@ class InstallPathTests(FakeCase):
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as result:
             cli.main(['--version'])
         self.assertEqual(result.exception.code, 0)
-        self.assertEqual(output.getvalue(), 'coordkit 0.2.0\n')
+        self.assertEqual(output.getvalue(), 'coordkit 0.3.0\n')
         env = dict(os.environ, PYTHONPATH=str(Path(paths.__file__).resolve().parent.parent))
         result = subprocess.run([sys.executable, '-m', 'coordkit.cli', '--version'], cwd=self.root,
                                 env=env, capture_output=True, text=True, timeout=5)
-        self.assertEqual((result.returncode, result.stdout.strip()), (0, 'coordkit 0.2.0'))
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, 'coordkit 0.3.0'))

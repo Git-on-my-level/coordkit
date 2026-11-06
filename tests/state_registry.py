@@ -231,3 +231,26 @@ row('state.py', 'writer:write_json', 'atomic JSON replacement', 'rename or faile
 row('state.py', 'writer:_replace_json|writer:update_json', 'hashed settings transformation under sibling lock', 'replace and receipt finalization or one re-merge then conflict', 'two attempts; kernel releases the lock on exit', 'settings_update_conflict preserves the latest edit')
 row('hooks.py', 'writer:prepare|writer:finish|writer:finish_recovery', 'settings transaction saves migration intent', 'receipt finalized under the same settings lock', 'one re-merge before explicit conflict', 'owned-entry or receipt conflict leaves concurrent settings intact')
 row('deliver.py', 'writer:prepare|writer:finish', 'delivery install or uninstall settings transaction', 'receipt prepared before rename and finalized under lock', 'one re-merge before explicit conflict', 'concurrent managed edits refuse rollback without replacing settings')
+
+# Relay state is local to one durable site; it never carries reader cursors.
+row('relay.py', 'relay|state.sqlite3', 'configured sink or relay runner opens the local outbox',
+    'rows marked sent on server acceptance; checkpoint advances only after durable apply/queue',
+    'sent rows pruned below scan checkpoint; skipped audit IDs and suppression count persist; SQLite busy timeout 30s',
+    'relay status/doctor expose pending rows, gaps and reconnect errors')
+row('relay.py', 'run.lock|writer:run', 'one foreground relay runner acquires the kernel lock',
+    'SIGINT/SIGTERM or failure closes socket/database/lock and restores signal handlers',
+    '75s frame deadline; reconnect backoff capped at approximately 61s',
+    'second runner refuses ownership; auth/retention failures exit with status error')
+row('relay.py', 'status.json|writer:record', 'runner records connection, backlog and frame freshness',
+    'replaced on state change or after 10s; disconnected in finally', '90s stale receipt fails health',
+    'doctor relay check is red when disconnected/stale or an error persists')
+row('relay.py', 'service.json|writer:main|stdout.log|stderr.log', 'explicit relay install --apply records ownership before manager mutation',
+    'relay uninstall or lifecycle down removes the managed service and receipt',
+    'persistent service; logs belong to host rotation policy',
+    'manager errors fail command; install preview performs no mutations')
+row('lifecycle.py', 'relay/service.json', 'relay installation receipt includes the service in managed templates',
+    'explicit relay uninstall or down', 'persistent opt-in ownership receipt',
+    'doctor compares installed service with manifest template')
+row('selfupdate.py', 'relay/service.json', 'update reconciles explicitly installed relay service',
+    'explicit relay uninstall or down', 'only owned services may be reinstalled',
+    'manager failure triggers existing update rollback')
