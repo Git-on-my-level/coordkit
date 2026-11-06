@@ -2,6 +2,7 @@ import contextlib
 import copy
 import io
 import json
+import os
 from unittest.mock import patch
 
 from coordkit import hooks, lifecycle
@@ -82,11 +83,12 @@ class HookRollbackTests(FakeCase):
         self.assertEqual(self.target.read_bytes(),before)
 
     def test_crash_before_hook_edit_and_after_restore_are_retryable(self):
-        def fail_target(path, doc):
-            if path == self.target:
+        actual_replace = os.replace
+        def fail_target(source, target):
+            if target == self.target:
                 raise OSError('before hook write')
-            write_json(path,doc)
-        with patch.object(hooks,'write_json',side_effect=fail_target):
+            actual_replace(source, target)
+        with patch('coordkit.state.os.replace',side_effect=fail_target):
             with self.assertRaises(OSError): hooks.install(self.manifest,self.target,self.backup)
         self.assertEqual(read_json(self.target),self.original)
         record = read_json(hooks.receipt_path(self.manifest))

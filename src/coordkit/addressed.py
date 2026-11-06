@@ -45,24 +45,7 @@ def seconds(value):
 
 # -- registry ---------------------------------------------------------------------------------------
 
-def registry(manifest):
-    """Manifest agents plus existing runtime registrations (read-only compatibility)."""
-    out = {name: dict(spec, name=name, source='manifest') for name, spec in cfg(manifest).agents.items()}
-    for name, spec in (read_json(home(manifest)/'register.json', {}) or {}).items():
-        out.setdefault(name, dict(spec, name=name, source='register'))
-    return out
-
-
-def roles(manifest):
-    """{role: [members in fallback order]}: the manifest order, then registered agents with that role."""
-    out = {role: list(spec['members'] if isinstance(spec, dict) else spec)
-           for role, spec in cfg(manifest).roles.items()}
-    for name, spec in registry(manifest).items():
-        if spec.get('role'):
-            members = out.setdefault(spec['role'], [])
-            if name not in members:
-                members.append(name)
-    return out
+from .routing import registry, roles
 
 
 def is_human(manifest, name):
@@ -94,19 +77,7 @@ def target_kind(manifest, to):
     return 'name' if to in registry(manifest) else None
 
 
-@contextlib.contextmanager
-def locked(path, blocking=True):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as stream:
-        try:
-            fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-        except BlockingIOError:
-            yield None
-            return
-        try:
-            yield stream
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+from .routing import locked
 
 
 # -- leases -----------------------------------------------------------------------------------------
@@ -164,6 +135,10 @@ PROBE = incumbent_waiters  # tests replace this
 def listening(manifest, name, at=None, probe=None, rows=None):
     """(live, evidence). Busy sessions can hear hooks without an armed waiter."""
     at = time.time() if at is None else at
+    from .wake import retired
+    retirement = retired(manifest, name)
+    if retirement:
+        return False, 'retired; redirect to ' + retirement.get('owner', 'lead')
     if is_human(manifest, name):
         return True, 'human recipient'
     lease = read_lease(manifest, name)

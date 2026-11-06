@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- coordkit MCP connector (docs/MCP.md). Its label is outside the com.example.omi. prefix on purpose: coordkit
+<!-- coordkit MCP connector (docs/MCP.md). Its label is outside the com.example.project. prefix on purpose: coordkit
      up/down/doctor own that prefix, so they never touch this job. Loopback only; Tailscale Funnel exposes it. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.example.coordkit-mcp</string>
   <key>ProgramArguments</key>
   <array>
-    <string>~/.local/bin/python3.11</string><string>-m</string><string>coordkit.cli</string>
-    <string>--manifest</string><string>~/workspace/omi/coordkit.toml</string><string>mcp-serve</string>
+    <string>/path/to/bin/python3.11</string><string>-m</string><string>coordkit.cli</string>
+    <string>--manifest</string><string>/path/to/project/coordkit.toml</string><string>mcp-serve</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>PYTHONPATH</key><string>~/src/coordkit/src</string></dict>
-  <key>WorkingDirectory</key><string>~/workspace/omi</string>
+  <dict><key>PYTHONPATH</key><string>/path/to/coordkit/src</string></dict>
+  <key>WorkingDirectory</key><string>/path/to/project</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardOutPath</key><string>~/src/coordkit/examples/omi/.coordkit/state/mcp/server.log</string>
-  <key>StandardErrorPath</key><string>~/src/coordkit/examples/omi/.coordkit/state/mcp/server.log</string>
+  <key>StandardOutPath</key><string>/path/to/coordkit/examples/omi/.coordkit/state/mcp/server.log</string>
+  <key>StandardErrorPath</key><string>/path/to/coordkit/examples/omi/.coordkit/state/mcp/server.log</string>
 </dict>
 </plist>

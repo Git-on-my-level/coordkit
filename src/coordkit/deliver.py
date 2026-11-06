@@ -11,9 +11,9 @@ import shlex
 import sys
 import time
 
-from . import addressed, hooks, questions
-from .manifest import ManifestError
-from .state import name_key, read_json, write_json
+from . import routing as addressed, identity as questions
+from .errors import ManifestError
+from .state import name_key, read_json, write_json, update_json
 
 MAX_OUTPUT = 1536  # bytes, including the JSON envelope
 MAX_READ = 256 * 1024
@@ -51,7 +51,7 @@ def deliver(manifest, payload, out=None):
     """Print before committing delivered offsets. Excess rows remain for the next hook.
 
     Read at most 256 KiB per invocation; incomplete trailing lines are retried. A corrupt
-    complete row fails open without moving past it. Hooks never call addressed role liveness
+    complete row is skipped with a warning and its offset advances. Hooks never call addressed role liveness
     (which can probe processes or read the entire bus).
     """
     out = sys.stdout if out is None else out
@@ -82,13 +82,25 @@ def deliver(manifest, payload, out=None):
             stream.seek(start)
             data = stream.read(MAX_READ)
         offset = start
+        invalid = 0
         for raw in data.splitlines(keepends=True):
             if not raw.endswith(b'\n'):
                 break
-            row = json.loads(raw)
+            try:
+                row = json.loads(raw)
+                if not isinstance(row, dict):
+                    raise ValueError('bus row must be an object')
+            except ValueError:
+                invalid += 1
+                offset += len(raw)
+                continue
             kind = row.get('kind')
             actionable = kind in ('ask', 'ruling', 'handoff', 'blocker') or (
                 kind == 'msg' and (row.get('priority') == 'urgent' or row.get('urgent') is True))
+            if actionable and not all(isinstance(row.get(key), str) for key in ('id', 'frm', 'to')):
+                invalid += 1
+                offset += len(raw)
+                continue
             if actionable and row.get('frm') != name and (row.get('to') in targets or row.get('owner') == name):
                 line = row_line(row, name)
                 # Unicode can consume four bytes per character. Bound even a single row's text.
@@ -102,6 +114,8 @@ def deliver(manifest, payload, out=None):
                     break
                 lines.append(line)
             offset += len(raw)
+        if invalid:
+            print(f'BUS_INVALID_JSON skipped={invalid} (hook reader)', file=sys.stderr)
         # A successful empty read also proves the hook is attached. Retain the session's
         # explicit transcript binding for listening(); do not manufacture a waiter lease.
         note = {'name': name, 'at': time.time(), 'via': 'hook', 'session_id': payload.get('session_id'),
@@ -136,43 +150,59 @@ def receipt_path(manifest, target):
 
 
 def command(manifest):
-    return shlex.join([*env_args(),
+    return shlex.join([*env_args(), 'COORDKIT_HOOK_OWNER=coordkit-delivery',
                        manifest.launchd.python, '-m', 'coordkit.cli', '--manifest', str(manifest.file),
                        'deliver', '--hook'])
 
 
 def install(manifest, target):
+    from . import hooks
     manifest.writable()
     target = Path(target).expanduser().resolve()
     receipt = receipt_path(manifest, target)
     record = read_json(receipt, {})
     if record and not record.get('restored'):
-        raise ManifestError('hook_receipt_exists: uninstall delivery hooks first')
-    before = read_json(target, {})
-    after = json.loads(json.dumps(before))
-    for groups in after.get('hooks', {}).values():
-        for group in groups:
-            if any(' deliver --hook' in h.get('command', '') for h in group.get('hooks', [])):
-                raise ManifestError('delivery_hooks_present: inspect before installing again')
-    for event in EVENTS:
-        after.setdefault('hooks', {}).setdefault(event, []).append(
-            {'hooks': [{'type': 'command', 'command': command(manifest)}]})
-    write_json(receipt, {'target': str(target), 'before': before, 'after': after, 'restored': False})
-    write_json(target, after)
+        current = hooks.entries(read_json(target, {}))
+        before, after = hooks.entries(record['before']), hooks.entries(record['after'])
+        if any(current[key] != after[key] for key in (after-before).keys() | (before-after).keys()):
+            raise ManifestError('hook_rollback_conflict: delivery hooks changed')
+        hooks.reconcile(manifest)
+        return
+    expected_receipt = record
+    def transform(before):
+        after = json.loads(json.dumps(before))
+        for groups in after.get('hooks', {}).values():
+            for group in groups:
+                if any(' deliver --hook' in h.get('command', '') for h in group.get('hooks', [])):
+                    raise ManifestError('delivery_hooks_present: inspect before installing again')
+        for event in EVENTS:
+            after.setdefault('hooks', {}).setdefault(event, []).append(
+                {'hooks': [{'type': 'command', 'command': command(manifest)}]})
+        return after
+    def prepare(before, after):
+        nonlocal expected_receipt
+        if read_json(receipt, {}) != expected_receipt:
+            raise ManifestError('hook_receipt_conflict: delivery installation changed')
+        expected_receipt = {'target': str(target), 'before': before, 'after': after, 'restored': False}
+        write_json(receipt, expected_receipt)
+    update_json(target, transform, before_replace=prepare)
 
 
 def uninstall(manifest, target):
+    from . import hooks
     manifest.writable()
     target = Path(target).expanduser().resolve()
     receipt = receipt_path(manifest, target)
     record = read_json(receipt)
     if not record:
         return
-    current = read_json(target, {})
-    restored = hooks.reverse(record, current)
-    write_json(target, restored)
-    record['restored'] = True
-    write_json(receipt, record)
+    def prepare(before, after):
+        if read_json(receipt) != record:
+            raise ManifestError('hook_receipt_conflict: delivery installation changed')
+    def finish(before, after):
+        write_json(receipt, dict(record, restored=True))
+    update_json(target, lambda current: hooks.reverse(record, current),
+                before_replace=prepare, after_replace=finish)
 
 
 def main(argv, manifest):
@@ -192,12 +222,16 @@ def main(argv, manifest):
 def bootstrap(argv):
     """Fail open even before loading a missing/invalid manifest, without loading lifecycle."""
     try:
-        with contextlib.redirect_stderr(io.StringIO()):
-            from .manifest import load
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            from .adapters.claude_hook import load
             parser = argparse.ArgumentParser()
             parser.add_argument('--manifest')
             parser.add_argument('command')
             opts, rest = parser.parse_known_args(argv)
-            return main(rest, load(opts.manifest))
+            result = main(rest, load(opts.manifest))
+        # Surface explicit corrupt-row diagnostics; bootstrap failures stay silent.
+        sys.stderr.write(errors.getvalue())
+        return result
     except BaseException:
         return 0

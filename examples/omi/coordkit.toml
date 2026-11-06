@@ -1,51 +1,51 @@
 # Keep this manifest in coordkit throughout shadow and cutover. Root stays local.
 mode = "shadow"
 [project]
-name = "omi"
+name = "example"
 git_repo = "example/project"
 [anx]
-workspace = "omi"
-board = "ck-omi"
+workspace = "example"
+board = "ck-example"
 [paths]
 root = ".coordkit"
-bus_log = "~/workspace/omi/data/run-example/swarm/bus.jsonl"
-events = "~/scratch/lead-wait/events.ndjson"
+bus_log = "/path/to/project/data/run-example/swarm/bus.jsonl"
+events = "/path/to/scratch/lead-wait/events.ndjson"
 [agentctl.pools]
 implement = "pool:implement"
 review = "pool:review"
 plan = "pool:plan"
 [lane]
-initiative = "omi"
-# Omi long missions run for days (opus-2); hung runs are caught by hung_after instead.
-max_run_hours = 72
+initiative = "example"
+# Example run limit; adjust for the workload.
+max_run_hours = 24
 [loop.loops.audit]
 [escalation]
 card = "card:loop-audit"
-internal_to = "bus-maintainer"
-internal_senders = ["bus-maintainer"]
+internal_to = "maintainer"
+internal_senders = ["maintainer"]
 [reconciler]
-shared_git_dirs = ["~/workspace/omi/shared.git"]
+shared_git_dirs = ["/path/to/project/shared.git"]
 [wait]
 debounce = 300
 [launchd]
-label_prefix = "com.example.omi"
-path = ["~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-python = "~/.local/bin/python3.11"
+label_prefix = "com.example.project"
+path = ["/path/to/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+python = "/path/to/bin/python3.11"
 [shadow]
-incumbent_bus_source = "~/workspace/omi/data/run-example/swarm/bin/bus"
-incumbent_merge_source = "~/scratch/worktrees/sample-rollout-tools/infra/rollout/bin/merge_on_green.py"
-lane_records = "~/scratch/sample-lead/req"
+incumbent_bus_source = "/path/to/project/data/run-example/swarm/bin/bus"
+incumbent_merge_source = "/path/to/scratch/worktrees/sample-rollout-tools/infra/rollout/bin/merge_on_green.py"
+lane_records = "/path/to/scratch/example-runs/req"
 max_gap_seconds = 600
 [obligations]
 coordinator = "coordinator"
-# Coordinator owns auditor flags; 2h alerts reach it via the Haiku Relay thread.
+# Coordinator owns auditor flags; 2h alerts reach it via the relay.
 flag_owner = "coordinator"
-flag_sources = ["missedwork"]
+flag_sources = ["audit-legacy"]
 [addressed]
-# Addressed bus (briefs/addressed-bus.md section 8). Bus names from the 11-04 waiter brief.
+# Example addressed role and lane roster; customize before use.
 # A lane works 5-30 min after its waiter delivers; 3m made every busy lane read as deaf.
 rearm_grace = "20m"
-# the operator 14:24Z: no escalation wakes the lead; they batch into one digest an hour.
+# Example policy: no escalation wakes the lead; they batch into one digest an hour.
 lead_escalations = false
 # Pre-cutover (shadow): the sweep reads the live bus, counts incumbent `bus wait --to NAME`
 # processes as listening, and writes only coordkit-local state plus the relay file below.
@@ -53,66 +53,67 @@ incumbent_waiters = true
 relay = "relay"
 relay_file = ".coordkit/pending-alerts.ndjson"
 [addressed.roles]
-coordinator = ["coordinator", "lead-a"]
-lead = ["lead-a", "coordinator"]
+coordinator = ["coordinator", "lead-example"]
+lead = ["lead-example", "coordinator"]
 [addressed.agents.coordinator]
 runtime = "claude-code"
 fallback = "lead"
-[addressed.agents.lead-a]
+[addressed.agents.lead-example]
 runtime = "claude-code"
 fallback = "coordinator"
 [addressed.agents.relay]
 runtime = "claude-code"
 fallback = "coordinator"
-[addressed.agents.worker-cost]
+[addressed.agents.worker-a]
 runtime = "claude-code"
 fallback = "coordinator"
-[addressed.agents.worker-search]
+[addressed.agents.worker-b]
 runtime = "claude-code"
 fallback = "coordinator"
-[addressed.agents.worker-ui]
+[addressed.agents.worker-c]
 runtime = "claude-code"
 fallback = "coordinator"
-[addressed.agents.worker-audio]
+[addressed.agents.worker-d]
 runtime = "claude-code"
 fallback = "coordinator"
-[addressed.agents.worker-replay]
+[addressed.agents.worker-e]
 runtime = "claude-code"
 fallback = "coordinator"
-[addressed.agents.worker-deploy]
+[addressed.agents.worker-f]
 runtime = "claude-code"
 fallback = "coordinator"
-[addressed.agents.worker-remote]
+[addressed.agents.worker-g]
 runtime = "claude-code"
 fallback = "coordinator"
-[addressed.agents.bus-maintainer]
+[addressed.agents.maintainer]
 runtime = "claude-code"
 fallback = "coordinator"
 [review]
-family = "luna"
-# mergesweep G3: `coordkit review record` writes here at cutover; read-only in shadow.
-ledger = "~/workspace/omi/data/run-example/swarm/state/review-ledger.jsonl"
-# [merge].require_review_ship stays false until the operator rules on required review (mergesweep G1/G2).
-result_globs = ["~/scratch/sample-lead/review-*.md", "~/scratch/*-handoff/**/rresult*.out"]
+family = "ledger"
+# Example review ledger: `coordkit review record` writes here at cutover; read-only in shadow.
+ledger = "/path/to/project/data/run-example/swarm/state/review-ledger.jsonl"
+# [merge].require_review_ship stays false until the operator rules on required review (deployment review policy).
+result_globs = ["/path/to/scratch/example-runs/review-*.md", "/path/to/scratch/*-handoff/**/rresult*.out"]
 
 # Optional usage observation metadata; add one record per independently scoped lane.
 # Shared account/cwd pairs are ambiguous. This does not affect launching or waiting.
 # [[lanes]]
 # name = "worker"
-# config_dir = "~/.claude-1"
+# config_dir = "/path/to/claude-secondary"
 # cwd = "/absolute/path/to/worktree"
 # model = "FAMILY_OR_EXACT_TRANSCRIPT_MODEL"
 # effort = "high"
 # [wait] already exists above; optional policy defaults are min_timeout_minutes = 0, backoff = 1.
 
 [questions]
-config_dirs = ["~/.claude", "~/.claude-1", "~/.claude-2"]
-guarded_patterns = ["\\bmerg(e|ing)\\b", "\\bship(ping)?\\b", "\\bdeploy", "\\bdelet(e|ing)\\b|\\bdrop (table|database)\\b", "\\bcredential|\\bsecret\\b|\\bpassword|\\bapi[ _-]?key|\\baccess token", "\\bspend|\\bbudget\\b|\\$\\d", "\\b(host|hosts|fleet|launchd|cluster|machine)\\b", "\\bprod(uction)? (user|data)|\\buser data\\b|\\busers?'? (data|conversations|audio)|\\bDavid's \\d+ conversations", "\\bproduct semantics|\\bpricing\\b"]
+config_dirs = ["/path/to/claude-primary", "/path/to/claude-secondary", "/path/to/claude-tertiary"]
+# Illustrative approval topics; customize for your project.
+guarded_patterns = ['\bdeploy\b', '\bdelete\b', '\bcredentials?\b']
 fallback_role = "coordinator"
-human_actor = "david"
+human_actor = "operator"
 
 [mcp]
-identity = "david-mcp"
-train_pattern = '\bcl2d-\d+[a-z]+\b'
-train_state_dir = "~/scratch/train/state"
-ref_roots = ["~/workspace/omi/data/run-example/swarm/state/refs", ".coordkit/state/refs", "~/workspace/omi/data/run-example"]
+identity = "example-mcp"
+train_pattern = '\btrain-\d+\b'
+train_state_dir = "/path/to/scratch/train/state"
+ref_roots = ["/path/to/project/data/run-example/swarm/state/refs", ".coordkit/state/refs", "/path/to/project/data/run-example"]

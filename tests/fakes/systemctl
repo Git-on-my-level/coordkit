@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Offline systemd user-unit fake; all writes stay under FAKE_SYSTEMD_STATE."""
+import json
+import os
+from pathlib import Path
+import sys
+
+args=sys.argv[1:]
+if not args or args.pop(0)!='--user':
+    sys.exit(2)
+command=args.pop(0)
+root=Path(os.environ['XDG_CONFIG_HOME'])/'systemd/user'
+statefile=os.environ.get('FAKE_SYSTEMD_STATE')
+if command=='list-unit-files':
+    for path in sorted(root.glob('*')):
+        print(path.name+' enabled')
+elif command=='show':
+    path=root/args[0]
+    if path.exists():
+        print('LoadState=loaded')
+        print('FragmentPath='+str(path))
+        for line in path.read_text().splitlines():
+            if line.startswith(('ExecStart=','Environment=')):
+                print(line.replace('"',''))
+    else:
+        print('LoadState=not-found')
+elif command in ('enable','disable','restart','daemon-reload') and statefile:
+    path=Path(statefile); path.parent.mkdir(parents=True,exist_ok=True)
+    with path.open('a') as stream: stream.write(json.dumps([command,*args])+'\n')
+else:
+    print('systemctl mutation requires an explicit test state file',file=sys.stderr)
+    sys.exit(2)

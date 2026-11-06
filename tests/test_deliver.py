@@ -124,7 +124,7 @@ class DeliveryTests(AddressedCase):
         old = cursor.read_bytes()
         self.manifest.paths.bus_log.write_text('{broken}\n')
         self.assertEqual(self.run_hook(), '')
-        self.assertEqual(cursor.read_bytes(), old)
+        self.assertEqual(read_json(cursor)['offset'], len(b'{broken}\n'))
         cursor.write_text('{broken}')
         self.assertEqual(self.run_hook(), '')
         cursor.unlink()
@@ -218,8 +218,8 @@ class DeliveryTests(AddressedCase):
         self.assertEqual(sum((hooks.entries(after)-hooks.entries(before)).values()), 2)
         self.assertEqual(record['before'], before)
         self.assertEqual(record['after'], after)
-        with self.assertRaisesRegex(Exception, 'receipt_exists'):
-            deliver.install(self.manifest, target)
+        deliver.install(self.manifest, target)  # owned installation is idempotent
+        self.assertEqual(read_json(target), after)
         after['model'] = 'unrelated edit'
         write_json(target, after)
         deliver.uninstall(self.manifest, target)
@@ -239,3 +239,27 @@ class DeliveryTests(AddressedCase):
             deliver.uninstall(self.manifest, target)
         self.assertEqual(read_json(target), doc)
         self.assertFalse(read_json(deliver.receipt_path(self.manifest, target))['restored'])
+
+    def test_corrupt_complete_rows_advance_and_do_not_hide_following_delivery(self):
+        path = self.manifest.paths.bus_log
+        with path.open('ab') as stream:
+            stream.write(b'broken\n[]\n\xff\n{"kind":"ask","to":"lead-a","frm":"x"}\n')
+        self.incumbent_row('after-corrupt', 'x', 'lead-a')
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertIn('BUS ask after-corrupt', self.run_hook())
+        self.assertIn('BUS_INVALID_JSON skipped=4', error.getvalue())
+        self.assertEqual(read_json(deliver.cursor_path(self.manifest, 'lead-a'))['offset'], path.stat().st_size)
+        with contextlib.redirect_stderr(io.StringIO()) as repeated:
+            self.assertEqual(self.run_hook(), '')
+        self.assertEqual(repeated.getvalue(), '')
+
+    def test_bootstrap_surfaces_corrupt_row_warning(self):
+        with self.manifest.paths.bus_log.open('ab') as stream:
+            stream.write(b'broken\n')
+        self.incumbent_row('following', 'x', 'lead-a')
+        out, error = io.StringIO(), io.StringIO()
+        with patch.object(sys, 'stdin', io.StringIO(json.dumps(self.payload))), contextlib.redirect_stdout(out), contextlib.redirect_stderr(error):
+            self.assertEqual(main(['--manifest', str(self.file), 'deliver', '--hook']), 0)
+        self.assertIn('BUS ask following', out.getvalue())
+        self.assertIn('BUS_INVALID_JSON', error.getvalue())

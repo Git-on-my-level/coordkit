@@ -1,15 +1,15 @@
 #!/bin/bash
 # Customize paths, labels and preconditions on disposable copies before use.
-# Reference cutover: repoint the lead's ~/.claude hooks from the incumbent lead_wait to coordkit, with a
-# recorded backup, then `lead adopt --actor ck-omi-lead`. Run it AFTER apply-cutover.sh has exited 0 (manifest live).
-# Written for an operator session other than bus-maintainer, which may not edit harness settings.
+# Reference cutover: repoint the lead's /path/to/claude-primary hooks from the incumbent lead_wait to coordkit, with a
+# recorded backup, then `lead adopt --actor ck-example-lead`. Run it AFTER apply-cutover.sh has exited 0 (manifest live).
+# Written for an operator session other than maintainer, which may not edit harness settings.
 #
 #   apply-lead-hooks.sh --lead-session SID [--config-dir DIR]            dry run: preconditions + exact hook diff
 #   apply-lead-hooks.sh --lead-session SID [--config-dir DIR] --apply    back up, install, register, verify; on failure restore all
-# DIR is the lead's Claude Code config dir (default ~/.claude). SID is the live
+# DIR is the lead's Claude Code config dir (default /path/to/claude-primary). SID is the live
 # lead's session id: its transcript must be under DIR/projects and written in the last 24h. The ask-guard only guards
 # the registered lead session, so without it the guard is a no-op. Where DIR has the incumbent lead_wait pair it is
-# swapped for coordkit's; where it has none (~/.claude-1) coordkit's pair is added. Run it from a session that may edit
+# swapped for coordkit's; where it has none (/path/to/claude-secondary) coordkit's pair is added. Run it from a session that may edit
 # DIR/settings.json (not one living in DIR under auto mode).
 #
 # Exit codes: 0 done (or dry run ok); 1 failed and rolled back to the backup; 2 a precondition failed (nothing
@@ -17,12 +17,12 @@
 # Rollback later, by hand: `coordkit down` is NOT the tool here (it also stops the live jobs). Use
 #   PYTHONPATH=src python3.11 -c 'from coordkit.hooks import restore; from coordkit.manifest import load; restore(load("<M>"))'
 PY=${COORDKIT_PYTHON:-python3.11}
-M=${LEAD_HOOKS_MANIFEST:-$HOME/workspace/omi/coordkit.toml}  # overrides exist for rehearsal on copies
-SRC=$HOME/src/coordkit/src
-ROOT=${LEAD_HOOKS_ROOT:-$HOME/src/coordkit/examples/omi/.coordkit}
+M=${LEAD_HOOKS_MANIFEST:-/path/to/project/coordkit.toml}  # overrides exist for rehearsal on copies
+SRC=/path/to/coordkit/src
+ROOT=${LEAD_HOOKS_ROOT:-/path/to/coordkit/examples/omi/.coordkit}
 TARGET=${LEAD_HOOKS_TARGET:-}
 export PYTHONPATH=$SRC
-MODE=dry; SID=""; CONFIG_DIR=$HOME/.claude
+MODE=dry; SID=""; CONFIG_DIR=/path/to/claude-primary
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) MODE=apply ;;
@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
     *) echo "usage: $0 --lead-session SID [--config-dir DIR] [--apply]"; exit 2 ;;
   esac; shift
 done
-case "$CONFIG_DIR" in $HOME/.claude|$HOME/.claude-1|$HOME/.claude-2) ;; *)
+case "$CONFIG_DIR" in /path/to/claude-primary|/path/to/claude-secondary|/path/to/claude-tertiary) ;; *)
   [ -n "${LEAD_HOOKS_TARGET:-}" ] || { echo "--config-dir must be one of the managed config dirs (got $CONFIG_DIR)"; exit 2; } ;; esac
 [ -n "$TARGET" ] || TARGET=$CONFIG_DIR/settings.json
 echo "$SID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
@@ -92,7 +92,7 @@ grep -E '^(MODE|REMOVE|ADD)' "$LOG" | while read -r l; do say "DIFF $l"; done
 ck doctor >"$RUN/doctor-pre.txt" 2>&1 || fail_pre "doctor is not green before the hook change (see $RUN/doctor-pre.txt)"
 say "PRECONDITIONS_OK mode=$MODE target=$TARGET run=$RUN"
 if [ $MODE = dry ]; then
-  say "WOULD back up $TARGET, install the diff above with a receipt, register lead session $SID, probe ask-guard (lead + other session) + pending, lead adopt --actor ck-omi-lead, doctor, up --plan"
+  say "WOULD back up $TARGET, install the diff above with a receipt, register lead session $SID, probe ask-guard (lead + other session) + pending, lead adopt --actor ck-example-lead, doctor, up --plan"
   say "DRY_RUN_OK: nothing changed (log in $RUN)"; quit 0
 fi
 
@@ -156,7 +156,7 @@ fi
 ck wait pending --brief >"$RUN/pending.txt" 2>>"$LOG" || rollback "pending --brief failed (rc=$?)"
 grep -q '^lead-wait\[lead\]: ' "$RUN/pending.txt" || rollback "pending --brief printed no summary"
 say "PROBES ok (in flight=$running; ask-guard $([ "$running" -gt 0 ] && echo denied || echo silent) for the lead, silent for another session; pending: $(head -1 "$RUN/pending.txt" | cut -c1-120))"
-ck lead adopt --actor ck-omi-lead >>"$LOG" 2>&1 || rollback "lead adopt failed"
+ck lead adopt --actor ck-example-lead >>"$LOG" 2>&1 || rollback "lead adopt failed"
 ck doctor --strict-dead-letters >"$RUN/doctor-post.txt" 2>&1; drc=$?
 "$PY" - "$RUN/doctor-post.txt" "$drc" <<'PY' >>"$LOG" 2>&1 || rollback "doctor incomplete or red after the hook change (see doctor-post.txt)"
 # Every check exactly once; green, except strict dead_letters (not caused by hooks); rc agrees.
@@ -178,5 +178,5 @@ ck up --plan >"$RUN/post-hooks-plan.txt" 2>&1; urc=$?
 grep -q '^UP_DIFF' "$RUN/post-hooks-plan.txt" && rollback "up --plan shows drift after the hook change (see post-hooks-plan.txt)"
 trap - EXIT INT TERM HUP
 touch "$RUN/done"
-say "LEAD_HOOKS_APPLIED: incumbent lead_wait hooks replaced by coordkit ask-guard + Stop pending; lead session $SID registered; lead adopted ck-omi-lead; doctor complete; up --plan clean. Review the recorded verification output."
+say "LEAD_HOOKS_APPLIED: incumbent lead_wait hooks replaced by coordkit ask-guard + Stop pending; lead session $SID registered; lead adopted ck-example-lead; doctor complete; up --plan clean. Review the recorded verification output."
 quit 0

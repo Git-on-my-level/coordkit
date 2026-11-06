@@ -1,17 +1,17 @@
 #!/bin/bash
 # Customize paths, labels and preconditions on disposable copies before use.
-# Omi coordkit cutover, see CUTOVER.md.
+# Reference deployment coordkit cutover, see CUTOVER.md.
 #
 #   apply-cutover.sh            dry run: read-only checks, prints every step; writes nothing (logs go to a temp dir)
-#   apply-cutover.sh --apply    pause the duplicate jobs, flip $HOME/workspace/omi/coordkit.toml to live,
-#                               `coordkit up --apply` (audit/reconciliation jobs + question hooks in ~/.claude, ~/.claude-1, ~/.claude-2),
+#   apply-cutover.sh --apply    pause the duplicate jobs, flip /path/to/project/coordkit.toml to live,
+#                               `coordkit up --apply` (audit/reconciliation jobs + question hooks in /path/to/claude-primary, /path/to/claude-secondary, /path/to/claude-tertiary),
 #                               verify (doctor complete and green, jobs loaded AND one clean run each for sweep and
 #                               reconcile, hooks present, hook fail-open probe). ANY failure, error exit or signal
 #                               rolls back, fail-closed.
 #   apply-cutover.sh --rollback RUN_DIR
 #                               finish a rollback from RUN_DIR/state.env after an uncatchable kill mid-apply.
 #
-# Run it from a session that may edit ~/.claude*/settings.json (some harness policies refuse self-modification). Exit codes: 0 applied and verified; 1 failed and rolled back cleanly (pre-cutover state);
+# Run it from a session that may edit /path/to/claude-primary*/settings.json (some harness policies refuse self-modification). Exit codes: 0 applied and verified; 1 failed and rolled back cleanly (pre-cutover state);
 # 2 precondition failed (nothing changed); 3 rollback incomplete: incumbents deliberately left PAUSED, read the
 # log and CUTOVER.md rollback guidance before touching anything; 4 applied and verified but the done journal could not
 # be written (do not --rollback that run).
@@ -19,17 +19,17 @@ set -u
 MODE=dry
 case "${1:-}" in --apply) MODE=apply ;; --rollback) MODE=rollback ;; "") ;; *) echo "usage: $0 [--apply | --rollback RUN_DIR]"; exit 2 ;; esac
 if [ "$MODE" = rollback ] && [ -z "${2:-}" ]; then echo "usage: $0 --rollback RUN_DIR"; exit 2; fi  # before the lock
-CK=${COORDKIT_CHECKOUT:-$HOME/src/coordkit}
-M=$HOME/workspace/omi/coordkit.toml
+CK=${COORDKIT_CHECKOUT:-/path/to/coordkit}
+M=/path/to/project/coordkit.toml
 ROOT=$CK/examples/omi/.coordkit
 PY=${COORDKIT_PYTHON:-python3.11}
 U=$(id -u)
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" PYTHONPATH=$CK/src
-INCUMBENT=(com.example.omi-missedwork com.example.omi.shadow com.example.omi.obligations)
-LIVE_JOBS=(com.example.omi.loop.audit com.example.omi.reconcile)
-KICK_JOBS=(com.example.omi.reconcile)  # loop.audit delegates a paid agent run: not kicked
+export PATH="/path/to/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" PYTHONPATH=$CK/src
+INCUMBENT=(com.example.project-audit-legacy com.example.project.shadow com.example.project.obligations)
+LIVE_JOBS=(com.example.project.loop.audit com.example.project.reconcile)
+KICK_JOBS=(com.example.project.reconcile)  # loop.audit delegates a paid agent run: not kicked
 # This example manages three explicitly scoped harness config directories.
-SETTINGS=($HOME/.claude/settings.json $HOME/.claude-1/settings.json $HOME/.claude-2/settings.json)
+SETTINGS=(/path/to/claude-primary/settings.json /path/to/claude-secondary/settings.json /path/to/claude-tertiary/settings.json)
 CHECKS="escalation_limits manifest binaries anx agentctl reconciler_age github launchd dead_letters shadow_guard"
 
 # One apply or rollback at a time, host-wide (atomic mkdir; the holder's pid is inside). Released on every exit.
@@ -73,9 +73,9 @@ doctor_ok() {  # doctor_ok FILE allow_drift RC: every check exactly once; green 
   "$PY" - "$1" "$2" "$CHECKS" "$3" <<'PY'
 import sys
 path, allow, names, rc = sys.argv[1], sys.argv[2] == 'yes', sys.argv[3].split(), int(sys.argv[4])
-expected = {'missing job com.example.omi.loop.audit', 'missing job com.example.omi.reconcile',
-            'unexpected job com.example.omi.shadow',
-            'unexpected job com.example.omi.obligations'}
+expected = {'missing job com.example.project.loop.audit', 'missing job com.example.project.reconcile',
+            'unexpected job com.example.project.shadow',
+            'unexpected job com.example.project.obligations'}
 seen, bad = {}, []
 for line in open(path):
     if not line.startswith('DOCTOR '):
@@ -201,7 +201,7 @@ fail_pre() { say "PRECONDITION_FAILED $*"; quit 2; }
 [ -f "$M" ] || fail_pre "no live manifest at $M"
 grep -q '^mode = "shadow"' "$M" || fail_pre "manifest is not in shadow mode (already applied, or edited)"
 grep -q "^root = \"$ROOT\"" "$M" || fail_pre "manifest root is not the absolute shared root $ROOT"
-"$PY" - "$M" <<'PY' >>"$LOG" 2>&1 || fail_pre "apply scope is not pinned (bridge/RC must be off; exactly ~/.claude, ~/.claude-1 and ~/.claude-2)"
+"$PY" - "$M" <<'PY' >>"$LOG" 2>&1 || fail_pre "apply scope is not pinned (bridge/RC must be off; exactly /path/to/claude-primary, /path/to/claude-secondary and /path/to/claude-tertiary)"
 # `down` reverses jobs and hook receipts only: anything else up --apply could enroll must be off.
 import sys
 from pathlib import Path
@@ -209,7 +209,7 @@ from coordkit.manifest import load
 m = load(sys.argv[1])
 dirs = sorted(str(Path(d).expanduser()) for d in m.questions.config_dirs)
 ok = (not m.anx.bridge_answers and not m.rc_host.enabled
-      and dirs == sorted(str(Path.home()/d) for d in ('.claude', '.claude-1', '.claude-2')))
+      and dirs == sorted('/path/to/'+d for d in ('claude-primary', 'claude-secondary', 'claude-tertiary')))
 print('scope', dict(bridge=m.anx.bridge_answers, rc=m.rc_host.enabled, dirs=dirs)); sys.exit(0 if ok else 1)
 PY
 for f in "${SETTINGS[@]}"; do [ -r "$f" ] || fail_pre "cannot read $f"; done
@@ -223,13 +223,13 @@ PY
 ck doctor >"$RUN/doctor-pre.txt" 2>&1; drc=$?
 doctor_ok "$RUN/doctor-pre.txt" yes "$drc" >>"$LOG" 2>&1 || fail_pre "shadow doctor (rc=$drc) is incomplete or has unexpected red checks (see $RUN/doctor-pre.txt)"
 # Drain: incumbent executions finish under their own watchers; coordkit works only
-# on the new ck-omi board. Snapshot the in-flight executions (the drain receipt) and refuse if any targets a
-# ck-omi card, the only place coordkit could act on the same card. Fail closed if either source is unreadable.
+# on the new ck-example board. Snapshot the in-flight executions (the drain receipt) and refuse if any targets a
+# ck-example card, the only place coordkit could act on the same card. Fail closed if either source is unreadable.
 agentctl recent --state nonterminal --limit 200 --output json >"$RUN/nonterminal.json" 2>>"$LOG" \
   || fail_pre "cannot inventory in-flight executions (agentctl recent)"
-anx --workspace omi --as ck-omi-lead --json cards list --board ck-omi >"$RUN/ck-omi-cards.json" 2>>"$LOG" \
-  || fail_pre "cannot list ck-omi board cards (anx)"
-"$PY" - "$RUN/nonterminal.json" "$RUN/ck-omi-cards.json" <<'PY' >>"$LOG" 2>&1 || fail_pre "an in-flight execution targets a ck-omi card, or the inventory is incomplete (see the log)"
+anx --workspace example --as ck-example-lead --json cards list --board ck-example >"$RUN/ck-example-cards.json" 2>>"$LOG" \
+  || fail_pre "cannot list ck-example board cards (anx)"
+"$PY" - "$RUN/nonterminal.json" "$RUN/ck-example-cards.json" <<'PY' >>"$LOG" 2>&1 || fail_pre "an in-flight execution targets a ck-example card, or the inventory is incomplete (see the log)"
 import json, sys
 ex = json.load(open(sys.argv[1]))
 cards = json.load(open(sys.argv[2]))
@@ -238,7 +238,7 @@ if not ex.get('ok') or ex['result'].get('has_more') or not cards.get('ok') or (c
 handles = {c.get('handle') for c in cards['result'].get('cards', [])}
 live = [(e['id'], l[len('anx.card.'):]) for e in ex['result']['executions'] for l in e.get('labels') or [] if l.startswith('anx.card.')]
 clash = [x for x in live if x[1] in handles]
-print('in-flight executions', len(ex['result']['executions']), 'card-linked', len(live), 'ck-omi cards', len(handles), 'clash', clash)
+print('in-flight executions', len(ex['result']['executions']), 'card-linked', len(live), 'ck-example cards', len(handles), 'clash', clash)
 sys.exit(1 if clash else 0)
 PY
 # Rehearse reconciliation read-only against a disposable copy of the bus: a temp copy
@@ -278,8 +278,8 @@ if [ "$MODE" = dry ]; then
   "$PY" -m coordkit.cli --manifest "$TMP/coordkit.toml" up --plan >"$RUN/up-plan.txt" 2>&1; rc=$?; rm -rf "$TMP"
   "$PY" - "$RUN/up-plan.txt" <<'PY' || { say "DRY_RUN_FAILED plan has unexpected differences (see $RUN/up-plan.txt)"; exit 2; }
 import re, sys
-ok = re.compile(r'^UP_DIFF (missing job com\.example\.omi\.(loop\.audit|reconcile)|unexpected job com\.example\.omi\.'
-                r'(shadow|obligations)|question hooks to install in ' + re.escape(str(__import__('pathlib').Path.home())) + r'/\.claude(-1|-2)?/settings\.json)$')
+ok = re.compile(r'^UP_DIFF (missing job com\.example\.project\.(loop\.audit|reconcile)|unexpected job com\.example\.project\.'
+                r'(shadow|obligations)|question hooks to install in ' + r'/path/to/claude-(primary|secondary|tertiary)/settings\.json)$')
 lines = open(sys.argv[1]).read().splitlines()
 bad = [l for l in lines if l.startswith('UP_DIFF') and not ok.match(l)]
 sys.exit(1 if bad or 'UP_PLAN_ONLY' not in lines else 0)
@@ -377,7 +377,7 @@ has = lambda event, verb, matcher=None: any(g.get('matcher') == matcher and any(
 sys.exit(0 if has('PreToolUse', 'pretooluse', 'AskUserQuestion') and has('Stop', 'stop') and has('Notification', 'notification') else 1)
 PY
 done
-out=$(echo '{"tool_name":"Bash","tool_input":{}}' | "$PY" -m coordkit.cli --manifest "$M" question hook pretooluse --config-dir $HOME/.claude-1); prc=$?
+out=$(echo '{"tool_name":"Bash","tool_input":{}}' | "$PY" -m coordkit.cli --manifest "$M" question hook pretooluse --config-dir /path/to/claude-secondary); prc=$?
 { [ $prc = 0 ] && [ -z "$out" ]; } || rollback "hook probe rc=$prc or printed a decision for a non-question tool call"
 PHASE=done
 marked=0; touch "$RUN/done" 2>>"$LOG" && marked=1; record && marked=1
@@ -387,5 +387,5 @@ if [ $marked = 0 ]; then
   exit 4
 fi
 trap - EXIT INT TERM HUP; release_lock
-say "CUTOVER_APPLIED: ${LIVE_JOBS[*]} loaded, sweep+reconcile ran clean, question hooks in ${SETTINGS[*]}, doctor green. Paused:${ORIGINAL}. Next: bus-maintainer runs CUTOVER sections 5-6."
+say "CUTOVER_APPLIED: ${LIVE_JOBS[*]} loaded, sweep+reconcile ran clean, question hooks in ${SETTINGS[*]}, doctor green. Paused:${ORIGINAL}. Next: maintainer runs CUTOVER sections 5-6."
 exit 0

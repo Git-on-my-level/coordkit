@@ -1,7 +1,7 @@
 """Rehearsal of the example hook transactions on DISPOSABLE copies (the real settings files are only read).
 
 Usage: python3.11 -I examples/omi/rehearse_hooks.py EVIDENCE_DIR
-Copies ~/.claude/settings.json and ~/.claude-2/settings.json into EVIDENCE_DIR/rehearsal/, builds a live copy of
+Copies /path/to/claude-primary/settings.json and /path/to/claude-tertiary/settings.json into EVIDENCE_DIR/rehearsal/, builds a live copy of
 the example manifest rooted there, then installs and restores (1) the lead-hook transformation and (2) the question
 hooks for both dirs, asserting each restore is byte-for-byte JSON-equal to the original and that unrelated hooks
 survive.
@@ -22,10 +22,10 @@ work = evidence/'rehearsal'
 shutil.rmtree(work, ignore_errors=True)
 work.mkdir(parents=True)
 dirs = {}
-for name in ('.claude', '.claude-2'):
+for name in ('claude-primary', 'claude-tertiary'):
     d = work/name.lstrip('.')
     d.mkdir()
-    shutil.copyfile(Path.home()/name/'settings.json', d/'settings.json')
+    shutil.copyfile(Path('/path/to')/name/'settings.json', d/'settings.json')
     dirs[name] = d
 text = (ROOT/'examples/omi/coordkit.toml').read_text()
 text = text.replace('mode = "shadow"', 'mode = "live"', 1).replace('root = ".coordkit"', f'root = {json.dumps(str(work/"root"))}', 1)
@@ -35,8 +35,8 @@ manifest_file.write_text(text)
 m = load(manifest_file)
 results = {}
 
-# (1) lead hooks: incumbent pending + ask-guard -> coordkit, on the copy of ~/.claude
-lead = dirs['.claude']/'settings.json'
+# (1) lead hooks: incumbent pending + ask-guard -> coordkit, on the copy of /path/to/claude-primary
+lead = dirs['claude-primary']/'settings.json'
 original = json.loads(lead.read_text())
 backup = work/'lead-backup.json'
 shutil.copyfile(lead, backup)

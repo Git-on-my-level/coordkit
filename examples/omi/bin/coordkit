@@ -1,10 +1,10 @@
 #!/bin/sh
 # PATH entry point for bus, sweep, question, and delivery commands.
-# Defaults to the live Omi manifest; set COORDKIT_MANIFEST to use another. Installed as a symlink:
-#   ln -s $HOME/src/coordkit/examples/omi/bin/coordkit ~/.local/bin/coordkit
-BUS=${COORDKIT_BUS:-$HOME/workspace/omi/data/run-example/swarm/bin/bus}
+# Defaults to a placeholder manifest; set COORDKIT_MANIFEST to use another. Installed as a symlink:
+#   ln -s /path/to/coordkit/examples/omi/bin/coordkit /path/to/bin/coordkit
+BUS=${COORDKIT_BUS:-/path/to/project/data/run-example/swarm/bin/bus}
 # Compatibility: 'coordkit wait --as NAME ...' and 'coordkit ack ID --as NAME STATE [NOTE]' were announced to
-# lanes on 11-05 and removed by the prune. Route them to the swarm bus, which owns them now.
+# legacy callers before the compatibility wrapper. Route them to the swarm bus, which owns them now.
 case "$1" in
   wait)
     case " $* " in *" --as "*)
@@ -26,5 +26,5 @@ case "$1" in
       exec "$BUS" ack "$id" --from "$name" "${note:-received}" ;;
     esac ;;
 esac
-exec env PYTHONPATH="${COORDKIT_HOME:-$HOME/src/coordkit/src}" "${COORDKIT_PYTHON:-python3.11}" -m coordkit.cli \
-  --manifest "${COORDKIT_MANIFEST:-$HOME/workspace/omi/coordkit.toml}" "$@"
+exec env PYTHONPATH="${COORDKIT_HOME:-/path/to/coordkit/src}" "${COORDKIT_PYTHON:-python3.11}" -m coordkit.cli \
+  --manifest "${COORDKIT_MANIFEST:-/path/to/project/coordkit.toml}" "$@"

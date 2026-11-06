@@ -1,6 +1,1 @@
-# Exact compatibility lines in the reference manifest; SHA256 of line bytes without newline.
-examples/omi/coordkit.toml:ed108712d1a629756a9cdb7f7db80bbb791b80f8b0642d0df7046960f2bb0d38
-examples/omi/coordkit.toml:16b02a2f96d330fe47fe8dedf252755e8ebe2906f37aab152343bf406cf2e13e
-examples/omi/coordkit.toml:da7dc5190c18b62f6ef15aeca6dbd03a3e19bf8f4f3698543fde715384a3dd40
-examples/omi/coordkit.toml:b91e6b887e53d03c46c073bda58a1007af376fbca8ed3610eaac1ca6bfa47bc9
-examples/omi/coordkit.toml:694f1d992a699adb3236db5d0c995f713b8f37d69cf5b628f2473b0ce3dd2e46
+# No public-tree exceptions. Reference deployments use neutral placeholders.

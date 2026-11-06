@@ -3,8 +3,6 @@ import argparse
 import sys
 from pathlib import Path
 from . import __version__
-from .manifest import ManifestError, load
-from .process import ToolError
 
 
 def question_hook(argv):
@@ -16,6 +14,7 @@ def question_hook(argv):
         parser.add_argument("command")
         options, rest = parser.parse_known_args(argv)
         from .questions import main as questions_main
+        from .manifest import load
         manifest = load(options.manifest)
         questions_main(rest, manifest)
     except BaseException:  # noqa: fail open, including SystemExit from argparse
@@ -30,20 +29,31 @@ def main(argv=None):
         return bootstrap(raw)
     if "question" in raw and raw[raw.index("question")+1:raw.index("question")+2] == ["hook"]:
         return question_hook(raw)
+    from .manifest import ManifestError, load
+    from .process import ToolError
     parser = argparse.ArgumentParser(prog="coordkit")
     parser.add_argument("--manifest")
     parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
-    parser.add_argument("command", metavar="{bus,sweep,question,deliver,mcp-serve,doctor,up,down}", choices=["bus", "lane", "wait", "loop", "reconcile", "shadow", "obligations", "init", "up", "down", "doctor", "lead",
-                                                "sweep", "review", "question", "mcp-serve", "deliver"])
+    from .ops import COMMANDS
+    parser.add_argument("command", choices=tuple(COMMANDS))
     options, rest = parser.parse_known_args(argv)
     try:
+        if options.command == 'update':
+            from .selfupdate import main as update_main
+            return update_main(rest, load(options.manifest) if options.manifest else None)
+        if options.command == 'bus':
+            from .bus import main as bus_main
+            return bus_main(rest, load(options.manifest))
+        if options.command in ('ops', 'version'):
+            if options.command == 'version':
+                print(__version__)
+                return 0
+            from .ops import main as ops_main
+            return ops_main(rest)
         from .lifecycle import initialize, main as lifecycle_main, shadow_allowed
         if options.command == "init":
-            init_parser = argparse.ArgumentParser(prog="coordkit init")
-            init_parser.add_argument("project")
-            init_parser.add_argument("--workspace", default="anx")
-            init_parser.add_argument("--board")
-            init_parser.add_argument("--git-repo")
+            from .ops import parser_for
+            init_parser = parser_for('init')
             init_options = init_parser.parse_args(rest)
             target = Path(options.manifest or "coordkit.toml").resolve()
             if target.exists():
@@ -53,8 +63,20 @@ def main(argv=None):
                 repo = init_options.git_repo
                 if not repo:
                     raise ManifestError("init_requires_git_repo: pass --git-repo owner/name")
-            return initialize(init_options.project, target, init_options.workspace, init_options.board, repo)
+            return initialize(init_options.project, target, init_options.workspace, init_options.board, repo, profile=init_options.profile)
         manifest = load(options.manifest)
+        if options.command in ('retire', 'unretire'):
+            from .ops import parser_for
+            lane_parser = parser_for(options.command)
+            lane_options = lane_parser.parse_args(rest)
+            from .wake import change
+            return change(manifest, lane_options.lane, getattr(lane_options, 'to', None), undo=options.command == 'unretire')
+        if options.command == 'mcp':
+            from .mcp_install import main as mcp_install_main
+            return mcp_install_main(rest, manifest)
+        if options.command == 'hooks':
+            from .hooks import main as hooks_main
+            return hooks_main(rest, manifest)
         if options.command == 'deliver':
             from .deliver import main as deliver_main
             return deliver_main(rest, manifest)

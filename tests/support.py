@@ -20,6 +20,8 @@ LAUNCHCTL_CODE = compile((FAKE_SOURCES/'launchctl').read_text(),str(FAKE_SOURCES
 BASE = '''[project]
 name = "sample"
 git_repo = "owner/repo"
+[services]
+manager = "launchd"
 [anx]
 workspace = "anx"
 board = "ck-sample"
@@ -42,6 +44,8 @@ class FakeCase(unittest.TestCase):
     def setUp(self):
         scratch = Path(__file__).resolve().parents[1] / ".coordkit"
         scratch.mkdir(exist_ok=True)
+        wake_patch = patch('coordkit.wake.wake_adapters', return_value=[])
+        wake_patch.start(); self.addCleanup(wake_patch.stop)
         self.temp = tempfile.TemporaryDirectory(dir=scratch)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -71,7 +75,7 @@ class FakeCase(unittest.TestCase):
                 target.write_text(content)
                 target.chmod(source.stat().st_mode)
         env = {key: str(fakes / key.lower()) for key in ("ANX", "AGENTCTL", "GH", "LAUNCHCTL")}
-        env.update(FAKE_LOG=str(self.log), FAKE_RESPONSES=str(self.responses))
+        env.update(FAKE_LOG=str(self.log), FAKE_RESPONSES=str(self.responses), COORDKIT_STATE_HOME=str(self.root/'host-state'))
         self.environment = patch.dict(os.environ, env)
         self.environment.start()
         self.addCleanup(self.environment.stop)

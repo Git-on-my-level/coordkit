@@ -20,6 +20,7 @@ from .anxcli import AnxClient
 from .manifest import ManifestError, duration, load
 from .process import ToolError, run
 from .state import read_json, write_json
+from .services import manager
 
 
 def shadow_allowed(command, argv):
@@ -52,7 +53,7 @@ def ensure_resource(client, get_args, create_args):
     return client.call(*create_args,write=True)
 
 
-def initialize(project, file, workspace, board, git_repo):
+def initialize(project, file, workspace, board, git_repo, profile="anx"):
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}',project):
         raise ManifestError('invalid_project_slug')
     file=Path(file).resolve()
@@ -78,6 +79,11 @@ card = "card:loop-audit"
 path = {json.dumps([str(Path.home()/'.local/bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'])}
 python = {json.dumps(sys.executable)}
 '''
+        if profile == 'minimal':
+            text = f'[project]\nname = {json.dumps(project)}\ngit_repo = {json.dumps(git_repo)}\n' + \
+                   '[paths]\nroot = ".coordkit"\n[launchd]\n' + \
+                   f'path = {json.dumps([str(Path.home()/".local/bin"), "/usr/local/bin", "/usr/bin", "/bin"])}\n' + \
+                   f'python = {json.dumps(sys.executable)}\n'
         # Parse using the same loader without leaving an unusable scaffold on a network failure.
         import tempfile
         file.parent.mkdir(parents=True,exist_ok=True)
@@ -93,22 +99,23 @@ python = {json.dumps(sys.executable)}
         if manifest.project.name != project:
             raise ManifestError('init_project_mismatch')
     manifest.writable()
-    client=AnxClient(manifest)
-    client.call('orient')  # reachability + --as first-use identity registration
-    result=ensure_resource(client,('boards','get',manifest.anx.board),
-                           ('boards','create','--title',manifest.anx.board,'--summary',f'Coordkit {project} work'))
-    board_doc=result.get('board') or {}
-    if board_doc.get('handle') and board_doc['handle'] != manifest.anx.board:
-        raise ManifestError('created_board_handle_mismatch: '+board_doc['handle'])
-    for agent in manifest.agents:
-        AnxClient(manifest,agent.actor).call('orient')
-    for name in manifest.loop.loops:
-        settings, handle=loop.config(manifest,name)
-        ref='card:'+handle
-        ensure_resource(client,('cards','get',ref),('cards','create','--board',manifest.anx.board,
-            '--handle',handle,'--title',f'Loop {name}','--body',settings.stop_rule,'--column','in_progress'))
-        client.call('work','cadence',ref,'--every',settings.default_cadence,
-                    '--budget',settings.progress_budget,'--stop-rule',settings.stop_rule,write=True)
+    if profile == 'anx' and manifest.anx.workspace:
+        client=AnxClient(manifest)
+        client.call('orient')  # reachability + --as first-use identity registration
+        result=ensure_resource(client,('boards','get',manifest.anx.board),
+                               ('boards','create','--title',manifest.anx.board,'--summary',f'Coordkit {project} work'))
+        board_doc=result.get('board') or {}
+        if board_doc.get('handle') and board_doc['handle'] != manifest.anx.board:
+            raise ManifestError('created_board_handle_mismatch: '+board_doc['handle'])
+        for agent in manifest.agents:
+            AnxClient(manifest,agent.actor).call('orient')
+        for name in manifest.loop.loops:
+            settings, handle=loop.config(manifest,name)
+            ref='card:'+handle
+            ensure_resource(client,('cards','get',ref),('cards','create','--board',manifest.anx.board,
+                '--handle',handle,'--title',f'Loop {name}','--body',settings.stop_rule,'--column','in_progress'))
+            client.call('work','cadence',ref,'--every',settings.default_cadence,
+                        '--budget',settings.progress_budget,'--stop-rule',settings.stop_rule,write=True)
     if not existed:
         # Exclusive creation prevents a concurrent init from clobbering user configuration.
         with file.open('x') as stream:
@@ -117,6 +124,8 @@ python = {json.dumps(sys.executable)}
     # An empty readable bus is needed for fail-closed merge and for the first loop snapshot.
     manifest.paths.bus_log.parent.mkdir(parents=True,exist_ok=True)
     manifest.paths.bus_log.touch(exist_ok=True)
+    from .selfupdate import register
+    register(manifest)
     print(f'INIT_OK {manifest.file}')
     return 0
 
@@ -133,6 +142,11 @@ def templates(manifest):
         'StartInterval':interval,
         'StandardOutPath':str(manifest.paths.root/'reconcile/stdout.log'),
         'StandardErrorPath':str(manifest.paths.root/'reconcile/stderr.log')})
+    mcp_job = read_json(manifest.paths.root/'mcp-service.json')
+    if mcp_job:
+        from .mcp_install import spec
+        argv = mcp_job['ProgramArguments']
+        jobs.append(spec(manifest, Path(argv[argv.index('--secret-file')+1]), int(argv[argv.index('--port')+1])))
     for job in jobs:
         # A src checkout is runnable before installation; installed wheels need no override.
         job['EnvironmentVariables'].update(python_env())
@@ -172,6 +186,9 @@ def record_dead_letter_baseline(manifest):
 
 
 def installed_jobs(manifest):
+    return manager(manifest).installed_labels(manifest.launchd.label_prefix)
+
+def _legacy_installed_jobs(manifest):
     """Installed namespace is authoritative even when lifecycle records were lost."""
     raw = checked(launchctl('list'))
     prefix = manifest.launchd.label_prefix+'.'
@@ -192,7 +209,10 @@ def installation_drift(manifest, include_pending_questions=True):
         if label not in expected:
             drift.append(f'unexpected job {label}')
             continue
-        raw = checked(launchctl('print', f'gui/{os.getuid()}/'+label))
+        if manager(manifest).name == 'systemd':
+            drift.extend(manager(manifest).drift(expected[label]))
+            continue
+        raw = manager(manifest).detail(label)
         match = re.search(r'^\s*path = (.+)$', raw, re.M)
         # Read the plist actually loaded, using records only if print omits the path.
         path = Path(match[1].strip()) if match else Path(recorded.get(label, {}).get('file',
@@ -216,7 +236,7 @@ def installation_drift(manifest, include_pending_questions=True):
         else:
             drift.append(f'loaded arguments unavailable {label}')
         interval = re.search(r'run interval = (\d+)', raw)
-        if not interval or int(interval[1]) != job['StartInterval']:
+        if job.get('StartInterval') and (not interval or int(interval[1]) != job['StartInterval']):
             drift.append(f'loaded interval drift {label}')
     drift.extend(hooks.drift(manifest))
     drift.extend(hooks.question_drift(manifest, include_pending_questions))
@@ -257,7 +277,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
             print(f'DOCTOR {name} red {exc}')
     def binaries():
         path=':'.join(manifest.launchd.path) if manifest.launchd.path else os.environ.get('PATH','')
-        for env,default in [('ANX','anx'),('AGENTCTL','agentctl'),('GH','gh')]:
+        requirements = ([('ANX', 'anx')] if manifest.anx.workspace else []) + ([('AGENTCTL', 'agentctl')] if manifest.agentctl.pools else [])
+        for env,default in requirements:
             binary=shutil.which(os.environ.get(env,default),path=path)
             if not binary or not Path(binary).is_absolute():
                 raise ManifestError('binary_unavailable: '+default)
@@ -266,6 +287,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
         return 'absolute executable paths resolve'
     client=AnxClient(manifest)
     def identity():
+        if not manifest.anx.workspace:
+            return 'absent (optional)'
         orient=client.call('orient')
         if not orient.get('principal',{}).get('id'):
             raise ManifestError('anx_lead_unresolved')
@@ -277,6 +300,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
                 raise ManifestError('anx_board_unresolved')
         return f'workspace={manifest.anx.workspace} actor={client.actor}'
     def pools():
+        if not manifest.agentctl.pools:
+            return 'absent (optional)'
         if manifest.mode == 'shadow':
             return 'manifest pools configured; shadow skips config probes'
         result=AgentctlClient(manifest).call('config','doctor')
@@ -284,6 +309,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
             raise ManifestError('agentctl_config_invalid')
         return ','.join(manifest.agentctl.pools)
     def github():
+        if not manifest.anx.workspace and not manifest.agentctl.pools:
+            return 'absent (optional)'
         raw=checked([os.environ.get('GH','gh'),'pr','list','-R',manifest.project.git_repo,'--limit','1','--json','number'])
         if not isinstance(json.loads(raw),list):
             raise ManifestError('github_invalid_response')
@@ -303,6 +330,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
             raise ManifestError('reconciler overdue beyond two intervals')
         return 'last reconciliation within two intervals or not started'
     def deadletters():
+        if not manifest.agentctl.pools:
+            return 'absent (optional)'
         if manifest.mode == 'shadow' and not strict_dead_letters:
             return 'shadow skips spool probe'
         snapshot = dead_letter_snapshot(manifest)
@@ -328,14 +357,22 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
         return f'{len(writes)} writer routes disabled in shadow'
     from .escalation import validate
     def alarm_path():
+        if not manifest.anx.workspace:
+            return 'absent (optional)'
         validate(manifest)
         client.resolve_card(manifest.escalation.card)
         return manifest.escalation.card
     check('escalation_limits',alarm_path)
-    check('manifest',lambda:manifest.validate_launchd())
+    check('manifest',lambda:manifest.validate_launchd() if manifest.launchd.path else 'services unconfigured (optional)')
     check('binaries',binaries); check('anx',identity); check('agentctl',pools)
     check('reconciler_age',reconciler_age)
     check('github',github); check('launchd',jobs); check('dead_letters',deadletters); check('shadow_guard',guard)
+    from .selfupdate import health
+    check('selfupdate', health)
+    from .adapters import available
+    for adapter in available(manifest):
+        if callable(getattr(adapter, 'status', None)):
+            check(adapter.name, adapter.status)
     from .usage import doctor_warnings
     for warning in doctor_warnings(manifest):
         print('DOCTOR model_drift warn ' + warning)
@@ -366,7 +403,8 @@ def up(manifest,apply=False):
         commands.append(['claude-host-setup','--prefix',manifest.rc_host.prefix,
                          manifest.rc_host.env+'='+str(manifest.file.parent)])
     for job in jobs:
-        print(plistlib.dumps(job).decode(),end='')
+        rendered = manager(manifest).render(job)
+        print(rendered.decode() if isinstance(rendered, bytes) else '\n'.join(rendered.values()), end='')
     for command in commands:
         print('UP_ACTION '+shlex.join(command))
     if not apply:
@@ -386,23 +424,23 @@ def up(manifest,apply=False):
     state_path=manifest.paths.root/'lifecycle.json'
     state=read_json(state_path,{'jobs':[], 'hook_backups':[]})
     for job in jobs:
-        directory=manifest.paths.root/'launchd'; directory.mkdir(parents=True,exist_ok=True)
+        service = manager(manifest)
         Path(job['StandardOutPath']).parent.mkdir(parents=True,exist_ok=True)
-        path=directory/(job['Label']+'.plist')
+        path = service.path(job['Label'])
         record={'label':job['Label'],'file':str(path)}
         previous=next((entry for entry in state['jobs'] if entry['label']==job['Label']),None)
-        if previous and path.exists() and plistlib.loads(path.read_bytes()) == job:
-            continue
-        if previous:
-            checked(launchctl('bootout',f'gui/{os.getuid()}/'+job['Label']))
-            state['jobs'].remove(previous)
-            write_json(state_path,state)
-        path.write_bytes(plistlib.dumps(job))
-        # Persist ownership before bootstrap so down can recover a lost receipt.
+        if previous and path.exists():
+            same = (path.read_bytes() == service.render(job)) if service.name == 'launchd' else not service.drift(job)
+            if same:
+                continue
+        # Persist ownership before bootstrap so down can recover a lost install.
+        state['jobs'] = [entry for entry in state['jobs'] if entry['label'] != job['Label']]
         state['jobs'].append(record); write_json(state_path,state)
-        checked(launchctl('bootstrap',f'gui/{os.getuid()}',str(path)))
+        service.install(job, previous=bool(previous))
     for command in commands:
         checked(command)
+    from .selfupdate import register
+    register(manifest)
     print('UP_OK')
     return 0
 
@@ -414,18 +452,14 @@ def down(manifest):
     records = {job['label']:job for job in state['jobs']}
     labels = set(installed_jobs(manifest)) | set(records)
     for label in sorted(labels):
-        target=f'gui/{os.getuid()}/'+label
-        result=run(launchctl('print',target))
-        if result.returncode == 0:
-            checked(launchctl('bootout',target))
-        elif 'Could not find service' not in result.stderr:
-            raise ToolError('launchctl',6,result.stderr+result.stdout)
+        manager(manifest).uninstall(label)
         state['jobs'] = [job for job in state['jobs'] if job['label'] != label]
         write_json(state_path,state)
     if state.get('hook_backups') and not hooks.receipt_path(manifest).exists():
         raise ManifestError('hook_rollback_snapshot_missing: inspect original and edited settings before restoring')
     hooks.restore(manifest)
     hooks.restore_questions(manifest)
+    (manifest.paths.root/'mcp-service.json').unlink(missing_ok=True)
     state['hook_backups'] = []
     write_json(state_path,state)
     print('DOWN_OK')
@@ -445,18 +479,8 @@ def adopt(manifest,actor=None):
 
 
 def main(argv,manifest,command):
-    parser=argparse.ArgumentParser(prog='coordkit '+command)
-    if command == 'up':
-        group=parser.add_mutually_exclusive_group(required=True)
-        group.add_argument('--plan',action='store_true'); group.add_argument('--apply',action='store_true')
-    if command == 'doctor':
-        parser.add_argument('--record-dead-letter-baseline',action='store_true')
-        parser.add_argument('--strict-dead-letters',action='store_true')
-        parser.add_argument('--disposition-dead-letter',metavar='EXECUTION_ID',
-                            help='record an audited disposition for this attributed dead letter (needs --reason)')
-        parser.add_argument('--reopen-dead-letter',metavar='EXECUTION_ID',help='undo a disposition')
-        parser.add_argument('--reason',default='')
-        parser.add_argument('--by',default='')
+    from .ops import parser_for
+    parser = argparse.ArgumentParser(prog='coordkit '+command) if command == 'lead' else parser_for(command)
     if command == 'lead':
         parser.add_argument('verb',choices=['adopt']); parser.add_argument('--actor')
     args=parser.parse_args(argv)

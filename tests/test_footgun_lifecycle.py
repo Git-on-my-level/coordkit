@@ -5,7 +5,7 @@ import os
 import plistlib
 import time
 from unittest.mock import patch
-from coordkit import lifecycle
+from coordkit import services, lifecycle
 from coordkit.state import write_json
 from tests.support import FakeCase
 
@@ -17,7 +17,7 @@ class LifecycleFootgunTests(FakeCase):
 
     def test_p2_8_down_finds_unrecorded_jobs_with_missing_state(self):
         output='PID Status Label\n123 0 com.coordkit.sample.orphan\n123 0 com.coordkit.sample-other.keep\n'
-        with patch.object(lifecycle,'checked',return_value=output) as checked, patch.object(lifecycle,'run') as run:
+        with patch.object(services,'checked',return_value=output) as checked, patch.object(services.process,'run') as run:
             run.return_value.returncode=0
             with contextlib.redirect_stdout(io.StringIO()): lifecycle.down(self.manifest)
         bootouts=[call.args[0] for call in checked.call_args_list if 'bootout' in call.args[0]]
@@ -28,7 +28,7 @@ class LifecycleFootgunTests(FakeCase):
         path=self.root/'out-of-band.plist'
         path.write_bytes(plistlib.dumps(dict(job, StartInterval=999)))
         raw=f'path = {path}\nenvironment = {{\nPATH => '+job['EnvironmentVariables']['PATH']+'\n}\narguments = {\nwrong\n}\nrun interval = 999 seconds\n'
-        with patch.object(lifecycle,'checked',side_effect=[f'1 0 {job["Label"]}\n',raw]):
+        with patch.object(services,'checked',side_effect=[f'1 0 {job["Label"]}\n',raw]):
             drift=lifecycle.installation_drift(self.manifest)
         self.assertTrue(any('plist drift' in d for d in drift))
         self.assertTrue(any('arguments drift' in d for d in drift))

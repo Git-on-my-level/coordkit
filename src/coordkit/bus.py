@@ -3,37 +3,30 @@ import hashlib
 import tempfile
 from .state import name_key, read_json
 import argparse, datetime as dt, fcntl, json, os, pathlib, re, secrets, subprocess, sys, collections, time
-from .actl import AgentctlClient
 from .manifest import ManifestError
+from .bus_protocol import KINDS, STATES, BLOCKER_CLOSERS, WAKE_KINDS, TEXT_CAP
 from .process import ToolError, parse_ts
-from .mirror import mirror
 
 CONFIG = None
 BUS = STATE = None
 IDLE_HOURS = 3
 LIVE_BUS_MINUTES = 120
-TEXT_CAP = 400
 NO_MIRROR = False
 
 
 def configure(manifest, no_mirror=False):
     global CONFIG, BUS, STATE, IDLE_HOURS, TEXT_CAP, NO_MIRROR, _EXECUTIONS
     CONFIG = manifest
-    BUS, STATE = manifest.paths.bus_log, manifest.paths.root / 'state'
+    BUS, STATE = manifest.paths.bus_log, manifest.paths.bus_log.parent / 'state'
     IDLE_HOURS, TEXT_CAP = manifest.bus.idle_hours, manifest.bus.text_cap
     NO_MIRROR, _EXECUTIONS = no_mirror, None
 
 
 FYI_REMIND_HOURS = 6  # an fyi identical to the sender's last fyi to that recipient on that topic is held this long
-KINDS = ['msg', 'ask', 'answer', 'ruling', 'handoff', 'fyi', 'lesson', 'debt', 'fail', 'signal', 'ack',
-         'apply_request', 'hold', 'unhold', 'state', 'blocker', 'decision']
-STATES = ('RUNNING', 'WAITING', 'DONE', 'FAILED', 'IDLE')
 SUBJECT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:#/@+-]{0,99}$')
-BLOCKER_CLOSERS = ('decision', 'answer')  # a later row of these kinds with --re <blocker id> closes it
 # Structured signals. Waiters that trigger writes match
 # the `signal` field of kind=signal posts only.
 SIGNAL_NAME = re.compile(r'^[A-Z][A-Z0-9_]{1,63}$')
-WAKE_KINDS = 'ask,handoff,ruling,fail,apply_request,blocker,decision'
 def now(): return dt.datetime.now(dt.timezone.utc)
 def since(s):
     if not s: return None
@@ -52,13 +45,14 @@ def normalize(index, row):
     if not isinstance(row, dict):
         _LEGACY['invalid'] += 1
         return {'id': f'legacy-L{index}', 'ts': EPOCH_TS, 'frm': '', 'to': '', 'kind': 'legacy_invalid', 'topic': '',
-                'text': '', 'legacy': 'invalid'}
+                'text': '', 'legacy': 'invalid', 'v': 1}
     fixed = {f: (EPOCH_TS if f == 'ts' else '') for f in REQUIRED if not isinstance(row.get(f), str)}
     if 'ts' not in fixed:
         try: parse_ts(row['ts'])
         except (ValueError, TypeError): fixed['ts'] = EPOCH_TS
     if not isinstance(row.get('id'), str) or not row['id']:
         fixed['id'] = f'legacy-L{index}'
+    row = {'topic': 'general', 'text': '', 'v': 1, **row}
     if not fixed:
         return row
     _LEGACY['id' if set(fixed) == {'id'} else 'invalid'] += 1
@@ -68,7 +62,9 @@ def parse_lines(lines, start=0):
     out = []
     for i in range(start, len(lines)):
         try: out.append((i, normalize(i, json.loads(lines[i]))))
-        except ValueError as exc: raise ValueError(f'bus_invalid_json: {exc}') from exc
+        except ValueError:
+            print(f'BUS_INVALID_JSON line={i + 1} (skipped)', file=sys.stderr)
+            out.append((i, normalize(i, None)))
     if (_LEGACY['id'] or _LEGACY['invalid']) and not _LEGACY['reported']:
         _LEGACY['reported'] = True
         print(f"BUS_LEGACY_ROWS synthesized_id={_LEGACY['id']} invalid={_LEGACY['invalid']} (normalized in memory)",
@@ -81,31 +77,62 @@ def adopted_row(row, since):
             or parse_ts(row['ts']).timestamp() >= since)
 def read(cut=None):
     return read_path(BUS, cut)
-def read_path(path, cut=None, *, complete=False):
-    """Read a manifest-owned log without changing process-global CLI configuration."""
+def read_path(path, cut=None, *, complete=True):
+    """Read committed physical lines without changing CLI configuration.
+
+    The `complete` keyword remains for caller compatibility. Every reader now
+    retries a non-newline-terminated tail, even when it contains valid JSON.
+    """
     if not path.exists(): return []
-    if complete:
-        data = path.read_bytes()
-        if data and not data.endswith(b'\n'):
-            data = data[:data.rfind(b'\n') + 1]
-        text = data.decode('utf-8')
-    else:
-        text = path.read_text()
-    rows = [r for _, r in parse_lines(text.splitlines())]
+    data = path.read_bytes()
+    data = data[:data.rfind(b'\n') + 1]
+    # Split on physical newlines, not Unicode separators inside message text.
+    lines = data.decode('utf-8', errors='replace').split('\n')[:-1]
+    rows = [r for _, r in parse_lines(lines)]
     return [r for r in rows if parse_ts(r['ts']) >= cut] if cut else rows
 def read_from(start):
     """(line count, [(index, row)...]) for rows at or after line `start`; the log is append-only, so a line count
     is a stable per-reader cursor."""
-    if not BUS.exists(): return 0, []
-    lines = BUS.read_text().splitlines()
-    return len(lines), parse_lines(lines, start)
+    from .tail import TailReader
+    # Shadow readers never persist hints into the watched bus state.
+    checkpoint = STATE / 'tail.offset.json' if CONFIG.mode != 'shadow' else None
+    total, lines = TailReader(BUS, checkpoint).read(start)
+    indexed = []
+    for index, line in lines:
+        indexed.extend((index, row) for _, row in parse_lines([line], 0)
+                       for row in [dict(row, id=f'legacy-L{index}') if row.get('id') == 'legacy-L0' else row])
+    return total, indexed
 def cursor_path(lane, kind): return STATE / 'cursors' / f"{name_key(lane)}.{kind}"
+def get_position(paths, default):
+    """Select progress in memory; only locked consumers may write cursors."""
+    paths = tuple(dict.fromkeys(paths))
+    positions = []
+    for path in paths:
+        try:
+            value = int(path.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            continue
+        if value >= 0:
+            positions.append(value)
+    if not positions:
+        return default
+    if BUS.exists():
+        total, _ = read_from(10 ** 18)
+        positions = [value for value in positions if value <= total]
+    if not positions:
+        return default
+    return max(positions)
+
+
 def get_cursor(lane, kind, default):
-    try: return int(cursor_path(lane, kind).read_text().strip())
-    except FileNotFoundError: return default
+    old = CONFIG.paths.root / 'state' / 'cursors' / f'{name_key(lane)}.{kind}'
+    return get_position((old, cursor_path(lane, kind)), default)
 def set_cursor(lane, kind, value):
-    path = cursor_path(lane, kind); path.parent.mkdir(parents=True, exist_ok=True)
-    replace_text(path, f'{value}\n')
+    # Compatibility window: advance the rollback reader before the new reader.
+    # If the locations coincide, perform only one replacement.
+    old = CONFIG.paths.root / 'state' / 'cursors' / f'{name_key(lane)}.{kind}'
+    for path in dict.fromkeys((old, cursor_path(lane, kind))):
+        replace_text(path, f'{value}\n')
 def replace_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as stream:
@@ -142,22 +169,38 @@ def append(recs, project=True):
     project=False and call project() last."""
     CONFIG.writable()
     BUS.parent.mkdir(parents=True, exist_ok=True)
-    with open(BUS, 'a') as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+    from .wake import refuse_retired, state_path
+    from .addressed import locked
+    with locked(state_path(CONFIG).with_suffix('.lock')):
         for rec in recs:
-            f.write(json.dumps(rec) + '\n')
-        f.flush()
-        os.fsync(f.fileno())
-        fcntl.flock(f, fcntl.LOCK_UN)
+            refuse_retired(CONFIG, resolve(rec.get('to', '')))
+        with open(BUS, 'a+b') as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            from .tail import TailReader
+            total, _ = TailReader(BUS, STATE / 'append.offset.json').read(10 ** 18)
+            f.seek(0, os.SEEK_END)
+            if f.tell():
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b'\n':
+                    raise ManifestError('bus_incomplete_tail: repair the partial writer before appending')
+            for rec in recs:
+                rec.update(v=2, seq=total)
+                f.write((json.dumps(rec) + '\n').encode())
+                total += 1
+            f.flush()
+            os.fsync(f.fileno())
+    # Named extension seam: committed rows only, never under the append lock.
+    from .adapters import notify
+    notify(CONFIG, recs)
     if project:
         project_pending()
 
 
 def project_pending():
-    if NO_MIRROR or not CONFIG.bus.mirror:
+    if NO_MIRROR or not CONFIG.bus.mirror or not CONFIG.anx.workspace:
         return
     # Serialize append + projection with the command lock. Never skip a row that failed for a transient reason; a definite card absence is dead-lettered.
-    cursor = STATE / 'mirror.cursor'
+    cursor = CONFIG.paths.root / 'state' / 'mirror.cursor'
     start = int(cursor.read_text()) if cursor.exists() else 0
     all_rows = read()
     for index in range(start, len(all_rows)):
@@ -169,7 +212,8 @@ def project_pending():
         from . import addressed  # pickup wakes/alerts are bus-only, never cards
         if ours and not addressed.is_escalation(row) and (row['kind'] in CONFIG.bus.mirror_kinds or row['kind'] == 'ack'):
             try:
-                mirror(CONFIG, row, all_rows[:index + 1])
+                from .adapters.builtin import Anx
+                Anx().project(CONFIG, row, all_rows[:index + 1])
             except (ToolError, ManifestError, OSError, ValueError) as exc:
                 from . import addressed
                 missing = str(getattr(exc, 'detail', '')).split(':', 2)
@@ -185,8 +229,8 @@ def project_pending():
                 elif getattr(exc, 'category', '') == 'card_unresolved' and 'not_found' in str(exc):
                     # A definite absence: dead-letter this one row
                     # with its reason and keep projecting. Outages still stop and retry.
-                    STATE.mkdir(parents=True, exist_ok=True)
-                    with open(STATE / 'mirror-dead-letters.jsonl', 'a') as dead:
+                    (CONFIG.paths.root / 'state').mkdir(parents=True, exist_ok=True)
+                    with open(CONFIG.paths.root / 'state' / 'mirror-dead-letters.jsonl', 'a') as dead:
                         dead.write(json.dumps({'at': now().isoformat(timespec='seconds'), 'id': row['id'],
                                                'kind': row['kind'], 'reason': str(exc)}) + '\n')
                     print(f"MIRROR_DEAD_LETTER {row['kind']} {row['id']} {exc}", file=sys.stderr)
@@ -202,9 +246,11 @@ def project_pending():
 _EXECUTIONS = None
 LAST_POST = None  # (row, addressed outcome) of the last post in this process, for `coordkit send`
 
-def aliases():
-    result = dict(CONFIG.bus.aliases)
-    for path in (BUS.parent/'aliases.json', BUS.parent/'state'/'aliases.json'):
+def aliases(manifest=None):
+    manifest = manifest or CONFIG
+    parent = manifest.paths.bus_log.parent
+    result = dict(manifest.bus.aliases)
+    for path in (parent/'aliases.json', parent/'state'/'aliases.json'):
         try:
             doc = read_json(path, {})
         except (OSError, ValueError):
@@ -235,7 +281,11 @@ def agentctl_recent():
     if not CONFIG.bus.live_check:
         return []
     if _EXECUTIONS is None:
-        executions = AgentctlClient(CONFIG)
+        from .adapters import get
+        adapter = get(CONFIG, 'agentctl')
+        if adapter is None:
+            return []
+        executions = adapter.client(CONFIG)
         # Liveness only needs recent history: ended executions older than the bus's live window
         # say nothing that 'no live execution' does not.
         since = (now() - dt.timedelta(hours=6)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -252,8 +302,10 @@ def launched_at(to):
     return max(times, default=None)
 def open_rulings(rows):
     """Rulings that name an owner and have no ack from that owner yet."""
-    acked = {r.get('re') for r in rows if r.get('kind') == 'ack'}
-    return [r for r in rows if r.get('kind') == 'ruling' and r.get('owner') and r.get('id') not in acked]
+    return [r for i, r in enumerate(rows) if r.get('kind') == 'ruling' and r.get('owner')
+            and not any(reply.get('re') == r.get('id') and
+                        (reply.get('kind') == 'ack' or (reply.get('kind') == 'answer' and reply.get('frm') == r['owner']))
+                        for reply in rows[i + 1:])]
 def open_blockers(rows):
     """Blockers with no later decision/answer that names them with --re."""
     closed = {r.get('re') for r in rows if r.get('kind') in BLOCKER_CLOSERS and r.get('re')
@@ -270,6 +322,8 @@ def lane_liveness(to, rows):
     """Agentctl labels are authoritative; recent bus activity covers native sessions."""
     if not CONFIG.bus.live_check:
         return None, 'live check disabled'
+    if to in live_readers():
+        return True, 'reader cursor within 24h'
     executions = agentctl_recent()
     mine = [e for e in executions if any(label_matches(label, to) for label in e.get('labels') or [])]
     if any(e.get('state') in ('running', 'starting') for e in mine):
@@ -283,6 +337,15 @@ def lane_liveness(to, rows):
     if last_post and last_post >= now() - dt.timedelta(minutes=LIVE_BUS_MINUTES):
         return True, 'recent bus post'
     return False, 'no live execution or recent bus post'
+def live_readers():
+    readers = set()
+    from urllib.parse import unquote
+    for root in (STATE, CONFIG.paths.root / 'state'):
+        for path in (root / 'cursors').glob('*'):
+            if path.suffix in ('.inbox', '.wait') and time.time() - path.stat().st_mtime < 86400:
+                readers.add(unquote(path.stem))
+    return readers
+
 def age_minutes(r): return int((now() - parse_ts(r['ts'])).total_seconds() // 60)
 def line(r, full=False):
     text = r.get('text') or ''
@@ -300,59 +363,29 @@ def line(r, full=False):
     return f"{r.get('id', '-')} {r['ts']} {r['frm']}→{r['to']} [{r.get('kind', 'msg')}/{r.get('topic', 'general')}] {text}"
 
 def _main(argv):
-    p = ExactParser(); s = p.add_subparsers(dest='cmd', required=True)
-    a = s.add_parser('post'); a.add_argument('--from', dest='frm', required=True); a.add_argument('--to', required=True)
-    a.add_argument('--topic', default='general'); a.add_argument('--kind', default='msg', choices=[k for k in KINDS if k != 'ack'])
-    a.add_argument('--owner', help='kind=ruling: the ONE lane that must act on it and ack it (mandatory); '
-                                   'kind=blocker: the ONE lane that can unblock it (mandatory)')
-    a.add_argument('--state', help=f'kind=state: one of {"/".join(STATES)}')
-    a.add_argument('--subject', help='kind=state (mandatory), decision, handoff: the train/run/card/PR it is about')
-    a.add_argument('--needs', help='kind=blocker: what would unblock it, one line (mandatory)')
-    a.add_argument('--rollback', help='kind=decision: how to undo it (or pass --irreversible)')
-    a.add_argument('--irreversible', action='store_true', help='kind=decision: there is no rollback')
-    a.add_argument('--evidence', help='kind=handoff: the SHA, run id or path that shows it is done')
-    a.add_argument('--re', help='id of the ask/ruling this replies to')
-    a.add_argument('--force', action='store_true', help='post to a recipient the bus has never seen')
-    a.add_argument('--ref', help=f'file with the full detail (post text is capped at {TEXT_CAP} chars)')
-    a.add_argument('--signal', help='kind=signal: the event name (UPPER_SNAKE), the only thing signal waiters match')
-    a.add_argument('--pr', help='kind=hold/unhold: the PR number(s) it covers, comma-separated (e.g. 123,124)')
-    a.add_argument('--id', help='stable publication id for retry recovery')
-    a.add_argument('--priority', choices=['urgent', 'normal'], help='urgent: 5-minute ack deadline and a page if nobody listens')
-    a.add_argument('text')
-    k = s.add_parser('ack'); k.add_argument('id'); k.add_argument('--from', dest='frm', required=True)
-    k.add_argument('--force', action='store_true', help='ack a ruling you do not own (recorded as such)')
-    k.add_argument('--owner', help='handoff/ask only: reassign the obligation to this owner (clock restarts)')
-    k.add_argument('note', nargs='?', default='')
-    r = s.add_parser('open-rulings'); r.add_argument('--min-age', type=int, default=0, help='minutes')
-    r.add_argument('--full', action='store_true', help='complete message bodies')
-    r.add_argument('--new-only', metavar='SEEN_FILE', help='print only ids not in SEEN_FILE, then record them there')
-    r.add_argument('--json', action='store_true')
-    b = s.add_parser('inbox'); b.add_argument('lane'); b.add_argument('--since')
-    b.add_argument('--full', action='store_true', help='complete message bodies')
-    b.add_argument('--unread', action='store_true', help="only messages since this lane's last --unread read (advances its cursor)")
-    b.add_argument('--brief', action='store_true', help='one short line per message (time from kind/topic first 120 chars)')
-    w = s.add_parser('wait', help='block until a message of an actionable kind reaches --to (fyi never wakes anyone)')
-    w.add_argument('--full', action='store_true', help='complete message bodies')
-    w.add_argument('--to', help='lane to wait for (required unless --signal)'); w.add_argument('--kinds', default=WAKE_KINDS)
-    w.add_argument('--signal', help='wait for a kind=signal post with this signal name (text is never matched)')
-    w.add_argument('--from', dest='frm', help='with --signal/--subject: only from this poster')
-    w.add_argument('--since', help='with --signal/--subject: also accept posts in this window (e.g. 30m); default from now')
-    w.add_argument('--subject', help='wait for a kind=state post about this subject (text is never matched)')
-    w.add_argument('--state', help='with --subject: comma-separated states to accept (default DONE,FAILED)')
-    w.add_argument('--timeout', type=float, default=240, help='minutes'); w.add_argument('--poll', type=float, default=15, help='seconds')
-    st = s.add_parser('state', help='latest kind=state row per (lane, subject)')
-    st.add_argument('--full', action='store_true', help='complete message bodies')
-    st.add_argument('--lane'); st.add_argument('--subject'); st.add_argument('--json', action='store_true')
-    ob = s.add_parser('open-blockers', help='blockers that no decision/answer --re has closed, with age')
-    ob.add_argument('--full', action='store_true', help='complete message bodies')
-    ob.add_argument('--owner'); ob.add_argument('--json', action='store_true')
-    c = s.add_parser('tail'); c.add_argument('-n', type=int, default=30)
-    c.add_argument('--full', action='store_true', help='complete message bodies')
-    d = s.add_parser('stats'); d.add_argument('--since')
-    h = s.add_parser('harvest', help='lesson/debt posts not yet harvested into the KB; --mark advances the cursor')
-    h.add_argument('--full', action='store_true', help='complete message bodies')
-    h.add_argument('--mark', action='store_true')
+    from .ops import bus_parser
+    p = bus_parser()
     o = p.parse_args(argv)
+    if o.cmd == 'post':
+        targets = o.to if isinstance(o.to, list) else [o.to]
+        targets = list(dict.fromkeys(resolve(t) for item in targets for t in item.split(',')))
+        if len(targets) > 1:
+            from .wake import refuse_retired
+            for target in targets:
+                refuse_retired(CONFIG, target)
+            known = known_recipients(read())
+            from .addressed import known_names
+            known |= known_names(CONFIG)
+            if not o.force and any(t not in known for t in targets):
+                raise ManifestError('unknown_recipient: ' + ','.join(t for t in targets if t not in known))
+            import copy
+            for index, target in enumerate(targets):
+                one = copy.copy(o)
+                one.to = target
+                if o.id: one.id = o.id + '-' + str(index)
+                dispatch(one)
+            return
+        o.to = targets[0]
     if ((o.cmd == 'wait' and o.to and not o.signal and not o.subject)
             or (o.cmd == 'inbox' and o.unread) or (o.cmd == 'harvest' and o.mark)
             or (o.cmd == 'open-rulings' and o.new_only)):
@@ -372,6 +405,19 @@ def _main(argv):
 
 
 def dispatch(o):
+    if o.cmd == 'reply':
+        original = next((r for r in read() if r.get('id') == o.id), None)
+        if original is None:
+            raise ManifestError('unknown_message: ' + o.id)
+        from .ops import bus_parser
+        post = bus_parser().parse_args(['post', '--from', o.frm, '--to', original['frm'],
+                                       '--topic', original.get('topic', 'general'), '--kind', 'answer',
+                                       '--re', o.id, '--force', o.text])
+        post.to = original['frm']
+        dispatch(post)
+        if original.get('kind') in ('ask', 'handoff', 'ruling'):
+            dispatch(argparse.Namespace(cmd='ack', id=o.id, frm=o.frm, owner=None, force=False, note='replied'))
+        return
     if o.cmd == 'post':
         # Validate the recipient so work does not silently reach an unknown lane.
         # Known but silent for IDLE_HOURS -> post it AND copy the lead so it isn't lost.
@@ -380,6 +426,8 @@ def dispatch(o):
             print(f"note: '{o.to}' is an alias of '{resolve(o.to)}' (manifest aliases); posting to '{resolve(o.to)}'",
                   file=sys.stderr)
             o.to = resolve(o.to)
+        from .wake import refuse_retired
+        refuse_retired(CONFIG, o.to)
         if o.owner and resolve(o.owner) != o.owner:
             o.owner = resolve(o.owner)
         if o.id:
@@ -511,6 +559,21 @@ def dispatch(o):
                   'Re-home the work rather than waiting on an idle lane (rule 20).', file=sys.stderr)
         if o.ref and not pathlib.Path(o.ref).is_file():
             print(f'refused: --ref {o.ref} is not a file', file=sys.stderr); sys.exit(2)
+        if not o.force and not o.id and o.kind not in ('state', 'fyi'):
+            digest = hashlib.sha256(o.text.encode()).hexdigest()
+            duplicate = next((r for r in reversed(rows) if r.get('frm') == o.frm and r.get('to') == o.to
+                              and r.get('kind') == o.kind and r.get('topic') == o.topic
+                              and r.get('re') == o.re and r.get('owner') == o.owner
+                              and r.get('subject') == o.subject and r.get('state') == o.state
+                              and all(r.get(k) == getattr(o, k) for k in ('needs', 'rollback', 'evidence', 'signal', 'priority'))
+                              and bool(r.get('irreversible')) == o.irreversible and r.get('prs', []) == prs
+                              and (not o.ref or r.get('ref') == str(pathlib.Path(o.ref).resolve()))
+                              and r.get('text_hash', hashlib.sha256(r.get('text', '').encode()).hexdigest()) == digest
+                              and now() - parse_ts(r['ts']) < dt.timedelta(minutes=5)), None)
+            if duplicate:
+                append([])  # also retries any pending projection
+                print('DEDUPED ' + duplicate['id'])
+                return
         # Latched fyi: an fyi identical to the sender's LAST fyi to this recipient
         # on this topic is a repeat of a latched state. Hold it until the text changes, with one reminder every
         # FYI_REMIND_HOURS; a short time window alone cannot suppress periodic unchanged reports.
@@ -715,14 +778,15 @@ def dispatch(o):
         for r in rows: print(line(r, full=True) if o.full else brief(r) if getattr(o, 'brief', False) else line(r))
     elif o.cmd == 'harvest':
         cur = STATE / 'harvest.cursor'
-        start = int(cur.read_text()) if cur.exists() else 0
+        old = CONFIG.paths.root / 'state' / 'harvest.cursor'
+        start = get_position((old, cur), 0)
         total, indexed = read_from(start)
         rows = [r for _, r in indexed if r['kind'] in ('lesson', 'debt')]
         for r in rows: print(line(r, full=o.full))
         if not rows: print('nothing to harvest')
         if o.mark:
-            cur.parent.mkdir(parents=True, exist_ok=True)
-            replace_text(cur, str(total) + '\n')
+            for path in dict.fromkeys((old, cur)):
+                replace_text(path, str(total) + '\n')
     else:
         rows = read(since(o.since)); pairs = collections.Counter((r['frm'], r['to']) for r in rows); topics = collections.Counter(r['topic'] for r in rows)
         print(f'{len(rows)} messages'); [print(f'  {a}→{b}: {n}') for (a, b), n in pairs.most_common(20)]
@@ -736,11 +800,11 @@ def main(argv=None, manifest=None):
     configure(manifest, no_mirror)
     command = argv[0] if argv else ''
     tokens = [arg.partition('=')[0] for arg in argv]
-    if manifest.mode == 'shadow' and (command in ('post', 'ack') or '--unread' in argv
+    if manifest.mode == 'shadow' and (command in ('post', 'reply', 'ack') or '--unread' in argv
                                       or '--mark' in tokens or '--new-only' in tokens
                                       or (command == 'wait' and '--to' in tokens)):
         manifest.writable()
-    if command in ('post', 'ack'):
+    if command in ('post', 'reply', 'ack'):
         manifest.writable()
         STATE.mkdir(parents=True, exist_ok=True)
         with (STATE / 'bus.lock').open('a') as lock:

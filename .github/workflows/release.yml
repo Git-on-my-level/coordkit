@@ -41,13 +41,20 @@ jobs:
           cd "$RUNNER_TEMP"
           wheel-smoke/bin/coordkit --version
           sdist-smoke/bin/coordkit --version
-          wheel-smoke/bin/python -I -c 'from coordkit import __version__; from coordkit.paths import install_root; assert __version__ == "0.1.0"; assert install_root() is None'
-          sdist-smoke/bin/python -I -c 'from coordkit import __version__; assert __version__ == "0.1.0"'
+          wheel-smoke/bin/python -I -c 'from coordkit import __version__; from coordkit.paths import install_root; assert __version__ == "0.2.0"; assert install_root() is None'
+          sdist-smoke/bin/python -I -c 'from coordkit import __version__; assert __version__ == "0.2.0"'
       - name: Checksums
         run: |
           cd dist
           sha256sum *.tar.gz *.whl > SHA256SUMS
           sha256sum -c SHA256SUMS
+      - name: Save Python distributions for publishing
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: |
+            dist/*.tar.gz
+            dist/*.whl
       - name: Attach artifacts to GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -56,3 +63,20 @@ jobs:
             dist/*.tar.gz
             dist/*.whl
             dist/SHA256SUMS
+
+  publish-pypi:
+    needs: package
+    # Enable only after the repository's PyPI trusted publisher is configured.
+    if: vars.COORDKIT_PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+      - name: Publish with PyPI trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

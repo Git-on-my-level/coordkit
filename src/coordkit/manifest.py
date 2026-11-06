@@ -9,11 +9,9 @@ from .state import read_json
 from .wait_policy import DEFAULT_BUS_KINDS
 import sys
 import tomllib
-from typing import Any
 
 
-class ManifestError(ValueError):
-    exit_code = 2
+from .errors import ManifestError
 
 
 def duration(value: str) -> int:
@@ -32,8 +30,8 @@ class Project:
 
 @dataclass
 class Anx:
-    workspace: str
-    board: str
+    workspace: str = ""
+    board: str = ""
     lead_actor: str = ""
     agent_prefix: str = ""
     base_url: str = ""
@@ -52,6 +50,7 @@ class Paths:
 
 @dataclass
 class Bus:
+    wake_debounce_minutes: float = 5
     text_cap: int = 400
     idle_hours: float = 3
     live_check: bool = True
@@ -109,7 +108,7 @@ class Loop:
     transcript: str = ""
     progress_budget: str = "30m"
     stop_rule: str = "STOP file present"
-    loops: dict[str, dict[str, Any]] = field(default_factory=dict)
+    loops: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 @dataclass
@@ -262,6 +261,11 @@ class Launchd:
 
 
 @dataclass
+class Services:
+    manager: str = ""
+
+
+@dataclass
 class RcHost:
     enabled: bool = False
     prefix: str = ""
@@ -291,7 +295,7 @@ def _table(cls, data, section, required=()):
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects"}
     booleans = {"live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
     integers = {"text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
-    numbers = {"idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
+    numbers = {"wake_debounce_minutes", "idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
     for key, value in data.items():
         ok = (isinstance(value, list) and all(type(x) is (int if key == "ci" else str) for x in value)) if key in lists else (
             isinstance(value, dict) if key in maps else type(value) is bool if key in booleans and cls is not Limits else
@@ -339,6 +343,8 @@ class Manifest:
     questions: Questions = field(default_factory=Questions)
     lanes: list[UsageLane] = field(default_factory=list)
     mcp: Mcp = field(default_factory=Mcp)
+    services: Services = field(default_factory=Services)
+    adapters: dict = field(default_factory=dict)
     mode: str = "live"
 
     def path(self, value: str) -> Path:
@@ -395,7 +401,7 @@ def load(path: str | Path | None = None) -> Manifest:
         raise ManifestError("invalid_value: project.name must be a slug")
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", project.git_repo):
         raise ManifestError("invalid_value: project.git_repo must be owner/name")
-    anx = _table(Anx, raw.get("anx", {}), "anx", ("workspace", "board"))
+    anx = _table(Anx, raw.get("anx", {}), "anx", ("workspace", "board") if "anx" in raw else ())
     anx.lead_actor = anx.lead_actor or f"ck-{project.name}-lead"
     anx.agent_prefix = anx.agent_prefix or f"ck-{project.name}"
     paths_raw = raw.get("paths", {})
@@ -420,13 +426,15 @@ def load(path: str | Path | None = None) -> Manifest:
         raw["questions"] = question_data
     config = {name: _table(cls, raw.get(name, {}), name) for name, cls in
               (("bus", Bus), ("agentctl", Agentctl), ("lane", Lane), ("loop", Loop), ("reconciler", Reconciler),
-               ("wait", Wait), ("merge", Merge), ("launchd", Launchd), ("rc_host", RcHost), ("shadow", Shadow), ("limits", Limits), ("escalation", Escalation), ("obligations", Obligations), ("addressed", Addressed), ("review", Review), ("questions", Questions), ("mcp", Mcp))}
+               ("wait", Wait), ("merge", Merge), ("launchd", Launchd), ("rc_host", RcHost), ("shadow", Shadow), ("limits", Limits), ("escalation", Escalation), ("obligations", Obligations), ("addressed", Addressed), ("review", Review), ("questions", Questions), ("mcp", Mcp), ("services", Services))}
+    if config["services"].manager not in ("", "launchd", "systemd"):
+        raise ManifestError("invalid_value: services.manager")
     if any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}', key) for key in config['mcp'].projects):
         raise ManifestError('invalid_value: mcp.projects names must be plain names')
     if not 1 <= config["shadow"].max_gap_seconds <= 600:
         raise ManifestError("invalid_value: shadow.max_gap_seconds must be 1..600")
     actl = config["agentctl"]
-    if not actl.pools.get("implement"):
+    if "agentctl" in raw and not actl.pools.get("implement"):
         raise ManifestError("missing_key: agentctl.pools.implement")
     if not all(re.fullmatch(r"pool:[a-zA-Z0-9_.-]+", v) for v in actl.pools.values()):
         raise ManifestError("invalid_value: agentctl.pools selectors must be pool:<name>")
@@ -538,4 +546,6 @@ def load(path: str | Path | None = None) -> Manifest:
         if not raw.get("questions", {}).get("human_actor"):
             questions.human_actor = actor
         anx.lead_actor = actor
-    return Manifest(file, project, anx, paths, agents=agents, lanes=lanes, mode=modes[0] if modes else "live", **config)
+    if not isinstance(raw.get('adapters', {}), dict):
+        raise ManifestError('invalid_type: adapters must be a table')
+    return Manifest(file, project, anx, paths, adapters=raw.get('adapters', {}), agents=agents, lanes=lanes, mode=modes[0] if modes else "live", **config)

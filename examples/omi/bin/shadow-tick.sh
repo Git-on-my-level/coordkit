@@ -1,7 +1,7 @@
 #!/bin/sh
 # One read-only sample. Set shadow-deadline (Unix seconds) before scheduling.
 set -eu
-CK=${COORDKIT_CHECKOUT:-$HOME/src/coordkit}
+CK=${COORDKIT_CHECKOUT:-/path/to/coordkit}
 ROOT=$CK/examples/omi/.coordkit
 export PYTHONPATH="$CK/src"
 [ ! -e "$ROOT/STOP" ] || exit 0

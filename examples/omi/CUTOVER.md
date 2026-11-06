@@ -1,4 +1,4 @@
-# Reference cutover: Omi-shaped deployment
+# Reference deployment cutover
 
 This is a sanitized example, not an account of a live rollout. Paths, agents and labels are placeholders. Rehearse on disposable copies and obtain approval for the specific host changes before applying anything. The optional scripts illustrate receipt-backed transactions; customize their paths, managed config directories, labels and expected doctor checks for your deployment.
 
@@ -14,7 +14,7 @@ Run `shadow diff`, then schedule one `shadow run --hours 24` sample every five m
 2. Snapshot the manifest, service definitions, hook settings, rollback receipts and lead identity. Record the bus's byte length and prefix hash.
 3. Choose a shared absolute state root for staged and live manifests. Resolve paths before copying the manifest into another repository. Keep the bus/events paths unchanged.
 4. Rehearse hook install/restore on copies. `rehearse_hooks.py EVIDENCE_DIR` reads existing settings and writes only disposable copies, but requires the configured incumbent lead hooks. Do not point it at an existing evidence directory you need: it recreates its `rehearsal/` child.
-5. Customize `apply-cutover.sh` and `apply-lead-hooks.sh`. Their defaults assume an example checkout at `~/src/coordkit`, a project at `~/workspace/omi`, and three explicitly managed Claude Code config directories. The current lifecycle installs an audit loop and a shared reconciliation/sweep job; MCP is supervised separately.
+5. Customize `apply-cutover.sh` and `apply-lead-hooks.sh`. Their defaults assume an example checkout at `/path/to/coordkit`, a project at `/path/to/project`, and three explicitly managed Claude Code config directories. The current lifecycle installs an audit loop and a shared reconciliation/sweep job; MCP is supervised separately.
 
 ## Apply and verify
 
@@ -28,6 +28,6 @@ Stop the new jobs, restore receipted hooks and snapshots, switch back to shadow,
 
 ## Compatibility settings
 
-The example manifest retains the former MCP identity, rollout-train pattern and review family as intentional compatibility values. Other names and paths are illustrative. For an existing deployment, explicitly carry forward its human actor, question fallback, obligation coordinator, internal sender exclusions, ref roots and train state directory before replacing its source package. Keep legacy question guard markers and delivery CLI keys readable for one release.
+The manifest uses neutral example identities, a generic rollout-train pattern and placeholder paths. No live deployment values are retained. For an existing deployment, explicitly carry forward its human actor, question fallback, obligation coordinator, internal sender exclusions, ref roots and train state directory before replacing its source package. Keep legacy question guard markers and delivery CLI keys readable for one release.
 
-The launchd MCP plist uses home-relative placeholders for reviewability. Expand every `~` to an absolute home directory before loading it; launchd does not perform shell expansion. Do not load sample labels on a machine with unrelated jobs using the same labels.
+The launchd MCP plist uses `/path/to` placeholders. Replace them with the selected installation and project paths before loading it; launchd does not perform shell expansion. Do not load sample labels on a machine with unrelated jobs using the same labels.

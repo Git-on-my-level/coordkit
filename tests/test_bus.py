@@ -159,7 +159,7 @@ class BusTests(FakeCase):
         self.assertEqual(self.rows()[-1]['kind'],'debt')
         self.assertEqual(int((self.manifest.paths.root/'state/mirror.cursor').read_text()),3)
         self.respond()
-        self.post('msg')
+        self.post('msg', '--force')
         self.assertEqual(int((self.manifest.paths.root/'state/mirror.cursor').read_text()),5)
 
     def test_no_mirror_flag_and_hold_mapping(self):
@@ -187,8 +187,9 @@ class BusTests(FakeCase):
     def test_corrupt_log_fails_loudly(self):
         self.manifest.paths.bus_log.parent.mkdir(parents=True)
         self.manifest.paths.bus_log.write_text('not-json\n')
-        with self.assertRaisesRegex(ValueError,'bus_invalid_json'):
-            self.invoke('tail')
+        out, err = self.invoke('tail')
+        self.assertIn('BUS_INVALID_JSON', err)
+        self.assertIn('legacy_invalid', out)
 
     def test_port_has_no_project_dependencies(self):
         text = Path(bus.__file__).read_text().lower()
@@ -268,7 +269,7 @@ class SharedBusMirrorTests(BusTests):
             raise anxcli.CardUnresolved('card:service-agent', 'not_found')
         bus.configure(self.manifest)
         err = io.StringIO()
-        with patch.object(bus, 'mirror', absent), contextlib.redirect_stderr(err):
+        with patch('coordkit.adapters.builtin.Anx.project', side_effect= absent), contextlib.redirect_stderr(err):
             bus.project_pending()
         self.assertEqual((self.manifest.paths.root/'state/mirror.cursor').read_text().strip(), '2')
         self.assertIn('MIRROR_SKIPPED ack ack-owned', err.getvalue())  # an ack is bus-only when its card is missing
@@ -286,7 +287,7 @@ class SharedBusMirrorTests(BusTests):
             raise anxcli.CardUnresolved('card:service-agent', 'not_found')
         bus.configure(self.manifest)
         err = io.StringIO()
-        with patch.object(bus, 'mirror', absent), patch.object(addressed, 'known_names', lambda m: {'service-agent'}), \
+        with patch('coordkit.adapters.builtin.Anx.project', side_effect= absent), patch.object(addressed, 'known_names', lambda m: {'service-agent'}), \
                 contextlib.redirect_stderr(err):
             bus.project_pending()
         self.assertIn('MIRROR_SKIPPED ask health-ask: card:service-agent is a bus name', err.getvalue())
@@ -302,7 +303,7 @@ class SharedBusMirrorTests(BusTests):
         def down(manifest, row, rows):
             raise ToolError('anx', 6, 'workspace_unavailable', 'tool_failure')
         bus.configure(self.manifest)
-        with patch.object(bus, 'mirror', down), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+        with patch('coordkit.adapters.builtin.Anx.project', side_effect= down), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             bus.project_pending()
         self.assertFalse((self.manifest.paths.root/'state/mirror.cursor').exists())
 
@@ -316,7 +317,7 @@ class SharedBusMirrorTests(BusTests):
         def ambiguous(manifest, row, rows):
             raise anxcli.CardUnresolved('b', 'ambiguous execution card linkage')
         bus.configure(self.manifest)
-        with patch.object(bus, 'mirror', ambiguous), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+        with patch('coordkit.adapters.builtin.Anx.project', side_effect= ambiguous), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             bus.project_pending()
         self.assertFalse((self.manifest.paths.root/'state/mirror-dead-letters.jsonl').exists())
         self.assertFalse((self.manifest.paths.root/'state/mirror.cursor').exists())
@@ -332,7 +333,7 @@ class SharedBusMirrorTests(BusTests):
             raise anxcli.CardUnresolved('card:missing-task', 'not_found')
         bus.configure(self.manifest)
         err = io.StringIO()
-        with patch.object(bus, 'mirror', absent), contextlib.redirect_stderr(err):
+        with patch('coordkit.adapters.builtin.Anx.project', side_effect= absent), contextlib.redirect_stderr(err):
             bus.project_pending()
         self.assertIn('MIRROR_SKIPPED ack handoff-owned', err.getvalue())
         self.assertFalse((self.manifest.paths.root/'state/mirror-dead-letters.jsonl').exists())

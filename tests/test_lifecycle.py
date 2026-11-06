@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import plistlib
 from unittest.mock import patch
-from coordkit import cli, lifecycle
+from coordkit import services, cli, lifecycle
 from coordkit.anxcli import AnxClient
 from coordkit.manifest import load, ManifestError
 from coordkit.process import ToolError
@@ -63,14 +63,14 @@ class LifecycleTests(FakeCase):
             self.assertTrue(Path(job['ProgramArguments'][0]).is_absolute())
 
     def test_apply_and_down_only_recorded_jobs(self):
-        with patch.object(lifecycle,'checked',return_value='[]') as checked:
+        with patch.object(services,'checked',return_value='[]') as checked:
             self.assertEqual(self.quiet(lifecycle.up,self.manifest,True),0)
         state=json.loads((self.manifest.paths.root/'lifecycle.json').read_text())
         self.assertEqual(len(state['jobs']),2)
         self.assertEqual(len([c for c in checked.call_args_list if 'bootstrap' in c.args[0]]),2)
         for job in state['jobs']:
             self.assertIn(str(Path.home()/'.local/bin'),plistlib.loads(Path(job['file']).read_bytes())['EnvironmentVariables']['PATH'])
-        with patch.object(lifecycle,'run') as run,patch.object(lifecycle,'checked',return_value='') as checked:
+        with patch.object(services.process,'run') as run,patch.object(services,'checked',return_value='') as checked:
             run.return_value.returncode=0
             self.assertEqual(self.quiet(lifecycle.down,self.manifest),0)
             self.assertEqual(self.quiet(lifecycle.down,self.manifest),0)
@@ -82,14 +82,14 @@ class LifecycleTests(FakeCase):
         original = {'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'agent-heartbeat touch'}]}]}, 'statusLine': {'x': 1}}
         (claude2/'settings.json').write_text(json.dumps(original))
         self.manifest.questions.config_dirs = [str(claude2)]
-        with patch.object(lifecycle,'checked',return_value='[]'):
+        with patch.object(services,'checked',return_value='[]'):
             self.assertEqual(self.quiet(lifecycle.up,self.manifest,True),0)
         installed = json.loads((claude2/'settings.json').read_text())
         self.assertEqual(installed['hooks']['PreToolUse'][0]['matcher'], 'AskUserQuestion')
         self.assertTrue(list((self.manifest.paths.root/'hook-backups').glob('claude-2-*.json')))
         from coordkit import hooks
         self.assertEqual(hooks.question_drift(self.manifest), [])
-        with patch.object(lifecycle,'run') as run,patch.object(lifecycle,'checked',return_value=''):
+        with patch.object(services.process,'run') as run,patch.object(services,'checked',return_value=''):
             run.return_value.returncode=0
             self.assertEqual(self.quiet(lifecycle.down,self.manifest),0)
         self.assertEqual(json.loads((claude2/'settings.json').read_text()), original)

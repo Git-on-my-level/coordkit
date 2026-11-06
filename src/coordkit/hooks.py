@@ -7,7 +7,7 @@ from pathlib import Path
 import shlex
 
 from .manifest import ManifestError
-from .state import read_json, write_json
+from .state import read_json, write_json, update_json
 
 
 def receipt_path(manifest):
@@ -80,10 +80,19 @@ def install(manifest, target, backup, fresh_ok=False):
     if target.read_bytes() != original:
         raise ManifestError('hooks_changed_since_backup')
     before = json.loads(original)
-    after = transformation(manifest,before,fresh_ok)
-    write_json(receipt_path(manifest),{'target':str(target),'backup':str(backup),
-               'before':before,'after':after,'restored':False})
-    write_json(target,after)
+    expected_receipt = None
+    def transform(current):
+        if current != before:
+            raise ManifestError('hooks_changed_since_backup')
+        return transformation(manifest, current, fresh_ok)
+    def prepare(current, after):
+        nonlocal expected_receipt
+        if read_json(receipt_path(manifest)) != expected_receipt:
+            raise ManifestError('hook_receipt_exists: retain original rollback evidence')
+        expected_receipt = {'target':str(target),'backup':str(backup),
+                            'before':current,'after':after,'restored':False}
+        write_json(receipt_path(manifest), expected_receipt)
+    update_json(target, transform, before_replace=prepare)
 
 
 def reverse(record, current):
@@ -290,3 +299,113 @@ def pending_question_installs(manifest):
         if receipt is None or receipt.get('restored'):
             out.append(config_dir)
     return out
+
+
+def reconcile(manifest):
+    """Roll managed commands forward; preserve original rollback and unrelated edits.
+
+    A pending receipt bridges a crash between the receipt and settings writes.
+    User changes to any managed entry are a conflict, never an overwrite.
+    """
+    from . import deliver
+    import time
+    manifest.writable()
+    receipts = [receipt_path(manifest), *sorted(manifest.paths.root.glob('hook-questions-*.json')),
+                *sorted(manifest.paths.root.glob('hook-delivery-*.json'))]
+    changed = []
+    for path in receipts:
+        record = read_json(path)
+        if not record or record.get('restored'):
+            continue
+        target = Path(record['target'])
+        if record.get('pending_after'):
+            pending = record['pending_after']
+            original = copy.deepcopy(record)
+            def prepare_recovery(before, after):
+                if read_json(path) != original:
+                    raise ManifestError('hook_receipt_conflict: migration changed ' + str(target))
+            def finish_recovery(before, after):
+                record['after'] = record.pop('pending_after')
+                write_json(path, record)
+            update_json(target, lambda current: reverse({'before': pending, 'after': original['after']}, current),
+                        before_replace=prepare_recovery, after_replace=finish_recovery)
+        current = read_json(target, {})
+        before, after = entries(record['before']), entries(record['after'])
+        now = entries(current)
+        if any(now[key] != after[key] for key in (after-before).keys() | (before-after).keys()):
+            raise ManifestError('hook_rollback_conflict: managed hooks changed ' + str(target))
+        replacements = {}
+        for key in after-before:
+            event, metadata, hook = json.loads(key)
+            old = hook.get('command', '')
+            if ' deliver --hook' in old:
+                new = deliver.command(manifest)
+            elif is_question_hook(old):
+                verb = next((v for e, m, v in QUESTION_EVENTS if e == event), None)
+                if not verb:
+                    raise ManifestError('unknown_question_hook_event: ' + event)
+                new = question_command(manifest, verb, target.parent)
+            elif ' wait pending' in old or ' wait ask-guard' in old:
+                new = command(manifest, 'ask-guard' if 'ask-guard' in old else 'pending')
+            else:
+                continue
+            if old != new:
+                replacements[old] = new
+        if not replacements:
+            continue
+        def transform(current):
+            now = entries(current)
+            if any(now[key] != after[key] for key in (after-before).keys() | (before-after).keys()):
+                raise ManifestError('hook_rollback_conflict: managed hooks changed ' + str(target))
+            updated = copy.deepcopy(current)
+            for groups in updated.get('hooks', {}).values():
+                for group in groups:
+                    for hook in group.get('hooks', []):
+                        if hook.get('command') in replacements:
+                            hook['command'] = replacements[hook['command']]
+            return updated
+        # Keep unrelated user settings outside the owned receipt transformation.
+        expected = transform(record['after'])
+        original = copy.deepcopy(record)
+        intent = copy.deepcopy(record)
+        intent['pending_after'] = expected
+        intent.setdefault('migrations', []).append({'at': time.time(), 'commands': replacements})
+        expected_receipt = original
+        def prepare(before_doc, after_doc):
+            nonlocal expected_receipt
+            if read_json(path) != expected_receipt:
+                raise ManifestError('hook_receipt_conflict: migration changed ' + str(target))
+            write_json(path, intent)
+            expected_receipt = intent
+        def finish(before_doc, after_doc):
+            record.update(intent)
+            record['after'] = record.pop('pending_after')
+            write_json(path, record)
+        update_json(target, transform, before_replace=prepare, after_replace=finish)
+        changed.append(str(target))
+    return changed
+
+
+def main(argv, manifest):
+    import argparse
+    from . import deliver
+    from .ops import parser_for
+    parser = parser_for('hooks')
+    opts = parser.parse_args(argv)
+    opts.settings = Path(opts.settings).expanduser() if opts.settings else Path.home()/'.claude/settings.json'
+    if opts.action == 'install':
+        deliver.install(manifest, opts.settings)
+    elif opts.action == 'uninstall':
+        deliver.uninstall(manifest, opts.settings)
+    else:
+        record = read_json(deliver.receipt_path(manifest, opts.settings), {})
+        if not record or record.get('restored'):
+            print('HOOKS absent')
+            return 0
+        current = entries(read_json(opts.settings, {}))
+        expected = entries(record['after']) - entries(record['before'])
+        drift = any(current[key] != count for key, count in expected.items())
+        print('HOOKS ' + ('drift' if drift else 'installed coordkit-owned'))
+        return 1 if drift else 0
+    print('HOOKS_OK ' + opts.action)
+    return 0

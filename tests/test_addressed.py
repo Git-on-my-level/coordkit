@@ -345,7 +345,7 @@ class AddressedTests(AddressedCase):
         self.manifest = load(self.file)
         self.lease('coordinator')
         from coordkit.process import ToolError
-        with patch('coordkit.bus.mirror', side_effect=ToolError('anx', 6, 'down', 'dependency_unavailable')):
+        with patch('coordkit.adapters.builtin.Anx.project', side_effect=ToolError('anx', 6, 'down', 'dependency_unavailable')):
             with self.assertRaises(SystemExit):
                 self.quiet(addressed.send, self.manifest, 'x', 'lead-a', 'URGENT ping', urgent=True)
         self.assertFalse([r for r in self.rows() if r.get('escalation')])
