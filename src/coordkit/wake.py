@@ -170,3 +170,43 @@ def notify(manifest, rows):
                 fcntl.flock(stream, fcntl.LOCK_EX)
                 stream.write(json.dumps(record) + '\n')
                 stream.flush(); os.fsync(stream.fileno())
+
+
+def scan(manifest, dry_run=False):
+    """Wake for rows appended by writers that bypass bus.append (e.g. an older bus CLI).
+
+    Keeps a byte checkpoint beside the wake records. The first run, or a replaced or
+    truncated log, starts at the current end, so no backlog is ever woken.
+    """
+    import os
+    from .addressed import locked
+    log = manifest.paths.bus_log
+    path = log.parent/'state/wakes/scan.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with locked(path.with_suffix('.lock')):
+        stat = os.stat(log)
+        mark = read_json(path, {})
+        offset = mark.get('offset') if mark.get('ino') == stat.st_ino else None
+        if not isinstance(offset, int) or not 0 <= offset <= stat.st_size:
+            offset = stat.st_size
+        with open(log, 'rb') as stream:
+            stream.seek(offset)
+            data = stream.read(stat.st_size - offset)
+        end = data.rfind(b'\n') + 1
+        rows = []
+        for line in data[:end].splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                for to in str(row.get('to', '')).split(','):
+                    rows.append(dict(row, to=to.strip()))
+        if dry_run:
+            print(f'WAKE_SCAN rows={len(rows)} offset={offset} end={offset + end} (dry run)')
+            return 0
+        if rows:
+            notify(manifest, rows)
+        write_json(path, {'ino': stat.st_ino, 'offset': offset + end, 'at': time.time()})
+    print(f'WAKE_SCAN rows={len(rows)}')
+    return 0

@@ -1,10 +1,12 @@
 import contextlib
 import io
 import json
+import time
 from unittest.mock import patch, Mock
 from coordkit import bus, cli, hooks, deliver, wake
 from coordkit.adapters.builtin import Agentctl
 from coordkit.manifest import ManifestError, load
+from coordkit.process import ToolError
 from coordkit.state import read_json, write_json
 from tests.support import FakeCase
 
@@ -55,15 +57,42 @@ class WakeTests(FakeCase):
         self.assertEqual(self.adapter.wake.call_count,1)
         with patch('coordkit.wake.time', create=True): pass
 
-    def test_agentctl_latest_execution_and_request_key(self):
-        adapter=Agentctl()
-        client=Mock(binary='fake-agentctl')
+    def fake_agentctl(self, body):
+        script=self.root/'fake-agentctl'
+        script.write_text('#!/bin/sh\n'+body+'\n'); script.chmod(0o755)
+        client=Mock(binary=str(script))
         client.recent.return_value=[dict(id='old',created_at='2000',labels=['worker']),dict(id='latest',created_at='2001',labels=['worker'])]
-        result=Mock(returncode=0,stdout='{"execution_id":"new"}')
-        with patch.object(adapter,'client',return_value=client), patch('coordkit.adapters.builtin.run',return_value=result) as run:
+        wake.wake_path(self.manifest,'worker').parent.mkdir(parents=True,exist_ok=True)
+        return client
+
+    def test_agentctl_latest_execution_and_request_key(self):
+        adapter=Agentctl(); seen=self.root/'seen'
+        client=self.fake_agentctl(f'echo "$@" > {seen}; cat >> {seen}')
+        with patch.object(adapter,'client',return_value=client):
             self.assertEqual(adapter.wake(self.manifest,'worker',[],'request')['execution'],'latest')
-            self.assertEqual(run.call_args.args[0][1:5],['continue','latest','--request-key','request'])
-            self.assertIn('whole inbox',run.call_args.kwargs['stdin'])
+        text=seen.read_text()
+        self.assertTrue(text.startswith('continue latest --request-key request'))
+        self.assertIn('whole bus inbox',text)
+
+    def test_agentctl_continuation_outlives_the_wake_call(self):
+        # The resumed turn belongs to agentctl's own process; wake must not bound or kill it.
+        adapter=Agentctl(); done=self.root/'done'
+        client=self.fake_agentctl(f'cat >/dev/null; sleep 6; touch {done}')
+        started=time.time()
+        with patch.object(adapter,'client',return_value=client):
+            result=adapter.wake(self.manifest,'worker',[],'request')
+        self.assertEqual(result['status'],'woken')
+        self.assertLess(time.time()-started,6)
+        deadline=time.time()+10
+        while not done.exists() and time.time()<deadline:
+            time.sleep(0.2)
+        self.assertTrue(done.exists())
+
+    def test_agentctl_immediate_refusal_is_a_failed_wake(self):
+        adapter=Agentctl()
+        client=self.fake_agentctl('cat >/dev/null; echo refused; exit 8')
+        with patch.object(adapter,'client',return_value=client), self.assertRaises(ToolError):
+            adapter.wake(self.manifest,'worker',[],'request')
 
     def test_minimal_manifest_and_optional_adapters(self):
         self.file.write_text('[project]\nname="sample"\ngit_repo="owner/repo"\n')
@@ -293,3 +322,33 @@ class WakeIdempotencyTests(WakeChainTests):
         self.assertEqual(result['attempts'][0]['status'], 'pending')
         self.assertEqual(len(result['attempts']), 2)
         self.assertEqual(len(executions), 1)
+
+
+class WakeScanTests(FakeCase):
+    def append(self, *rows):
+        log=self.manifest.paths.bus_log; log.parent.mkdir(parents=True,exist_ok=True)
+        with log.open('a') as stream:
+            for row in rows:
+                stream.write(row if isinstance(row,str) else json.dumps(row)+'\n')
+
+    def scan(self):
+        with patch.object(wake,'notify') as notify, contextlib.redirect_stdout(io.StringIO()):
+            wake.scan(self.manifest)
+        return [r for call in notify.call_args_list for r in call.args[1]]
+
+    def test_first_scan_starts_at_end_then_sees_only_new_complete_rows(self):
+        self.append(dict(id='old',frm='lead',to='worker',kind='ask'))
+        self.assertEqual(self.scan(),[])
+        self.append(dict(id='new',frm='lead',to='a,b',kind='ask'),'not json\n','{"id":"partial"')
+        self.assertEqual([(r['id'],r['to']) for r in self.scan()],[('new','a'),('new','b')])
+        self.assertEqual(self.scan(),[])
+        self.append(',"to":"worker"}\n')
+        self.assertEqual([r['id'] for r in self.scan()],['partial'])
+
+    def test_truncated_log_restarts_at_end(self):
+        self.append(dict(id='one',to='worker'),dict(id='two',to='worker'))
+        self.scan()
+        self.manifest.paths.bus_log.write_text('')
+        self.assertEqual(self.scan(),[])
+        self.append(dict(id='three',to='worker'))
+        self.assertEqual([r['id'] for r in self.scan()],['three'])

@@ -71,6 +71,10 @@ def main(argv=None):
             lane_options = lane_parser.parse_args(rest)
             from .wake import change
             return change(manifest, lane_options.lane, getattr(lane_options, 'to', None), undo=options.command == 'unretire')
+        if options.command == 'wake-scan':
+            from .ops import parser_for
+            from .wake import scan
+            return scan(manifest, dry_run=parser_for('wake-scan').parse_args(rest).dry_run)
         if options.command == 'mcp':
             from .mcp_install import main as mcp_install_main
             return mcp_install_main(rest, manifest)

@@ -45,13 +45,25 @@ class Agentctl:
         if active:
             return {'status': 'listening', 'execution': active['id']}
         latest = max(mine, key=lambda e: (e.get('created_at', ''), e.get('updated_at', ''), e.get('id', '')))
-        prompt = (f'Coordkit wake for lane {name}. Read your whole inbox and handle pending addressed work.\n'
-                  f'Run: coordkit --manifest {shlex.quote(str(manifest.file))} bus inbox {shlex.quote(name)} --full\n')
-        result = run([self.client(manifest).binary, 'continue', latest['id'], '--request-key', key,
-                      '--prompt-stdin', '--output', 'json'], stdin=prompt, timeout=30)
-        if result.returncode:
-            raise ToolError('agentctl', result.returncode, result.stderr + result.stdout)
-        return {'status': 'woken', 'execution': latest['id'], 'result': json.loads(result.stdout)}
+        prompt = (f'Coordkit wake for lane {name}. Read your whole bus inbox (your usual inbox command) and handle pending addressed work.\n'
+                  f'If you have none: coordkit --manifest {shlex.quote(str(manifest.file))} bus inbox {shlex.quote(name)} --full\n')
+        # continue owns the resumed turn from its own process; a bounded run() here would
+        # cancel the turn at the timeout. Start it in its own session and check only
+        # for an immediate refusal.
+        import subprocess, time
+        from ..wake import wake_path
+        log = wake_path(manifest, name).with_suffix('.continue.log')
+        with open(log, 'ab') as out:
+            proc = subprocess.Popen([self.client(manifest).binary, 'continue', latest['id'], '--request-key', key,
+                                     '--prompt-stdin', '--output', 'json'], stdin=subprocess.PIPE, stdout=out,
+                                    stderr=out, start_new_session=True)
+            proc.stdin.write(prompt.encode()); proc.stdin.close()
+        deadline = time.time() + 5
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.2)
+        if proc.returncode:
+            raise ToolError('agentctl', proc.returncode, log.read_text(errors='replace')[-2000:])
+        return {'status': 'woken', 'execution': latest['id'], 'pid': proc.pid}
 
 
 class Anx:

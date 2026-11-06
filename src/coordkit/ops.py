@@ -262,7 +262,7 @@ COMMANDS = {
     'lane': 'lane', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
     'obligations': 'obligations', 'review': 'review', 'question': 'questions',
     'init': 'lifecycle', 'up': 'lifecycle', 'down': 'lifecycle', 'doctor': 'lifecycle', 'lead': 'lifecycle',
-    'ops': 'ops', 'version': 'ops', 'retire': 'wake', 'unretire': 'wake', 'hooks': 'hooks', 'update': 'selfupdate', 'mcp': 'mcp_install',
+    'ops': 'ops', 'version': 'ops', 'retire': 'wake', 'unretire': 'wake', 'wake-scan': 'wake', 'hooks': 'hooks', 'update': 'selfupdate', 'mcp': 'mcp_install',
 }
 OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down') else 'read',
                                                 handler=module+':main') for name,module in COMMANDS.items() if name != 'bus')
@@ -290,6 +290,7 @@ CLI_ARGS = {
              Arg('--workspace',default='anx'), Arg('--board'), Arg('--git-repo')),
     'retire': (Arg('lane'), Arg('--to')),
     'unretire': (Arg('lane'),),
+    'wake-scan': (Arg('--dry-run',action='store_true'),),
     'hooks': (Arg('action',choices=('install','status','uninstall')), Arg('--settings')),
     'mcp': (Arg('action',choices=('install','uninstall')),Arg('--secret-file'),Arg('--port',type=int,default=8767)),
     'mcp-serve': (Arg('--port',type=int,default=8767),Arg('--secret-file')),
