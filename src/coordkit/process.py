@@ -41,7 +41,15 @@ def run(argv, *, timeout=60, stdin=None, cwd=None):
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
-def call_json(argv, *, timeout=60, retries=2, sleep=time.sleep):
+def is_schema(doc, version):
+    """True only for an integer schema_version equal to the one this consumer was written against.
+
+    bool is an int subclass in Python, so True would otherwise satisfy version 1."""
+    value = doc.get("schema_version") if isinstance(doc, dict) else None
+    return type(value) is int and value == version
+
+
+def call_json(argv, *, timeout=60, retries=2, sleep=time.sleep, schema_version=None):
     for attempt in range(retries + 1):
         try:
             result = run(argv, timeout=timeout)
@@ -72,6 +80,9 @@ def call_json(argv, *, timeout=60, retries=2, sleep=time.sleep):
             error = doc.get("error") or {}
             category = error.get("code", "tool_failure") if isinstance(error, dict) else "tool_failure"
             raise ToolError(argv[0], 13 if category == "lease_held" else 6, str(error), category)
+        if schema_version is not None and not is_schema(doc, schema_version):
+            # Fail closed: a producer that changed its envelope must not feed partial data to the caller.
+            raise ToolError(argv[0], 2, f"unsupported envelope schema_version: {doc.get('schema_version')!r}", "unsupported_schema")
         return doc.get("result", doc.get("data", doc))
     raise AssertionError("unreachable")
 

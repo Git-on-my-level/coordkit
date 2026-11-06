@@ -27,7 +27,11 @@ with open(os.environ["FAKE_LOG"], "a") as log:
 responses = json.loads(Path(os.environ["FAKE_RESPONSES"]).read_text()) if os.environ.get("FAKE_RESPONSES") else []
 for response in responses:
     if response["tool"] == name and all(word in args for word in response.get("contains", [])):
-        print(response.get("stdout", json.dumps(response.get("json", {"ok": True, "result": {}}))))
+        payload = response.get("json", {"ok": True, "result": {}})
+        if name == "agentctl" and isinstance(payload, dict) and "ok" in payload:
+            # agentctl prints schema_version 1 on every envelope; fixtures written without it would fail closed.
+            payload = {"schema_version": 1, **payload}
+        print(response.get("stdout", json.dumps(payload)))
         print(response.get("stderr", ""), file=sys.stderr)
         sys.exit(response.get("exit", 0))
 if name == "anx" and "get" in args:
@@ -54,4 +58,7 @@ elif name == "gh":
     sys.exit(0)
 else:
     result = {}
-print(json.dumps({"ok": True, "result": result}))
+envelope = {"ok": True, "result": result}
+if name == "agentctl":
+    envelope["schema_version"] = 1  # agentctl prints schema_version 1 on every success
+print(json.dumps(envelope))
