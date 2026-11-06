@@ -42,11 +42,12 @@ class SimplifyTests(FakeCase):
     def test_dead_owner_obligations_lead_the_digest_and_wake_the_lead_once(self):
         dead = [dict(id='a1b2c3', owner='worker-x', age=7200, priority='normal', kind='ask', frm='relay', prs=[], flags=[], since=0, due_after=0)]
         sent = []
-        with patch.object(bus, 'main', side_effect=lambda argv, manifest: sent.append(argv)):
+        with patch.object(bus, 'main', side_effect=lambda argv, manifest, **kw: sent.append(argv)) as post:
             state = {}
             addressed.flush_lead_digest(self.manifest, state, 10000, out=lambda _: None, pending=dead, dead=dead)
             addressed.flush_lead_digest(self.manifest, state, 20000, out=lambda _: None, pending=dead, dead=dead)
             addressed.flush_lead_digest(self.manifest, state, 30000, out=lambda _: None, pending=dead, dead=[])
+        self.assertTrue(all(call.kwargs['site_local'] for call in post.call_args_list))
         kinds = [argv[argv.index('--kind') + 1] for argv in sent]
         self.assertEqual(kinds[:2], ['ask', 'fyi'])  # unchanged dead set: no second wake
         self.assertIn('RE-HOME 1', sent[0][-1])
@@ -70,7 +71,7 @@ class SimplifyTests(FakeCase):
             addressed.to_lead_digest(self.manifest, 'late', 'late', at=10000)
             finished.set()
         workers = []
-        def publish(*args):
+        def publish(*args, **kwargs):
             t = threading.Thread(target=writer)
             workers.append(t); t.start()
             self.assertTrue(started.wait(2))

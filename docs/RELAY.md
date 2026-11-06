@@ -83,6 +83,35 @@ Recipient names must identify the intended agents across the whole bus; if both
 hosts register a recipient, both may wake it. Configure each host's roster and
 hooks in the usual way. No remote command execution is built into the relay.
 
+With `[relay]` enabled, a peer asserts a lane by publishing a row **from** that
+lane (`frm` in the log). These senders are known bus names even when absent from
+this site's minimal manifest. Discovery uses all durable relay history, from any
+source site. A destination (`to`) alone is never an assertion: a peer's forced
+post to `typo` does not make `typo` known on another site. Names without local
+registration/activity or a remote sender assertion still require `--force`.
+Have a remote lane post once (for example, an FYI to `all`) before addressing it
+from a fresh site. No automatic roster assertions are published. An ordinary
+local post to a name does not establish that its readers are local.
+
+`agents_status` includes these asserted senders with a sorted `sites` list of
+source sites. A site identifies where the observed row originated; it is not a
+remote roster registration or proof that a reader lives there. Remote-only names
+have `status="remote"` and `listening=null`: local agent processes and cursors
+cannot establish remote liveness. Existing local registrations and local senders
+retain local status, with this site's identity also shown.
+
+Idle/silent lead copies and deaf-owner re-home recommendations apply only to
+local readers. Remote-only recipients never generate a silent copy or a re-home
+recommendation based on missing local listening evidence, including after this
+site posts to them. Local registrations, local sender activity and local reader
+cursors retain the existing local liveness policy; inbound remote activity does
+not refresh a local sender's activity clock. FYI rows never generate silent/idle
+lead copies. Local cursors and listening leases are never relayed.
+Generated idle/silent lead copies, addressed fallback escalations and addressed
+lead digests carry `site_local=true`. They remain in the local log and use the
+existing local delivery/wake path, but never enter the relay outbox, including
+when recovered by the catch-up scanner. The original work row still relays.
+
 ```sh
 coordkit --manifest <MANIFEST_PATH> bus post --from host-a-agent --to host-b-agent --kind ask 'Relay canary'
 coordkit --manifest <MANIFEST_PATH> relay status
@@ -113,6 +142,19 @@ name (a retry after a lost acceptance also increments it). `skipped_rows` lists
 oversized local rows by source sequence and ID. Status persists state changes
 immediately and refreshes timestamps every 10 seconds; last-frame age can lag by
 that interval. Disconnected/stale clients are red; pending rows are reported.
+
+Status also derives a `peers` object from complete relay-origin rows in this
+site's bus log, keyed by remote source site (excluding this site's identity).
+Each peer has `last_row_at` (the newest source row's `ts`),
+`last_row_age_seconds`, and `rows_last_hour` (source timestamps within the last
+3600 seconds, inclusive). Local rows, partial rows and future timestamps do not
+count. This needs no running relay process or additional persisted peer state.
+Doctor warns with `silent_peers` when a peer's last row is more than one hour
+old and at most 24 hours old; older peers remain visible without that warning.
+Duplicate-acceptance warnings remain visible too, and connection faults remain
+red. Peer silence measures row activity, not connection heartbeats or remote
+reader health: an otherwise healthy quiet site can trigger this warning, and a
+replayed row retains its original source timestamp.
 
 ## Wire protocol and recovery
 
@@ -150,8 +192,8 @@ to catch older writers and recover sink failures. Checkpoints advance only after
 outbox commit. Oversized local rows are recorded as skipped and checkpointed past;
 other valid rows in the batch still publish. The outbox file is forced to mode
 0600 on every open, and accepted rows below the scan checkpoint are pruned.
-Initial setup publishes **all existing local history**; start with
-fresh logs if old history should stay local. Partial lines wait for a newline.
+Initial attachment starts at the end of existing local history; only later
+appends are published. Partial lines wait for a newline.
 Malformed JSON lines are skipped. Never edit, truncate or replace a participating
 log: the runner stops on changed identity, shrinking size or changed checkpoint
 boundary. Restore the original log/state, or create a fresh bus and site identity.
@@ -248,6 +290,11 @@ CLI processes. Tests exercise exchange, reconnect/replay, duplicates, gaps,
 authentication, origin filtering, append crash recovery, wake and hook delivery,
 service rendering, and WebSocket framing. Node tests exercise the actual Worker
 class with in-memory storage; they do not replace a deployed Cloudflare canary.
+The minimal-manifest two-site test refuses destination-only names and forced
+typos, discovers a lane after it posts, exchanges work without lead copies, and
+checks source-site agent status and per-peer activity counts. Deterministic tests
+cover local-versus-remote liveness, FYI copies, site-local escalation delivery and
+outbox exclusion, scanner recovery, and the doctor warning boundaries.
 
 References: [Cloudflare WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
 and [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html).

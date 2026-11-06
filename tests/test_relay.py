@@ -508,6 +508,68 @@ class RelayCase(unittest.TestCase):
         self.assertIsNone(pa.poll())
         self.assertIsNone(pb.poll())
 
+    def test_minimal_site_discovers_remote_lane_without_force_or_lead_copy(self):
+        from coordkit import mcp_server
+        # Real CLI children must never discover or resume host executions.
+        adapter = self.root/'agentctl'
+        adapter.write_text('#!' + sys.executable + '\nimport json, sys\n'
+                           'if sys.argv[1] != "recent": raise SystemExit("unexpected adapter command")\n'
+                           'print(json.dumps({"ok": True, "result": {"executions": []}}))\n')
+        adapter.chmod(0o700)
+        environment = patch.dict(os.environ, AGENTCTL=str(adapter))
+        environment.start()
+        self.addCleanup(environment.stop)
+        server = FakeRelay()
+        self.addCleanup(server.close)
+        a, b = self.site('a', server.url), self.site('b', server.url)
+        for m in (a, b):
+            m.file.write_text(m.file.read_text().replace('mirror=false', 'mirror=false\nlive_check=false'))
+        with a.file.open('a') as stream:
+            stream.write('\n[[agents]]\nlabel="remote-lane"\nactor="test-reader"\n')
+        a, b = load(a.file), load(b.file)
+        pa, pb = self.start(a), self.start(b)
+        self.until(lambda: relay.status(a).get('connected') and relay.status(b).get('connected'))
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1]/'src'))
+
+        def post(m, frm, to, kind, text, *flags, code=0):
+            result = subprocess.run([sys.executable, '-m', 'coordkit.cli', '--manifest', str(m.file),
+                                     'bus', 'post', '--from', frm, '--to', to, '--kind', kind, *flags, text],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+            self.assertNotIn('lead copied', result.stdout)
+            self.assertNotIn('copying the lead', result.stderr)
+
+        rows = lambda m: bus.read_path(m.paths.bus_log)
+        # The lane has never sent a row: only A's roster knows it initially.
+        post(a, 'remote-sender', 'remote-lane', 'fyi', 'Lane is available on A')
+        self.until(lambda: len(rows(b)) == 1)
+        post(b, 'local-sender', 'remote-lane', 'ask', 'Not asserted yet', code=2)
+        post(a, 'remote-sender', 'typo', 'fyi', 'Forced unknown destination', '--force')
+        self.until(lambda: len(rows(b)) == 2)
+        post(b, 'local-sender', 'typo', 'ask', 'Still unknown', code=2)
+        self.assertNotIn('typo', mcp_server.roster_names(b, rows(b), time.time()))
+        # Posting from the lane is the source site's assertion; destinations alone are untrusted.
+        post(a, 'remote-lane', 'all', 'fyi', 'Ready for work')
+        self.until(lambda: len(rows(b)) == 3)
+        agents = {r['name']: r for r in mcp_server.read_call(b, 'agents_status', {})['agents']}
+        self.assertEqual(agents['remote-lane']['sites'], ['a'])
+        self.assertEqual(agents['remote-sender']['sites'], ['a'])
+        self.assertIsNone(agents['remote-lane']['listening'])
+        post(b, 'local-sender', 'never-seen', 'ask', 'Refuse this', code=2)
+        post(b, 'local-sender', 'remote-lane', 'ask', 'Please handle this')
+        post(b, 'local-sender', 'remote-sender', 'fyi', 'For context')
+        self.until(lambda: len(rows(a)) == 5)
+        post(a, 'remote-lane', 'local-sender', 'answer', 'Handled on A')
+        self.until(lambda: len(rows(b)) == 6 and len(server.log) == 6)
+        self.assertEqual(len(rows(a)), 6)
+        self.assertFalse(any(r.get('copy_of') for r in rows(a) + rows(b)))
+        self.assertEqual([r['origin'] for r in rows(b)], ['relay:a']*3 + ['coordkit']*2 + ['relay:a'])
+        self.assertEqual(relay.status(b)['peers']['a']['rows_last_hour'], 4)
+        self.assertEqual(relay.status(a)['peers']['b']['rows_last_hour'], 2)
+        self.assertEqual(set(relay.status(b)['peers']), {'a'})
+        self.assertIsNone(pa.poll())
+        self.assertIsNone(pb.poll())
+
     def test_retention_gap_from_server_stops_without_appending_or_advancing(self):
         server = FakeRelay()
         self.addCleanup(server.close)
@@ -533,5 +595,3 @@ class RelayCase(unittest.TestCase):
         self.assertEqual(proc.wait(10), 1)
         self.assertEqual(server.auth_failures, 1)
         self.assertEqual(relay.status(m)['error'], 'relay_auth_failed')
-
-

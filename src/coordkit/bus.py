@@ -321,7 +321,9 @@ def resolve(name, book=None):
     return name
 
 def known_recipients(rows):
+    from .relay import participants
     known = {'lead', 'all'} | {r['frm'] for r in rows} | set(aliases().values())
+    known |= set(participants(CONFIG, rows))
     known |= {a.label for a in CONFIG.agents}
     known |= {label for e in agentctl_recent() if e.get('state') in ('running', 'starting')
               for label in e.get('labels') or []}
@@ -413,10 +415,11 @@ def line(r, full=False):
             pass
     return f"{r.get('id', '-')} {r['ts']} {r['frm']}→{r['to']} [{r.get('kind', 'msg')}/{r.get('topic', 'general')}] {text}"
 
-def _main(argv):
+def _main(argv, *, site_local=False):
     from .ops import bus_parser
     p = bus_parser()
     o = p.parse_args(argv)
+    o.site_local = site_local
     if o.cmd == 'post':
         targets = o.to if isinstance(o.to, list) else [o.to]
         targets = list(dict.fromkeys(resolve(t) for item in targets for t in item.split(',')))
@@ -518,8 +521,10 @@ def dispatch(o):
             if member:
                 o.to = member
         if target:
+            from .relay import participants
             known = ({'lead', 'all'} | {r['frm'] for r in rows} | set(aliases().values())
-                     | {a.label for a in CONFIG.agents} | addressed.known_names(CONFIG))
+                     | {a.label for a in CONFIG.agents} | addressed.known_names(CONFIG)
+                     | set(participants(CONFIG, rows)))
         else:
             known = known_recipients(rows)
         if o.to not in known and not o.force:
@@ -598,11 +603,15 @@ def dispatch(o):
             elif orig.get('kind') == 'ask' and o.to not in (orig['frm'], 'all'):
                 print(f"warning: {o.re} was an ask from {orig['frm']}; answers go to the asker "
                       f"(you posted to {o.to}). Forward with --kind fyi if someone else owns it.", file=sys.stderr)
-        last = max((parse_ts(r['ts']) for r in rows if r['frm'] == o.to), default=None)
-        launch = launched_at(o.to) if o.to not in ('lead', 'all') and not target else None
+        from .relay import remote_only, source_site
+        local_reader = o.to not in remote_only(CONFIG, rows) or o.to in live_readers()
+        check_live = o.kind != 'fyi' and not target and o.to not in ('lead', 'all') and local_reader
+        local_rows = [r for r in rows if not source_site(r)] if CONFIG.relay else rows
+        last = max((parse_ts(r['ts']) for r in local_rows if r['frm'] == o.to), default=None)
+        launch = launched_at(o.to) if check_live else None
         seen = max((t for t in (last, launch) if t is not None), default=None)
-        silent = not target and o.to not in ('lead', 'all') and (seen is None or now() - seen > dt.timedelta(hours=IDLE_HOURS))
-        live, why = (True, '') if o.to in ('lead', 'all') or target else lane_liveness(o.to, rows)
+        silent = check_live and (seen is None or now() - seen > dt.timedelta(hours=IDLE_HOURS))
+        live, why = lane_liveness(o.to, local_rows) if check_live else (None, '')
         # A recipient with no live agent never reads the post: warn and copy the lead.
         idle = silent or live is False
         if live is False:
@@ -680,10 +689,11 @@ def dispatch(o):
         if o.irreversible: rec['irreversible'] = True
         if o.priority: rec['priority'] = o.priority
         if role: rec['role'] = role
+        if getattr(o, 'site_local', False): rec['site_local'] = True
         recs = [rec]
-        if idle and o.kind != 'blocker':  # the lead already sees every blocker; a copy would be a second open one
+        if idle and o.kind not in ('blocker', 'fyi'):  # blockers already reach the lead; FYIs never copy
             recs.append(dict(rec, to='lead', id=secrets.token_hex(3), copy_of=rec['id'], orig_kind=o.kind,
-                             text=copy_prefix + text))
+                             text=copy_prefix + text, site_local=True))
             recs[-1].pop('owner', None)  # the copy is not a second ruling to ack
             if o.kind == 'ruling': recs[-1]['kind'] = 'fyi'  # orig_kind still wakes `bus wait --to lead`
         # Addressed escalation runs before the ANX projection: a mirror failure (exit 1) must never
@@ -844,7 +854,7 @@ def dispatch(o):
         print('topics:'); [print(f'  {t}: {n}') for t, n in topics.most_common(15)]
         via_lead = sum(n for (a, b), n in pairs.items() if 'lead' in (a, b)); print(f'through lead: {via_lead}/{len(rows)}')
 
-def main(argv=None, manifest=None):
+def main(argv=None, manifest=None, *, site_local=False):
     argv = list(argv or [])
     no_mirror = '--no-mirror' in argv
     argv = [arg for arg in argv if arg != '--no-mirror']
@@ -860,5 +870,5 @@ def main(argv=None, manifest=None):
         STATE.mkdir(parents=True, exist_ok=True)
         with (STATE / 'bus.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            return _main(argv)
-    return _main(argv)
+            return _main(argv, site_local=site_local)
+    return _main(argv, site_local=site_local)

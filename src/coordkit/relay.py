@@ -46,6 +46,36 @@ def directory(manifest):
     return manifest.paths.root/'relay'
 
 
+def source_site(row):
+    """The durable source of an inbound row, never its destination or sender label."""
+    origin = row.get('origin', '')
+    site = origin[6:] if isinstance(origin, str) and origin.startswith('relay:') else ''
+    return site if SITE.fullmatch(site) else None
+
+
+def participants(manifest, rows):
+    """A peer asserts a lane by sending from it, never by naming a destination."""
+    found = {}
+    if manifest.relay is not None:
+        for row in rows:
+            site = source_site(row)
+            name = row.get('frm')
+            if site and name:
+                found.setdefault(name, set()).add(site)
+    return found
+
+
+def remote_only(manifest, rows, found=None):
+    """Relay discovery does not create local readers; local registrations/posts do."""
+    from .routing import registry, roles
+    found = participants(manifest, rows) if found is None else found
+    local_roles = roles(manifest)
+    local = (set(registry(manifest)) | set(local_roles) | {a.label for a in manifest.agents}
+             | {name for members in local_roles.values() for name in members}
+             | {r.get('frm') for r in rows if not source_site(r)})
+    return set(found) - local
+
+
 class Store:
     def __init__(self, manifest):
         self.manifest = manifest
@@ -91,7 +121,7 @@ class Store:
                 self.db.execute('BEGIN IMMEDIATE')
             sent_through = self.get('sent_through', -1)
             for row in rows:
-                if str(row.get('origin', '')).startswith('relay:'):
+                if row.get('site_local') is True or str(row.get('origin', '')).startswith('relay:'):
                     continue
                 seq = row.get('seq')
                 if type(seq) is not int or seq < 0:
@@ -210,14 +240,37 @@ def notify(manifest, rows):
         store.close()
 
 
+def peers(manifest, rows, at):
+    """Row activity only: relay heartbeats cannot prove a remote reader is alive."""
+    from .process import parse_ts
+    found = {}
+    for row in rows:
+        site = source_site(row)
+        if not site or site == manifest.relay.site:
+            continue
+        stamp = parse_ts(row['ts']).timestamp()
+        if stamp > at:
+            continue
+        peer = found.setdefault(site, dict(last_row_at=row['ts'], last_row_age_seconds=at - stamp,
+                                          rows_last_hour=0))
+        if at - stamp < peer['last_row_age_seconds']:
+            peer.update(last_row_at=row['ts'], last_row_age_seconds=at - stamp)
+        if at - stamp <= 3600:
+            peer['rows_last_hour'] += 1
+    return dict(sorted(found.items()))
+
+
 def status(manifest):
     if manifest.relay is None:
         return dict(enabled=False)
     value = read_json(directory(manifest)/'status.json', {})
-    age = time.time() - value.get('at', 0)
+    at = time.time()
+    age = at - value.get('at', 0)
     value['connected'] = bool(value.get('connected') and 0 <= age < 90)
     last = value.pop('last_frame', None)
-    value['last_frame_age'] = round(max(0, time.time() - last), 1) if last else None
+    value['last_frame_age'] = round(max(0, at - last), 1) if last else None
+    from .bus import read_path
+    value['peers'] = peers(manifest, read_path(manifest.paths.bus_log), at)
     return dict(enabled=True, **value)
 
 
@@ -228,8 +281,14 @@ def health(manifest):
     detail = json.dumps(value, sort_keys=True)
     if not value['connected'] or value.get('last_frame_age') is None or value['last_frame_age'] >= 90 or value.get('error'):
         raise ManifestError('relay_unhealthy ' + detail)
+    warnings = []
     if value.get('suppressed_rows', 0):
-        return 'WARN suppressed_rows: possible reused site name or acceptance retry; ' + detail
+        warnings.append('suppressed_rows: possible reused site name or acceptance retry')
+    silent = [site for site, peer in value['peers'].items() if 3600 < peer['last_row_age_seconds'] <= 86400]
+    if silent:
+        warnings.append('silent_peers: no rows for more than 1h (seen within 24h): ' + ', '.join(silent))
+    if warnings:
+        return 'WARN ' + '; '.join(warnings) + '; ' + detail
     return detail
 
 

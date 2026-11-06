@@ -280,9 +280,10 @@ def stamp(row):
 
 def roster_names(manifest, rows, at):
     from . import addressed
+    from .relay import participants
     return (set(addressed.registry(manifest)) | set(addressed.roles(manifest)) |
             set(manifest.bus.aliases) | set(manifest.bus.aliases.values()) |
-            {a.label for a in manifest.agents} |
+            {a.label for a in manifest.agents} | set(participants(manifest, rows)) |
             {r['frm'] for r in rows if r.get('frm') and at - 86400 <= stamp(r) <= at} | {'all'})
 
 
@@ -535,6 +536,9 @@ def topic_rows(manifest, rows, by_re, args, at):
 
 def agent_rows(manifest, rows, args, at):
     from . import addressed
+    from .relay import participants, remote_only
+    sources = participants(manifest, rows)
+    remote = remote_only(manifest, rows, sources)
     registry, roles = addressed.registry(manifest), addressed.roles(manifest)
     # Legacy [[agents]] labels remain valid roster names too.
     for agent in manifest.agents:
@@ -551,7 +555,7 @@ def agent_rows(manifest, rows, args, at):
             summary['last_reply'] = row
         if row.get('kind') == 'state':
             summary['last_state'] = row
-    names = set(registry) | set(roles) | {name for name, summary in activity.items() if summary['recent']}
+    names = set(registry) | set(roles) | set(sources) | {name for name, summary in activity.items() if summary['recent']}
 
     def project(item):
         name = item['name']
@@ -563,7 +567,9 @@ def agent_rows(manifest, rows, args, at):
         human = addressed.is_human(manifest, name)
         from .wake import retired
         retirement = retired(manifest, name)
-        if retirement:
+        if name in remote:
+            status, why, live = 'remote', 'readers are on another site; local liveness is unknown', None
+        elif retirement:
             status, why, live = 'retired', 'redirect to ' + retirement.get('owner', 'lead'), False
         elif name == manifest.addressed.relay or human:
             status, why = 'relay/human', 'human recipient' if human else 'file/session relay; no waiter required'
@@ -581,7 +587,8 @@ def agent_rows(manifest, rows, args, at):
             label, source, label_at = last_state.get('text'), 'bus state', stamp(last_state)
         label_age = max(0, int((at - label_at) // 60)) if label_at and source != 'manifest' else None
         state_text, cut = body_view(last_state.get('text') if last_state else '')
-        return dict(name=name, role=clip(spec.get('role'), FIELD), fallback=clip(spec.get('fallback'), FIELD),
+        sites = sources.get(name, set()) | ({manifest.relay.site} if manifest.relay and name not in remote else set())
+        return dict(name=name, sites=sorted(sites), role=clip(spec.get('role'), FIELD), fallback=clip(spec.get('fallback'), FIELD),
                           status=status, why=clip(why, 200), listening=live,
                           last_post_at=utc(last_post['ts']) if last_post else None,
                           last_reply_at=utc(last_reply['ts']) if last_reply else None,

@@ -323,7 +323,7 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
         if manifest.mode == 'live':
             from . import bus
             bus.main(['post', '--from', 'coordkit', '--to', 'lead', '--kind', kind,
-                      '--topic', 'coordkit-digest', '--no-mirror', '--force', text], manifest)
+                      '--topic', 'coordkit-digest', '--no-mirror', '--force', text], manifest, site_local=True)
         else:
             to_relay_file(manifest, text, at)
         # A failed publish leaves the queue intact. Keep its inode so concurrent writers cannot
@@ -360,7 +360,7 @@ def escalate(manifest, event, text, row=None, deaf=(), fallback='', urgent=False
                 'frm': 'coordkit', 'to': target, 'topic': (row or {}).get('topic', 'addressed'),
                 # Always a plain ask: a blocker/ruling copy would be a second open blocker or an
                 # unackable ruling to the incumbent bus. The original kind stays in orig_kind.
-                'kind': 'ask',
+                'kind': 'ask', 'site_local': True,
                 'text': text[:manifest.bus.text_cap], 'escalation': event, 'priority': 'urgent' if urgent else 'normal'}
         if row:
             copy.update(copy_of=row['id'], orig_kind=row.get('kind'), re=row['id'])
@@ -576,9 +576,11 @@ def _sweep(manifest, rows=None, at=None, probe=None, dry_run=False, out=print):
     pending = [i for i in obligations.report(manifest, rows, at, window_hours=a.window_hours)
                if i['frm'] not in (manifest.escalation.internal_senders or [manifest.escalation.internal_to])
                and (i['frm'] not in a.internal_senders or i['priority'] == 'urgent')]
+    from .relay import remote_only
+    remote = remote_only(manifest, rows)
     def heard(name):
         return (status.get(name) or listening(manifest, name, at, probe, rows))[0]
-    dead = [i for i in pending if not heard(i['owner'])]
+    dead = [i for i in pending if i['owner'] not in remote and not heard(i['owner'])]
     wake_keys = set()
     for item in pending:
         owner = item['owner']
