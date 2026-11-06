@@ -12,6 +12,31 @@ from urllib.parse import urlsplit
 MAX_MESSAGE = 65536
 
 
+MAX_DEPTH = 64  # relay frames are flat rows; json's own recursion limit differs by version
+
+
+def nesting(text):
+    """Deepest array/object nesting outside JSON strings."""
+    depth = deepest = 0
+    quoted = escaped = False
+    for ch in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                quoted = False
+        elif ch == '"':
+            quoted = True
+        elif ch in '[{':
+            depth += 1
+            deepest = max(deepest, depth)
+        elif ch in ']}':
+            depth -= 1
+    return deepest
+
+
 class ProtocolError(ValueError):
     pass
 
@@ -181,7 +206,10 @@ class WebSocket:
             self.fragmented = not fin
             if fin:
                 try:
-                    return json.loads(self.fragments.decode('utf-8'))
+                    text = self.fragments.decode('utf-8')
+                    if nesting(text) > MAX_DEPTH:
+                        raise ValueError('too deep')
+                    return json.loads(text)
                 except (UnicodeError, ValueError, RecursionError):
                     raise ProtocolError('relay_invalid_json') from None
 
