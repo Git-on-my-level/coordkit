@@ -514,7 +514,7 @@ class RelayCase(unittest.TestCase):
         adapter = self.root/'agentctl'
         adapter.write_text('#!' + sys.executable + '\nimport json, sys\n'
                            'if sys.argv[1] != "recent": raise SystemExit("unexpected adapter command")\n'
-                           'print(json.dumps({"ok": True, "result": {"executions": []}}))\n')
+                           'print(json.dumps({"ok": True, "schema_version": 1, "result": {"executions": []}}))\n')
         adapter.chmod(0o700)
         environment = patch.dict(os.environ, AGENTCTL=str(adapter))
         environment.start()
