@@ -19,6 +19,48 @@ class McpCase(AddressedCase):
         self.manifest.mcp.train_pattern = r'\btrain-\d+[a-z]+\b'
         self.limiter = mcp_server.Limiter()
 
+    def start_server(self, **limits):
+        """Bind a real ephemeral loopback server; surface thread errors and stalled stacks."""
+        import sys, threading, traceback
+        for name, value in limits.items():
+            patcher = patch.object(mcp_server, name, value)
+            patcher.start(); self.addCleanup(patcher.stop)
+        startup, abandoned = threading.Event(), threading.Event()
+        lock, holder = threading.Lock(), {}
+        def ready(server):
+            with lock:
+                if abandoned.is_set():
+                    server.server_close()
+                    raise RuntimeError('MCP startup abandoned after timeout')
+                holder['server'] = server
+            startup.set()
+        def run():
+            try:
+                mcp_server.serve(self.manifest, 0, self.secret, ready)
+            except Exception:
+                holder['error'] = traceback.format_exc()
+                startup.set()
+        thread = threading.Thread(target=run, name='mcp-test-server', daemon=True)
+        def diagnostic():
+            frame = sys._current_frames().get(thread.ident)
+            stack = ''.join(traceback.format_stack(frame)) if frame else '(thread exited)'
+            return holder.get('error') or f'alive={thread.is_alive()}\nserver thread stack:\n{stack}'
+        def stop():
+            with lock:
+                abandoned.set()
+                server = holder.get('server')
+            if server:
+                if thread.is_alive() and 'error' not in holder:
+                    server.shutdown()
+                server.server_close()
+            thread.join(5)
+            self.assertFalse(thread.is_alive(), 'MCP server did not stop: ' + diagnostic())
+        self.addCleanup(stop)
+        thread.start()
+        self.assertTrue(startup.wait(5), 'MCP startup timed out after 5s: ' + diagnostic())
+        self.assertNotIn('error', holder, 'MCP startup failed:\n' + diagnostic())
+        return holder['server']
+
     def enable_writes(self):
         flag = mcp_server.home(self.manifest)/'writes-enabled'; flag.parent.mkdir(parents=True, exist_ok=True); flag.touch()
 
@@ -199,14 +241,25 @@ class McpToolTests(McpCase):
 
 
 class McpSocketTests(McpCase):
+    def test_numeric_loopback_startup_needs_no_name_resolution(self):
+        # A resolver can be unavailable even when local TCP works. Binding and
+        # HTTP metadata must stay numeric, without changing the loopback boundary.
+        with patch('socket.getfqdn', side_effect=AssertionError('unexpected reverse DNS')) as lookup:
+            server = self.start_server()
+        lookup.assert_not_called()
+        self.assertEqual(server.server_address[0], '127.0.0.1')
+        self.assertEqual(server.server_name, '127.0.0.1')
+        self.assertEqual(server.server_port, server.server_address[1])
+        self.assertGreater(server.server_port, 0)
+
+    def test_startup_failure_reports_the_server_thread_exception(self):
+        with patch.object(mcp_server, 'serve', side_effect=OSError(13, 'bind refused')):
+            with self.assertRaisesRegex(self.failureException, r'MCP startup failed:[\s\S]*PermissionError.*bind refused'):
+                self.start_server()
+
     def test_real_loopback_server_answers_only_authenticated_posts(self):
-        import threading, urllib.error, urllib.request
-        bound = threading.Event(); holder = {}
-        def ready(server):
-            holder['server'] = server; bound.set()
-        thread = threading.Thread(target=mcp_server.serve, args=(self.manifest, 0, self.secret, ready), daemon=True)
-        thread.start(); self.assertTrue(bound.wait(5))
-        server = holder['server']; self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        import urllib.error, urllib.request
+        server = self.start_server()
         self.assertEqual(server.server_address[0], '127.0.0.1')  # never bound beyond loopback
         url = f'http://127.0.0.1:{server.server_address[1]}/mcp'
         def post(token):
@@ -265,16 +318,7 @@ class McpCapacityTests(McpCase):
                 self.assertTrue(json.loads(result['content'][0]['text'])['timed_out'])
 
     def start(self, **limits):
-        import threading
-        bound = threading.Event(); holder = {}
-        def ready(server):
-            holder['server'] = server; bound.set()
-        for name, value in limits.items():  # read at serve time and per connection
-            patcher = patch.object(mcp_server, name, value); patcher.start(); self.addCleanup(patcher.stop)
-        threading.Thread(target=mcp_server.serve, args=(self.manifest, 0, self.secret, ready), daemon=True).start()
-        self.assertTrue(bound.wait(5))
-        server = holder['server']; self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
-        return server.server_address[1]
+        return self.start_server(**limits).server_address[1]
 
     def drip(self, port):
         import socket

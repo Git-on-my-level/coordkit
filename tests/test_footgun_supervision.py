@@ -56,11 +56,15 @@ class SupervisionTests(FakeCase):
         stale={'state':'running','liveness':'unreachable','updated_at':stamp(3*3600)}
         self.assertTrue(lane.hung(self.manifest,stale))
         # Naive stamps are UTC, never host-local time (hosts can use different time zones).
-        naive=__import__('datetime').datetime.utcfromtimestamp(time.time()-3600).isoformat()
+        naive=__import__('datetime').datetime.fromtimestamp(time.time()-3600,__import__('datetime').timezone.utc).replace(tzinfo=None).isoformat()
         self.assertFalse(lane.hung(self.manifest,{'state':'running','liveness':'unreachable','updated_at':naive}))
         # A run that answers on the re-read is not cancelled.
-        with patch.object(lane.AgentctlClient,'status',side_effect=[stale,fresh]):
-            self.quiet(lane.recover,self.manifest,plan)
+        # Check the supervisor without racing the real detached watcher against
+        # the next status scenario. The detached CLI/lock lifecycle is tested separately.
+        with patch.object(lane, 'detach_watcher') as restored, \
+                patch.object(lane.AgentctlClient,'status',side_effect=[stale,fresh]):
+            self.assertTrue(self.quiet(lane.recover,self.manifest,plan))
+        restored.assert_called_once_with(self.manifest, plan)
         self.assertFalse(any('cancel' in c['args'] for c in self.calls()))
         with patch.object(lane.AgentctlClient,'status',side_effect=[stale,stale,stale,{'state':'cancelled'}]):
             self.assertTrue(self.quiet(lane.recover,self.manifest,plan))

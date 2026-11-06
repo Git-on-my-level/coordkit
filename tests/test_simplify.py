@@ -39,6 +39,20 @@ class SimplifyTests(FakeCase):
                 self.assertEqual(addressed.main([], self.manifest, 'sweep'), 6)
             self.assertEqual(events, ['local', 'questions', 'remote'])
 
+    def test_dead_owner_obligations_lead_the_digest_and_wake_the_lead_once(self):
+        dead = [dict(id='a1b2c3', owner='worker-x', age=7200, priority='normal', kind='ask', frm='relay', prs=[], flags=[], since=0, due_after=0)]
+        sent = []
+        with patch.object(bus, 'main', side_effect=lambda argv, manifest: sent.append(argv)):
+            state = {}
+            addressed.flush_lead_digest(self.manifest, state, 10000, out=lambda _: None, pending=dead, dead=dead)
+            addressed.flush_lead_digest(self.manifest, state, 20000, out=lambda _: None, pending=dead, dead=dead)
+            addressed.flush_lead_digest(self.manifest, state, 30000, out=lambda _: None, pending=dead, dead=[])
+        kinds = [argv[argv.index('--kind') + 1] for argv in sent]
+        self.assertEqual(kinds[:2], ['ask', 'fyi'])  # unchanged dead set: no second wake
+        self.assertIn('RE-HOME 1', sent[0][-1])
+        self.assertIn('a1b2c3->worker-x', sent[0][-1])
+        self.assertEqual(state['dead_owner_ids'], [])
+
     def test_digest_failure_preserves_queue_and_clock(self):
         addressed.to_lead_digest(self.manifest, 'test', 'keep me', at=10000)
         state = {}

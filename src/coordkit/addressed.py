@@ -312,7 +312,7 @@ def to_lead_digest(manifest, event, text, row=None, at=None):
         fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=()):
+def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), dead=()):
     """One hourly FYI; consume the shared queue under the same lock writers take."""
     if at - state.get('lead_digest_at', 0) < DIGEST_EVERY:
         return
@@ -322,7 +322,7 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=()):
         fcntl.flock(stream, fcntl.LOCK_EX)
         stream.seek(0)
         items = [json.loads(line) for line in stream if line.strip()]
-        if not items and not backlog and not pending:
+        if not items and not backlog and not pending and not dead:
             return
         lines = [f"- {i.get('event')}: {i.get('text', '')[:200]}" for i in items[-12:]]
         if backlog:
@@ -330,11 +330,21 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=()):
         if pending:
             lines.insert(0, f"- obligations: {len(pending)} awaiting pickup; " +
                          '; '.join(obligations.line(i) for i in sorted(pending, key=lambda i: (i['priority'] != 'urgent', -i['age']))[:12]))
-        text = (f'coordkit hourly digest: {len(pending)} obligations, {len(items)} findings; '
+        # Dead owners: an obligation whose owner is not listening never gets picked up,
+        # and its pickup wake lands in that same dead inbox. Name them first, and make the digest an ask
+        # (an fyi never wakes the lead) whenever the set of dead-owned items changes.
+        dead_ids = sorted(i['id'] for i in dead)
+        if dead:
+            lines.insert(0, f"- RE-HOME {len(dead)} (owner not listening): " +
+                         '; '.join(f"{i['id']}->{i['owner']} {i['age'] / 3600:.1f}h"
+                                   for i in sorted(dead, key=lambda i: -i['age'])[:12]) +
+                         '. Reassign each to a listening lane, or close it with a reply.')
+        kind = 'ask' if dead_ids and dead_ids != state.get('dead_owner_ids') else 'fyi'
+        text = (f'coordkit hourly digest: {len(dead)} to re-home, {len(pending)} obligations, {len(items)} findings; '
                 'coordkit obligations report for the full backlog\n' + '\n'.join(lines))
         if manifest.mode == 'live':
             from . import bus
-            bus.main(['post', '--from', 'coordkit', '--to', 'lead', '--kind', 'fyi',
+            bus.main(['post', '--from', 'coordkit', '--to', 'lead', '--kind', kind,
                       '--topic', 'coordkit-digest', '--no-mirror', '--force', text], manifest)
         else:
             to_relay_file(manifest, text, at)
@@ -342,6 +352,7 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=()):
         # append to an unlinked file; there are no sent archives to rotate.
         stream.seek(0); stream.truncate(); stream.flush(); os.fsync(stream.fileno())
     state['lead_digest_at'] = at
+    state['dead_owner_ids'] = sorted(i['id'] for i in dead)
     out(f'LEAD_DIGEST posted {len(items)} finding(s), {len(pending)} obligation(s)')
 
 
@@ -384,6 +395,8 @@ def escalate(manifest, event, text, row=None, deaf=(), fallback='', urgent=False
 
 def after_post(manifest, rec, role=None, probe=None):
     """Called by `bus post` for registered names and roles, after the row is appended."""
+    if rec.get('frm') == 'coordkit' and rec.get('topic') == 'coordkit-digest':
+        return 'delivered'  # the digest is the escalation; re-escalating it would deadlock on the digest lock
     urgent = rec.get('priority') == 'urgent' or priority(rec) == 'urgent'
     actionable = rec['kind'] in WAKE_KINDS or urgent
     if is_human(manifest, role or rec['to']):
@@ -585,6 +598,9 @@ def _sweep(manifest, rows=None, at=None, probe=None, dry_run=False, out=print):
     pending = [i for i in obligations.report(manifest, rows, at, window_hours=a.window_hours)
                if i['frm'] not in (manifest.escalation.internal_senders or [manifest.escalation.internal_to])
                and (i['frm'] not in a.internal_senders or i['priority'] == 'urgent')]
+    def heard(name):
+        return (status.get(name) or listening(manifest, name, at, probe, rows))[0]
+    dead = [i for i in pending if not heard(i['owner'])]
     wake_keys = set()
     for item in pending:
         owner = item['owner']
@@ -620,7 +636,7 @@ def _sweep(manifest, rows=None, at=None, probe=None, dry_run=False, out=print):
             to_lead_digest(manifest, f['event'], f['text'], at=at)
         seen[f['key']] = at
     if not dry_run:
-        flush_lead_digest(manifest, state, at, out, pending=pending)
+        flush_lead_digest(manifest, state, at, out, pending=pending, dead=dead)
         live_keys = wake_keys | {f['key'] for f in findings} | {k for k, v in seen.items() if at - v < (a.window_hours*3600 if k.startswith(('human:', 'unacked:', 'deaf:')) else 2*seconds(a.realert_after))}
         state['seen'] = {k: v for k, v in seen.items() if k in live_keys}
         write_json(state_path, state)

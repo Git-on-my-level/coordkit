@@ -25,6 +25,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from . import __version__
 
 PORT = 8767
@@ -1114,6 +1115,12 @@ def serve(manifest, port=PORT, secret_path=None, ready=None):
         daemon_threads = True
         conns = {}
 
+        def server_bind(self):
+            # HTTPServer resolves a display name via getfqdn after binding. A numeric
+            # loopback listener needs no DNS; resolver stalls must not block startup.
+            TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
         def process_request(self, request, client_address):
             if not preauth.acquire(blocking=False):
                 self.shutdown_request(request)  # pre-auth pool full: close at once, no thread
@@ -1254,6 +1261,7 @@ def serve(manifest, port=PORT, secret_path=None, ready=None):
         def log_error(self, fmt, *args):
             pass
 
+    print(f'MCP_BINDING 127.0.0.1:{port} identity={manifest.mcp.identity}', flush=True)
     server = Server(('127.0.0.1', port), Handler)
     print(f'MCP_SERVING 127.0.0.1:{server.server_address[1]} identity={manifest.mcp.identity}', flush=True)
     if ready:
