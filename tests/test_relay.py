@@ -158,12 +158,15 @@ class RelayCase(unittest.TestCase):
 
     def test_sink_scan_legacy_partial_and_loop_prevention(self):
         m = self.site()
-        self.post(m, 'local')
         log = m.paths.bus_log
-        with log.open('a') as f:
-            f.write(json.dumps(row('legacy')) + '\nnot json\n{"id":')
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch()
         store = relay.Store(m)
         self.addCleanup(store.close)
+        store.scan()  # attach before any rows
+        self.post(m, 'local')
+        with log.open('a') as f:
+            f.write(json.dumps(row('legacy')) + '\nnot json\n{"id":')
         store.scan()
         self.assertEqual([(f['seq'], f['row']['id']) for f in store.pending()], [(0, 'local'), (1, 'legacy')])
         # Finish the pending legacy write, then apply a remote row through append.
@@ -176,6 +179,20 @@ class RelayCase(unittest.TestCase):
         store.scan()
         self.assertEqual([f['row']['id'] for f in store.pending()], ['local', 'legacy', 'partial'])
         self.assertEqual(bus.read()[-1]['origin'], 'relay:remote')
+
+    def test_first_attachment_publishes_only_future_rows(self):
+        m = self.site()
+        log = m.paths.bus_log
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(''.join(json.dumps(row(f'old{i}')) + '\n' for i in range(3)))
+        store = relay.Store(m)
+        self.addCleanup(store.close)
+        store.scan()
+        self.assertEqual(store.pending(), [])
+        with log.open('a') as f:
+            f.write(json.dumps(row('new')) + '\n')
+        store.scan()
+        self.assertEqual([(f['seq'], f['row']['id']) for f in store.pending()], [(3, 'new')])
 
     def test_publish_only_scanned_prefix_even_when_sinks_arrive_out_of_order(self):
         m = self.site()
@@ -377,8 +394,13 @@ class RelayCase(unittest.TestCase):
         m = self.site(url=server.url)
         log = m.paths.bus_log
         log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch()
+        attach = relay.Store(m)
+        attach.scan()
+        attach.close()
         records = [row('before'), dict(row('too-large'), text='x' * 70000), row('after')]
-        log.write_text(''.join(json.dumps(r) + '\n' for r in records))
+        with log.open('a') as f:
+            f.write(''.join(json.dumps(r) + '\n' for r in records))
         proc = self.start(m)
         self.until(lambda: len(server.log) == 2 and relay.status(m).get('pending_rows') == 0)
         self.assertEqual([f['row']['id'] for f in server.log], ['before', 'after'])

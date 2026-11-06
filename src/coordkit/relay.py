@@ -117,6 +117,13 @@ class Store:
         if mark and (mark['file'] != [info.st_dev, info.st_ino] or info.st_size < mark['offset']):
             raise ProtocolError('relay_log_replaced: restore log or use fresh bus/state and site')
         reader.state = mark
+        if not mark:
+            # First attachment publishes only future rows, like wake-scan and delivery
+            # hooks: an existing history would burn relay requests and exceed retention.
+            reader.read(10 ** 18)
+            with self.db:
+                self.put('scan', reader.state)
+            return
         _, lines = reader.read(mark.get('count', 0))
         if reader.reset:
             raise ProtocolError('relay_log_replaced: restore log or use fresh bus/state and site')

@@ -165,7 +165,8 @@ append but before checkpoint update cannot duplicate a row. Wake delivery uses
 existing debounce/attempt receipts. Wake-scan also reads relay-origin rows, so a
 crash between the append and its wake cannot lose the wake; the debounce keeps the
 repeat to one wake. Delivery hooks read them too.
-Cursors never cross the wire.
+Cursors never cross the wire. A site's first attachment starts at the end of its
+existing log, so history is never published; only rows appended afterwards relay.
 
 Reconnect uses jittered exponential backoff capped at approximately 61 seconds.
 Authentication failures, a rewound server, log replacement and retention gaps
