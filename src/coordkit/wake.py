@@ -4,6 +4,11 @@ import time
 from .manifest import ManifestError
 from .state import name_key, read_json, write_json
 
+# Wake resumes only executions that carry this marker plus the lane name. A lane's
+# own label also prefixes the workers it launches, so the name alone could resume
+# a child session with the parent's inbox.
+WAKE_LABEL = 'coordkit.lane.'
+
 
 def state_path(manifest):
     return manifest.paths.bus_log.parent/'state'/'lanes.json'

@@ -35,12 +35,12 @@ class Agentctl:
                    for e in self.client(manifest).recent(label=name, nonterminal=True))
 
     def wake(self, manifest, name, rows, key):
-        from ..bus import label_matches
+        from ..wake import WAKE_LABEL
         # Exact lane lookup includes completed turns older than the liveness window.
-        executions = self.client(manifest).recent(label=name)
-        mine = [e for e in executions if any(label_matches(label, name) for label in e.get('labels', []))]
+        executions = self.client(manifest).recent(label=WAKE_LABEL + name)
+        mine = [e for e in executions if WAKE_LABEL + name in e.get('labels', [])]
         if not mine:
-            return {'status': 'unresumable', 'reason': 'no labelled agentctl execution; delivery hook required'}
+            return {'status': 'unresumable', 'reason': 'no ' + WAKE_LABEL + name + ' agentctl execution; delivery hook required'}
         active = next((e for e in mine if e.get('state') in ('running', 'starting')), None)
         if active:
             return {'status': 'listening', 'execution': active['id']}

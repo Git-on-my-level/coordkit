@@ -79,7 +79,7 @@ def launch_run(manifest, plan, suffix='', pool=None, prompt=None):
     directory.mkdir(parents=True, exist_ok=True)
     raw = AgentctlClient(manifest).delegate(prompt or plan['prompt'], directory,
             key=plan['key']+suffix, pool=pool or plan['pool'], label=plan['label'], detach=True,
-            card=plan.get('card'), owns=plan['owns'], access=plan['access'], timeout='20m')
+            card=plan.get('card'), owns=plan['owns'], access=plan['access'], timeout='20m', wakeable=True)
     doc = json.loads(raw)
     if doc.get('ok') is not True:
         raise ToolError('agentctl',6,'unsuccessful delegate receipt','protocol_error')

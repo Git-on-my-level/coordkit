@@ -61,7 +61,8 @@ class WakeTests(FakeCase):
         script=self.root/'fake-agentctl'
         script.write_text('#!/bin/sh\n'+body+'\n'); script.chmod(0o755)
         client=Mock(binary=str(script))
-        client.recent.return_value=[dict(id='old',created_at='2000',labels=['worker']),dict(id='latest',created_at='2001',labels=['worker'])]
+        client.recent.return_value=[dict(id='old',created_at='2000',labels=['worker','coordkit.lane.worker']),dict(id='latest',created_at='2001',labels=['worker','coordkit.lane.worker']),
+                                   dict(id='child',created_at='2002',labels=['worker','worker-review'])]
         wake.wake_path(self.manifest,'worker').parent.mkdir(parents=True,exist_ok=True)
         return client
 
@@ -73,6 +74,13 @@ class WakeTests(FakeCase):
         text=seen.read_text()
         self.assertTrue(text.startswith('continue latest --request-key request'))
         self.assertIn('whole bus inbox',text)
+
+    def test_unmarked_executions_are_never_resumed(self):
+        # A worker launched by the lane carries the lane's name as a label too.
+        adapter=Agentctl(); client=Mock(binary='/bin/false')
+        client.recent.return_value=[dict(id='child',created_at='2002',labels=['worker','worker-review'])]
+        with patch.object(adapter,'client',return_value=client):
+            self.assertEqual(adapter.wake(self.manifest,'worker',[],'request')['status'],'unresumable')
 
     def test_agentctl_continuation_outlives_the_wake_call(self):
         # The resumed turn belongs to agentctl's own process; wake must not bound or kill it.
@@ -290,7 +298,7 @@ class WakeChainTests(FakeCase):
     def test_agentctl_active_execution_prevents_continue(self):
         adapter = Agentctl()
         client = Mock(binary='fake-agentctl')
-        client.recent.return_value = [dict(id='running', state='running', labels=['lane-a'])]
+        client.recent.return_value = [dict(id='running', state='running', labels=['lane-a', 'coordkit.lane.lane-a'])]
         with patch.object(adapter, 'client', return_value=client), patch('coordkit.adapters.builtin.run') as run:
             self.assertTrue(adapter.listening(self.manifest, 'lane-a', []))
             self.assertEqual(adapter.wake(self.manifest, 'lane-a', [], 'key')['status'], 'listening')

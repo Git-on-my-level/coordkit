@@ -77,7 +77,7 @@ class AgentctlClient:
             raise ToolError(self.binary, result.returncode, result.stderr + result.stdout)
         return result.stdout
 
-    def delegate(self, prompt, run_dir, *, key, pool="plan", label=None, plan=False, detach=False, access="read_only", timeout=None, card=None, owns=()):
+    def delegate(self, prompt, run_dir, *, key, pool="plan", label=None, plan=False, detach=False, access="read_only", timeout=None, card=None, owns=(), wakeable=False):
         self.manifest.writable()
         selector = self.manifest.agentctl.pools.get(pool)
         if not selector:
@@ -92,6 +92,9 @@ class AgentctlClient:
             argv += ["--content"]
         if label:
             argv += ["--label", label]
+        if label and wakeable:
+            from .wake import WAKE_LABEL
+            argv += ["--label", WAKE_LABEL + label]
         if card:
             argv += ["--label", "anx.card." + card.removeprefix("card:")]
         for pr in owns:
