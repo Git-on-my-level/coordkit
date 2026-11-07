@@ -4,7 +4,7 @@ Stdlib MCP over Streamable HTTP (stateless JSON-RPC 2.0 on POST /mcp), bound to 
 (Tailscale Funnel) terminates TLS. Every request needs `Authorization: Bearer <secret>`; the secret lives in a
 0600 file outside any repo. Reads use manifest-owned paths and bounded `agentctl recent` calls; no caller paths
 or shell commands are accepted. Every write is
-attributed to one fixed identity (manifest.mcp.identity), never a caller-chosen sender. Every call is journaled; a kill file
+attributed to manifest.mcp.identity, or to a lane named in manifest.mcp.post_as when the caller asks to post as it. Every call is journaled; a kill file
 turns every request into 503. Tool results are untrusted agent text, so they are capped and labelled as such.
 
 Go-live (the secret and the public endpoint) is a guarded step: docs/MCP.md.
@@ -897,7 +897,10 @@ def write_call(manifest, tool, args):
         if kind not in POST_KINDS:
             raise ValueError(f'kind must be one of {POST_KINDS}')
         text, re_id = text_arg(args, 'text', 2000), name_arg(args, 're', required=False)
-        rc, lines = quiet(addressed.send, manifest, manifest.mcp.identity, to, text, kind=kind, re_id=re_id)
+        sender = name_arg(args, 'as', required=False) or manifest.mcp.identity
+        if sender != manifest.mcp.identity and sender not in manifest.mcp.post_as:
+            raise ValueError(f'as must be one of {manifest.mcp.post_as or "(none configured)"}')
+        rc, lines = quiet(addressed.send, manifest, sender, to, text, kind=kind, re_id=re_id)
         posted = bus.LAST_POST[0] if bus.LAST_POST else None
         return {'ok': rc in (0, None, addressed.EXIT_DEAF) and posted is not None, 'rc': rc,
                 'id': posted and posted.get('id'), 'outcome': [clip(l, 160) for l in lines][-5:]}

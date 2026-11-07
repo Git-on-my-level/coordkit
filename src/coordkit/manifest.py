@@ -322,6 +322,8 @@ class Mcp:
     projects: dict[str, str] = field(default_factory=dict)
     train_state_dir: str = ""
     identity: str = ""
+    # Lane names a connector caller may post as (behind the same bearer secret); empty keeps the fixed identity.
+    post_as: list[str] = field(default_factory=list)
     train_pattern: str = ""
     ref_roots: list[str] = field(default_factory=list)
 
@@ -511,6 +513,8 @@ def load(path: str | Path | None = None) -> Manifest:
     mcp.identity = mcp.identity or f"ck-{project.name}-mcp"
     if not name_ok(mcp.identity):
         raise ManifestError("invalid_value: mcp.identity")
+    if any(not name_ok(name) for name in mcp.post_as):
+        raise ManifestError("invalid_value: mcp.post_as")
     try:
         re.compile(mcp.train_pattern)
     except re.error as exc:

@@ -213,6 +213,16 @@ class McpToolTests(McpCase):
                     {'to': 'lead-a', 'kind': 'ask', 'text': 'x' * 2001}, {'to': 'lead-a', 'kind': 'ask', 'text': ' '}):
             self.assertTrue(self.tool('post', **bad)[0], bad)
 
+    def test_post_as_only_an_allowlisted_lane(self):
+        self.enable_writes()
+        self.lease('lead-a')
+        self.assertTrue(self.tool('post', to='lead-a', kind='ask', text='x', **{'as': 'thread-a'})[0])
+        self.manifest.mcp.post_as = ['thread-a']
+        error, text = self.tool('post', to='lead-a', kind='ask', text='From the thread.', **{'as': 'thread-a'})
+        self.assertFalse(error, text)
+        self.assertEqual([r for r in self.rows() if r.get('text') == 'From the thread.'][0]['frm'], 'thread-a')
+        self.assertTrue(self.tool('post', to='lead-a', kind='ask', text='x', **{'as': 'lead-a'})[0])
+
     def test_ack_and_question_answer_act_only_on_operator_rows(self):
         self.enable_writes()
         self.incumbent_row('a1', 'lead-a', self.manifest.mcp.identity)
