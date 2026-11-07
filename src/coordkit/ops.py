@@ -202,8 +202,10 @@ _TOOLS = [
                'brief': ROW_ARGS['brief']}, ['name']),
     read_tool('open_questions', 'Questions reconciled with bus answers; default only open/escalated, all=true includes answered/closed and answer metadata.',
               dict(ROW_ARGS, all={'type': 'boolean', 'default': False, 'description': 'Include answered/closed questions; default false.'})),
-    read_tool('ref_read', 'Read a row ref file under manifest-configured ref roots only; paths cannot be supplied. Default/max 32768 bytes per page.',
+    read_tool('ref_read', 'Read a row ref file under manifest-configured ref roots only; paths cannot be supplied. Default/max 32768 bytes per page. '
+              'A row whose text was cut by the bus cap says so; full=true reads its complete text instead of its ref.',
               {'id': {'type': 'string', 'description': 'Bus row id whose ref to read; required, no default.'},
+               'full': {'type': 'boolean', 'default': False, 'description': 'Read the full text of a capped row instead of its ref; default false.'},
                'offset': {'type': 'integer', 'minimum': 0, 'default': 0, 'description': 'Byte offset returned as next_offset; default 0.'},
                'limit': {'type': 'integer', 'minimum': 1, 'maximum': REF_BYTES, 'default': REF_BYTES,
                          'description': 'Bytes to read; default and maximum 32768; JSON escaping may reduce a page.'}}, ['id']),

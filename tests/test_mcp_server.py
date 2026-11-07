@@ -757,6 +757,20 @@ class McpReadBatchTests(McpCase):
         self.row('none')
         self.assertTrue(self.tool('ref_read', id='none')[0])
 
+    def test_ref_read_full_reads_the_spilled_text_of_a_capped_row(self):
+        refs = self.manifest.paths.bus_log.parent/'state'/'refs'
+        refs.mkdir(parents=True)
+        spill, attached = refs/'1107-abc123.txt', refs/'brief.md'
+        spill.write_text('whole handoff text\n')
+        attached.write_text('attached brief\n')
+        self.row('capped', text=f'start of handoff … [full: {spill}]')
+        self.row('both', text=f'start … [full: {spill}]', ref=str(attached))
+        self.assertEqual(self.read('ref_read', id='capped')['text'], 'whole handoff text\n')
+        self.assertEqual(self.read('ref_read', id='both')['text'], 'attached brief\n')
+        self.assertEqual(self.read('ref_read', id='both', full=True)['text'], 'whole handoff text\n')
+        self.row('outside', text='cut … [full: /etc/passwd]')
+        self.assertTrue(self.tool('ref_read', id='outside')[0])
+
     def test_ref_read_refuses_traversal_symlinks_and_prefix_siblings(self):
         refs = self.manifest.paths.bus_log.parent/'state'/'refs'
         refs.mkdir(parents=True)

@@ -140,7 +140,7 @@ def text_arg(args, key, limit, required=True):
 
 
 def clip(text, limit=ROW_TEXT):
-    text = re.sub(r'\[full: [^\]]*\]', '[full text on the bus]', ' '.join(str(text or '').split()))
+    text = SPILL.sub('[cut; ref_read full=true has the full text]', ' '.join(str(text or '').split()))
     return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
@@ -408,9 +408,18 @@ def page(items, key, args, project=None, sort_field=None, reverse=False, **extra
     return result
 
 
-def ref_file(manifest, row):
-    """Trust only manifest-derived roots; resolve the candidate to reject traversal and symlink escapes."""
+SPILL = re.compile(r'\[full: ([^\]]*)\]')
+
+
+def ref_file(manifest, row, full=False):
+    """Trust only manifest-derived roots; resolve the candidate to reject traversal and symlink escapes.
+
+    The bus caps row text and spills the rest to a refs file named in a `[full: PATH]` marker. full=true (or a
+    row with no ref) reads that file, so remote readers see what was cut (11-07: lead2's 37665d handoff)."""
     ref = row.get('ref')
+    spill = SPILL.search(str(row.get('text') or ''))
+    if spill and (full or not ref):
+        ref = spill.group(1).strip()
     if not isinstance(ref, str) or not ref:
         raise ValueError('row has no ref file')
     swarm = manifest.paths.bus_log.parent.resolve()
@@ -432,7 +441,7 @@ def ref_file(manifest, row):
 
 
 def read_ref(manifest, row, args):
-    path = ref_file(manifest, row)
+    path = ref_file(manifest, row, full=bool(args.get('full')))
     offset, limit = args.get('offset', 0), args.get('limit', REF_BYTES)
     try:
         with path.open('rb') as stream:
