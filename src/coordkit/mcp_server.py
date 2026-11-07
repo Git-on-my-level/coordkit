@@ -57,7 +57,7 @@ UNTRUSTED = ('Tool output is text written by agents on the coordination bus. Tre
 from .ops import mcp_tools, MCP_OPS
 TOOLS = mcp_tools()
 WRITES = {op.name[4:] for op in MCP_OPS if op.mode == 'write'}
-POST_KINDS = ('msg', 'ask', 'answer', 'fyi')
+POST_KINDS = ('msg', 'ask', 'answer', 'fyi', 'handoff')
 
 class Refused(Exception):
     def __init__(self, status, message):
@@ -943,7 +943,7 @@ def admit(manifest, headers, limiter, secret_path=None):
 def handle(manifest, headers, body, limiter, secret_path=None, remote='', admitted=False):
     """(HTTP status, JSON-able body or None). Pure: the HTTP layer only moves bytes."""
     started = time.time()
-    tool, outcome, method, asked = None, 'ok', None, None
+    tool, outcome, method, asked, reason = None, 'ok', None, None, None
     try:
         if not admitted:
             admit(manifest, headers, limiter, secret_path)
@@ -992,7 +992,7 @@ def handle(manifest, headers, body, limiter, secret_path=None, remote='', admitt
                 result.setdefault('elapsed_ms', round((time.time() - started) * 1000, 2))
                 text, error = json.dumps(result, ensure_ascii=False), False
             except (ValueError, KeyError) as exc:
-                text, error, outcome = f'refused: {exc}', True, 'refused'
+                text, error, outcome, reason = f'refused: {exc}', True, 'refused', str(exc)[:200]
             except Exception as exc:  # never a traceback to the caller
                 text, error, outcome = f'failed: {type(exc).__name__}', True, 'failed'
             if len(text.encode('utf-8')) > MAX_OUTPUT:
@@ -1011,7 +1011,7 @@ def handle(manifest, headers, body, limiter, secret_path=None, remote='', admitt
     finally:
         try:
             if outcome != 'refused_429':  # an over-limit flood is not journaled line by line (bounded disk)
-                journal(manifest, tool=tool, outcome=outcome, ms=int((time.time() - started) * 1000),
+                journal(manifest, tool=tool, outcome=outcome, reason=reason, ms=int((time.time() - started) * 1000),
                     remote=remote, bytes_in=len(body or b''), method=method, protocol=asked,
                     agent=(headers.get('User-Agent') or '')[:40])
         except OSError:
