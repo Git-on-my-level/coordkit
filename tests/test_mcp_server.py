@@ -1,5 +1,6 @@
 """coordkit MCP connector: auth, limits, tools, attribution. No sockets: handle() is pure."""
 import json
+import sys
 import os
 from unittest.mock import patch
 
@@ -485,8 +486,20 @@ class McpReadBatchTests(McpCase):
         self.assertEqual([r['id'] for r in second['rows']], ['exec-2', 'exec-1'])
         self.assertNotIn('SECRET', json.dumps(result))
         for call in recent.call_args_list:
-            self.assertEqual(call.kwargs, {'timeout': 5, 'retries': 0})
+            self.assertEqual(call.kwargs, {'timeout': 5, 'retries': 0, 'schema_version': 1})
             self.assertEqual(call.args[0][:4], ['/bin/agentctl', 'recent', '--limit', '100'])
+
+    def test_lanes_unsupported_agentctl_envelope_is_unavailable(self):
+        # A recent page whose envelope is not schema_version 1 contributes no rows.
+        fake = self.root/'agentctl-v2'
+        fake.write_text('#!' + sys.executable + '\nimport json\n'
+                        'print(json.dumps({"ok": True, "schema_version": 2, "result": {"executions": [{"id": "exec-x"}]}}))\n')
+        fake.chmod(0o700)
+        self.manifest.mcp.train_state_dir = str(self.root/'missing')
+        with patch.object(mcp_server.shutil, 'which', return_value=str(fake)):
+            result = self.read('lanes')
+        self.assertEqual(result['agentctl'], 'unavailable')
+        self.assertEqual(result['rows'], [])
 
     def test_lanes_unavailable_dependency_preserves_train_results(self):
         from coordkit.process import ToolError

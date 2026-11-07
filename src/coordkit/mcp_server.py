@@ -606,6 +606,7 @@ def agent_rows(manifest, rows, args, at):
 
 
 def lane_rows(manifest, args):
+    from .actl import AGENTCTL_SCHEMA_VERSION
     from .process import call_json, ToolError
     at, items, executions = time.time(), [], {}
     binary = shutil.which('agentctl')
@@ -615,7 +616,7 @@ def lane_rows(manifest, args):
         try:
             for filters in (['--state', 'nonterminal'], []):
                 data = call_json([binary, 'recent', '--limit', '100', *filters, '--output', 'json'],
-                                 timeout=5, retries=0)
+                                 timeout=5, retries=0, schema_version=AGENTCTL_SCHEMA_VERSION)
                 rows = data.get('executions')
                 if not isinstance(rows, list):
                     raise ValueError('invalid execution list')
