@@ -259,7 +259,7 @@ row('selfupdate.py', 'relay/service.json', 'update reconciles explicitly install
     'explicit relay uninstall or down', 'only owned services may be reinstalled',
     'manager failure triggers existing update rollback')
 
-row('stock.py', 'stock-last.json|.lock|writer:report', 'stock report compares a complete observation',
+row('stock.py', 'stock-last.json|.lock|writer:report', 'stock report compares count and stable oldest-item timestamp',
     'atomic replacement on every successful report; remove to reset the diff baseline',
     'one snapshot per local root, serialized by its sibling lock', 'read/write errors fail the report')
 row('machine.py', 'state|machine|lane-watch|quiet-prs.lines', 'stock report or hourly digest reads producer files',

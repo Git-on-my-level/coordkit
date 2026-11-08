@@ -84,9 +84,12 @@ def stock(manifest, at=None, since=None, hold_warning=None):
             if total < listed:
                 raise ValueError('invalid dead letter count')
             count += total - listed
-        unknown = any(not any(row.get(key) for key in ('ts', 'created_at', 'acquired_at')) for row in items)
-        result[kind] = dict(count=count, oldest=max([max(0, at-timestamp(row, at)) for row in items], default=0),
-                            threshold=getattr(manifest.limits, kind), age_unknown=unknown or count > len(items))
+        timestamps = [timestamp(row, None) for row in items]
+        oldest_at = min((stamp for stamp in timestamps if stamp is not None), default=None)
+        unknown = any(stamp is None for stamp in timestamps)
+        result[kind] = dict(count=count, oldest=max(0, at-oldest_at) if oldest_at is not None else 0,
+                            oldest_at=oldest_at, threshold=getattr(manifest.limits, kind),
+                            age_unknown=unknown or count > len(items))
     return result
 
 
@@ -95,7 +98,7 @@ def report(manifest, prefix='STATUS', at=None, since=None, hold_warning=None, fu
     at = time.time() if at is None else at
     result = stock(manifest, at, since, hold_warning)
     path = manifest.paths.root/'state'/'stock-last.json'
-    snapshot = {kind: {key: item[key] for key in ('count', 'oldest')} for kind, item in result.items()}
+    snapshot = {kind: {key: item[key] for key in ('count', 'oldest_at')} for kind, item in result.items()}
     verified_at = dt.datetime.fromtimestamp(at, dt.timezone.utc).isoformat(timespec='seconds')
     def show(previous):
         for kind, item in result.items():

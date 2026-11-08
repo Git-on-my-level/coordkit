@@ -279,8 +279,8 @@ def markdown():
         arguments = ', '.join('/'.join(a.flags) for a in op.args)
         lines.append(f"| `{op.name}` | {op.mode} | {', '.join(sorted(op.surfaces))} | {arguments} |")
     lines += ['', '## Status snapshots and machine lines', '',
-              '`coordkit stock` prints changed count/oldest pairs and records the snapshot atomically in',
-              '`<root>/state/stock-last.json`. Each stock line includes `verified_at` in UTC.',
+              '`coordkit stock` compares counts and oldest-item timestamps, recording the snapshot atomically in',
+              '`<root>/state/stock-last.json`. Changed lines show the current age and `verified_at` in UTC.',
               '`coordkit stock --full` prints every kind, retaining the count/oldest/threshold table.',
               'Reconciliation always receives the complete stock dictionary for threshold checks.',
               'A reconciliation dry run reads the snapshot without creating a snapshot or lock file.', '',
@@ -288,7 +288,8 @@ def markdown():
               'from `<root>/state/machine/*.lines` (files sorted by path, lines in file order). Accepted prefixes:',
               '`FLAG_DUE_SOON`, `FLAG_OVERDUE_COUNT`, `FLAG_DARK_OVER_14D`, `QUIET_PRS_OVER_14D`,',
               '`APPROVED_NOT_OWNED`, `OPEN_COUNTS`. coordkit only consumes these lines; it never produces FLAG lines.',
-              'Producers own replacement/removal and freshness; missing files contribute no lines.', '',
+              'Producers own replacement/removal and freshness; unreadable files contribute no lines.',
+              'Files are decoded as UTF-8 with invalid bytes replaced so malformed producer text cannot stop delivery.', '',
               'Optionally set `[paths].machine_state = "../swarm/state"` (relative to the manifest,',
               'or an absolute path) to bridge an external producer state directory in live or shadow mode.',
               'The bridge reads `machine/*.lines`, `lane-watch/machine/*.lines`, and `quiet-prs.lines`',

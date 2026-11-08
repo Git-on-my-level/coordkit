@@ -7,20 +7,25 @@ PREFIX = re.compile(r'^(FLAG_DUE_SOON|FLAG_OVERDUE_COUNT|FLAG_DARK_OVER_14D|QUIE
 
 
 def lines(manifest):
-    paths = set((manifest.paths.root/'state'/'machine').glob('*.lines'))
+    directories = [manifest.paths.root/'state'/'machine']
+    paths = set()
     external = manifest.paths.machine_state
     if external is not None:
-        paths.update((external/'machine').glob('*.lines'))
-        paths.update((external/'lane-watch'/'machine').glob('*.lines'))
+        directories.extend([external/'machine', external/'lane-watch'/'machine'])
         paths.add(external/'quiet-prs.lines')
+    for directory in directories:
+        try:
+            paths.update(directory.glob('*.lines'))
+        except OSError:  # optional producer directories must never block the lead digest
+            continue
     result = deque(maxlen=20)
     for path in sorted(paths):
         try:
-            with path.open() as stream:
+            with path.open(encoding='utf-8', errors='replace') as stream:
                 for raw in stream:
                     line = raw.rstrip('\r\n')
                     if PREFIX.match(line):
                         result.append(line)
-        except FileNotFoundError:  # producer has not published yet (or removed its snapshot)
+        except OSError:  # missing, unreadable or replaced producer files do not block delivery
             continue
     return list(result)
