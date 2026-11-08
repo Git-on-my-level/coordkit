@@ -281,6 +281,8 @@ def lead_names(manifest):
 
 
 def to_lead_digest(manifest, event, text, row=None, at=None):
+    from . import machine
+    machine_lines = machine.lines(manifest)
     path = home(manifest)/'lead-digest.ndjson'
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a') as stream:
@@ -300,9 +302,10 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
         fcntl.flock(stream, fcntl.LOCK_EX)
         stream.seek(0)
         items = [json.loads(line) for line in stream if line.strip()]
-        if not items and not backlog and not pending and not dead:
+        if not items and not backlog and not pending and not dead and not machine_lines:
             return
         lines = [f"- {i.get('event')}: {i.get('text', '')[:200]}" for i in items[-12:]]
+        lines.extend(machine_lines)
         if backlog:
             lines.insert(0, f"- backlog: {len(backlog)}; " + ' '.join(r['id'] for r in backlog[:12]))
         if pending:

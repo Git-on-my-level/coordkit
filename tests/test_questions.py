@@ -786,3 +786,147 @@ class UnboundDeliveryTests(QuestionCase):
         lines = questions.ladder(self.manifest, at=time.time() + 3601)
         self.assertEqual(lines, [f'QUESTION_CLOSED {record["qid"]} relayed (unbound asker)'])
         self.assertEqual(self.records()[record['qid']]['state'], 'closed')
+
+
+class DefaultAndDedupeTests(QuestionCase):
+    def pending(self, default='', **kwargs):
+        self.lease('lead-a', heartbeat_ago=-7200)
+        record, _ = questions.create(self.manifest, 'worker-ui', 'Rerun the lifecycle gate?',
+                                     recommendation='Rerun it', brief=BRIEF, session_id='defaults',
+                                     default=default, at=self.now, **kwargs)
+        return record
+
+    def test_q7_second_unanswered_cycle_applies_default_and_records_decision(self):
+        record = self.pending('Keep waiting', bus_id='original-ask')
+        first = questions.ladder(self.manifest, at=self.now + 31*60)
+        self.assertIn('QUESTION_ESCALATED', first[0])
+        self.assertEqual(self.records()[record['qid']]['cycles'], 1)
+        self.assertEqual(questions.ladder(self.manifest, at=self.now + 32*60), [])
+        with patch.object(questions, 'deliver', return_value='relay') as deliver:
+            lines = questions.ladder(self.manifest, at=self.now + 62*60)
+        self.assertEqual(lines, [f'QUESTION_DEFAULTED {record["qid"]} default applied after 2 cycles'])
+        stored = self.records()[record['qid']]
+        self.assertEqual((stored['state'], stored['answered_by'], stored['applied_default']),
+                         ('answered', 'default', True))
+        decisions = [r for r in self.rows() if r['kind'] == 'decision']
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual((decisions[0]['re'], decisions[0]['to'], decisions[0]['text']),
+                         ('original-ask', 'worker-ui', 'Keep waiting'))
+        self.assertEqual(decisions[0]['rollback'], questions.DEFAULT_ROLLBACK)
+        deliver.assert_called_once()
+        questions.ladder(self.manifest, at=self.now + 63*60)
+        self.assertEqual(len([r for r in self.rows() if r['kind'] == 'decision']), 1)
+
+    def test_defaulted_question_reports_in_status_and_no_default_still_waits(self):
+        record = self.pending('Keep waiting')
+        ask = next(r for r in self.rows() if r['id'] == record['qid'])
+        self.assertEqual(ask['default'], 'Keep waiting')
+        questions.capture_bus_asks(self.manifest, self.rows(), self.now)
+        self.assertEqual(len(self.records()), 1)
+        questions.ladder(self.manifest, at=self.now + 31*60)
+        questions.ladder(self.manifest, at=self.now + 62*60)
+        self.assertIn('defaulted=1', questions.status_line(self.manifest, self.now + 62*60))
+        self.assertIn('default: Keep waiting', questions.summary(record))
+        other, _ = questions.create(self.manifest, 'worker-ui', 'Retry the gate?', recommendation='Retry',
+                                    brief=BRIEF, session_id='no-default', default='  ', at=self.now)
+        questions.ladder(self.manifest, at=self.now + 31*60)
+        questions.ladder(self.manifest, at=self.now + 62*60)
+        stored = self.records()[other['qid']]
+        self.assertEqual((stored['state'], stored['tier'], stored['cycles']), ('escalated', 2, 2))
+        self.assertFalse(stored.get('applied_default'))
+
+    def test_reworded_reask_same_key_joins_existing_open_question(self):
+        self.lease('lead-a')
+        first, fresh = questions.create(self.manifest, 'worker-ui', 'Retry at 12:30Z q-abcdef attempt 1?',
+                                       session_id='dedupe', at=self.now)
+        with patch.object(questions, 'route') as route:
+            second, fresh = questions.create(self.manifest, 'worker-ui', 'RETRY   at 13:45Z q-123abc attempt 22?',
+                                            session_id='dedupe', at=self.now + 60)
+        self.assertFalse(fresh)
+        route.assert_not_called()
+        self.assertEqual(first['qid'], second['qid'])
+        self.assertEqual((second['created_at'], second['deadline_at']), (first['created_at'], first['deadline_at']))
+        self.assertEqual((second['last_seen'], second['reopens']), (self.now + 60, 1))
+        self.assertIn('re-asked 1x', questions.summary(second))
+        self.assertEqual(len(self.records()), 1)
+
+    def test_reask_fingerprint_preserves_pr_numbers_and_flag_keys(self):
+        texts = ['Ship #123 with FEATURE_GATE_V1?', 'Ship #124 with FEATURE_GATE_V1?',
+                 'Ship #123 with FEATURE_GATE_V2?', 'Ship #123 with OTHER_GATE_V1?']
+        keys = {questions.fingerprint('s', text) for text in texts}
+        self.assertEqual(len(keys), len(texts))
+        for text in texts:
+            questions.create(self.manifest, 'worker-ui', text, session_id='pr-flags', at=self.now)
+        self.assertEqual(len(self.records()), len(texts))
+
+    def test_default_needs_two_real_windows_and_answer_wins_at_deadline(self):
+        record = self.pending('Keep waiting')
+        questions.ladder(self.manifest, at=self.now + 31*60)
+        # Receipts are not answers, but a real answer at the deadline takes precedence over the default.
+        rows = [{'id': 'answer-1', 'frm': 'lead-a', 're': record['qid'], 'kind': 'answer', 'text': 'Retry'}]
+        lines = questions.ladder(self.manifest, at=self.now + 62*60, rows=rows)
+        self.assertIn('QUESTION_ANSWERED', lines[0])
+        self.assertFalse(self.records()[record['qid']].get('applied_default'))
+
+    def test_anx_outage_retries_do_not_count_as_unanswered_cycles(self):
+        record = self.pending('Keep waiting')
+        with patch.object(AnxClient, 'ask', side_effect=RuntimeError('offline')):
+            for minutes in (31, 37, 43, 80):
+                questions.ladder(self.manifest, at=self.now + minutes*60)
+        stored = self.records()[record['qid']]
+        self.assertEqual(stored['cycles'], 1)
+        self.assertFalse(stored.get('applied_default'))
+
+    def test_bus_ask_default_capture_is_opt_in_and_reasks_captured_once(self):
+        from coordkit import bus
+        self.lease('lead-a')
+        bus.main(['post', '--from', 'worker-ui', '--to', 'lead-a', '--kind', 'ask', '--default', 'Wait',
+                  '--force', 'Retry at 12:30Z attempt 1?'], self.manifest)
+        questions.capture_bus_asks(self.manifest, self.rows(), self.now)
+        record = next(iter(self.records().values()))
+        original_id = record['bus_id']
+        self.assertEqual((record['default'], record['target'], record['capture']), ('Wait', 'lead-a', 'bus'))
+        bus.main(['post', '--from', 'worker-ui', '--to', 'lead-a', '--kind', 'ask', '--default', 'Wait',
+                  '--force', 'RETRY at 13:30Z attempt 2?'], self.manifest)
+        for _ in range(3):
+            questions.capture_bus_asks(self.manifest, self.rows(), self.now)
+        self.assertEqual(len(self.records()), 1)
+        record = next(iter(self.records().values()))
+        self.assertEqual((record['bus_id'], record['reopens']), (original_id, 1))
+
+    def test_existing_fingerprint_migrates_and_different_choices_do_not_join(self):
+        self.lease('lead-a')
+        record, _ = questions.create(self.manifest, 'worker-ui', 'Retry at 12:30Z attempt 1?',
+                                     session_id='old-record', at=self.now)
+        questions.mark(self.manifest, record['qid'], fingerprint='legacy-fingerprint')
+        joined, fresh = questions.create(self.manifest, 'worker-ui', 'RETRY at 14:20z attempt 2?',
+                                         session_id='old-record', at=self.now + 60)
+        self.assertFalse(fresh)
+        self.assertEqual(record['qid'], joined['qid'])
+        for kwargs in ({'options': ['Wait', 'Retry']}, {'default': 'Wait'}, {'recommendation': 'Retry'}):
+            with self.subTest(kwargs=kwargs):
+                _, fresh = questions.create(self.manifest, 'worker-ui', 'RETRY at 14:20z attempt 2?',
+                                             session_id='old-record', at=self.now + 60, **kwargs)
+                self.assertTrue(fresh)
+
+    def test_direct_tier2_waits_for_two_full_windows(self):
+        record, _ = questions.create(self.manifest, 'worker-ui', '[human-only] Retry the gate?',
+                                     recommendation='Retry', brief=BRIEF, default='Wait', at=self.now)
+        self.assertEqual(record['tier'], 2)
+        self.assertEqual(questions.ladder(self.manifest, at=self.now + 31*60), [])
+        self.assertEqual(self.records()[record['qid']]['cycles'], 1)
+        lines = questions.ladder(self.manifest, at=self.now + 62*60)
+        self.assertIn('QUESTION_DEFAULTED', lines[0])
+
+    def test_default_decision_survives_a_failed_completion_without_duplicate_post(self):
+        record = self.pending('Keep waiting')
+        questions.ladder(self.manifest, at=self.now + 31*60)
+        with patch.object(questions, 'close', side_effect=OSError('interrupted')):
+            with self.assertRaises(OSError):
+                questions.ladder(self.manifest, at=self.now + 62*60)
+        self.assertEqual(self.records()[record['qid']]['state'], 'escalated')
+        lines = questions.ladder(self.manifest, at=self.now + 68*60)
+        self.assertIn('QUESTION_DEFAULTED', lines[0])
+        decisions = [r for r in self.rows() if r['kind'] == 'decision']
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]['rollback'], questions.DEFAULT_ROLLBACK)

@@ -80,9 +80,18 @@ def update(manifest, fn):
         return result
 
 
-def fingerprint(session, text, options=(), recommendation=''):
+def normalize(text):
+    """Remove transient clocks/ids/counts, preserving PR numbers and flag identities."""
+    tokens = re.findall(r'#\d+|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b|\b[qQ]-[0-9a-fA-F]{6}\b|'
+                        r'\b\d{1,2}:\d{2}(?:[Zz])?\b|\b\d+\b|\s+|.', text)
+    kept = [token for token in tokens if not re.fullmatch(
+        r'[qQ]-[0-9a-fA-F]{6}|\d{1,2}:\d{2}(?:[Zz])?|\d+', token)]
+    return ' '.join(''.join(kept).lower().split())
+
+
+def fingerprint(session, text, options=(), recommendation='', default=''):
     """Same session, same question, same choices: a modal repeated with other options is a new question."""
-    body = '|'.join([session, ' '.join(text.lower().split()), *options, recommendation])
+    body = json.dumps([session, normalize(text), list(options), recommendation, default])
     return hashlib.sha256(body.encode()).hexdigest()[:20]
 
 
@@ -165,24 +174,35 @@ from .identity import asker_for
 # -- create and route -------------------------------------------------------------------------------
 
 def create(manifest, asker, question, *, options=(), recommendation='', session_id='', capture='pretooluse',
-           urgent=False, config_dir='', remote='', at=None, brief=None):
+           urgent=False, config_dir='', remote='', at=None, brief=None, default='', bus_id=None, bus_target=None):
     """A new open record (or the existing open one for the same session+question). Routes it.
     (None, False) for a session that must never be captured."""
     at = now() if at is None else at
     if session_id in cfg(manifest).exclude_sessions or asker in cfg(manifest).human_sessions:
         return None, False
-    fp = fingerprint(session_id or asker, question, tuple(options), recommendation)
+    default = default.strip()
+    fp = fingerprint(session_id or asker, question, tuple(options), recommendation, default)
     is_guarded, why = guarded(manifest, ' '.join([question, *options]))
 
     def add(records):
         for record in records.values():
-            if record.get('fingerprint') == fp and record['state'] in ('open', 'escalated', 'answered'):
+            if record['state'] not in ('open', 'escalated', 'answered'):
+                continue
+            existing = fingerprint(record.get('session_id') or record['asker'], record['question'],
+                                   record.get('options', ()), record.get('recommendation', ''), record.get('default', ''))
+            if record.get('fingerprint') == fp or existing == fp:
+                record['fingerprint'] = fp
                 record['last_seen'] = at
+                record['reopens'] = record.get('reopens', 0) + 1
+                if bus_id:
+                    record.setdefault('bus_ids', [record.get('bus_id')])
+                    record['bus_ids'].append(bus_id)
                 return record, False
         qid = 'q-' + secrets.token_hex(3)
         level = 'urgent' if urgent else 'normal'
         record = {'qid': qid, 'state': 'open', 'question': question[:500], 'options': list(options)[:10],
-                  'recommendation': recommendation, 'asker': asker, 'session_id': session_id,
+                  'recommendation': recommendation, 'default': default, 'cycles': 0, 'bus_id': bus_id, 'bus_target': bus_target,
+                  'asker': asker, 'session_id': session_id,
                   'config_dir': config_dir, 'remote': remote, 'capture': capture, 'created_at': at,
                   'deadline_at': at + duration(cfg(manifest).urgent_deadline if urgent else cfg(manifest).normal_deadline),
                   'urgent': urgent, 'priority': level, 'guarded': is_guarded, 'guarded_why': why, 'tier': 0,
@@ -218,12 +238,17 @@ def tier1_target(manifest, asker):
 def summary(record):
     rec = f' rec: {record["recommendation"]}' if record.get('recommendation') else ''
     opts = f' options: {" / ".join(record["options"][:4])}' if record.get('options') else ''
-    return f'Q {record["qid"]} from {record["asker"]}: {record["question"][:220]}{rec}{opts}'
+    default = f' default: {record["default"]}' if record.get('default') else ''
+    reasked = f' re-asked {record["reopens"]}x' if record.get('reopens') else ''
+    return f'Q {record["qid"]} from {record["asker"]}: {record["question"][:220]}{rec}{opts}{default}{reasked}'
 
 
 def route(manifest, record, at=None):
     """First hop: tier 1 to a live agent with authority, or straight to tier 2."""
     at = now() if at is None else at
+    if record.get('bus_id') and not record['guarded']:
+        mark(manifest, record['qid'], state='escalated', tier=1, target=record.get('bus_target'), escalated_at=at)
+        return 1
     if record['guarded']:
         return tier2(manifest, record, f'{record["guarded_why"]}: a lead cannot approve it', at)
     target = tier1_target(manifest, record['asker'])
@@ -236,7 +261,7 @@ def route(manifest, record, at=None):
     return 1
 
 
-def post(manifest, frm, to, kind, text, record, bus_id=None, tier=None, re_id=None):
+def post(manifest, frm, to, kind, text, record, bus_id=None, tier=None, re_id=None, rollback=None):
     """A bus row (live mode). In shadow mode the relay file carries it instead."""
     from . import bus
     if manifest.mode != 'live':
@@ -250,6 +275,10 @@ def post(manifest, frm, to, kind, text, record, bus_id=None, tier=None, re_id=No
         row['escalation'] = f'question_escalated tier={tier}'
     if re_id:
         row['re'] = re_id
+    if rollback:
+        row['rollback'] = rollback
+    if kind == 'ask' and record.get('default'):
+        row['default'] = record['default']
     bus.append([row], project=False)
     return row['id']
 
@@ -368,7 +397,7 @@ def tier2(manifest, record, why, at=None):
          f'{record["qid"]} escalated to the operator (anx {ask_id}): {why}. Keep working on anything independent.',
          record, tier=2, re_id=record['qid'])
     mark(manifest, record['qid'], state='escalated', tier=2, anx_ask_id=ask_id, escalated_at=at, tier2_why=why,
-         claim=None, anx_failed_at=None)
+         claim=None, anx_failed_at=None, cycle_deadline_at=at + wait_seconds(manifest, record))
     return 2
 
 
@@ -380,8 +409,9 @@ RECEIPT = re.compile(r'^\s*(received|ack(nowledged)?|got it|on it|looking)\b[\s.
 def replies(manifest, rows, record):
     """The first real answer to this question from anyone but its asker and coordkit. A receipt
     ("received", an `ack` of received/blocked, or bare acknowledgement text) is not an answer."""
+    ids = {record['qid'], record.get('bus_id'), *record.get('bus_ids', [])} - {None}
     for row in rows:
-        if row.get('re') != record['qid'] or row.get('frm') in (record['asker'], 'coordkit'):
+        if row.get('re') not in ids or row.get('frm') in (record['asker'], 'coordkit'):
             continue
         if row.get('kind') not in ('answer', 'decision', 'ruling', 'msg'):
             continue
@@ -389,6 +419,66 @@ def replies(manifest, rows, record):
             continue
         return row
     return None
+
+
+DEFAULT_ROLLBACK = 're-open by posting an answer --re; default was applied after two unanswered cycles'
+
+
+def wait_seconds(manifest, record):
+    return duration(cfg(manifest).urgent_deadline if record.get('urgent') else cfg(manifest).normal_deadline)
+
+
+def missed_cycle(manifest, record, at):
+    """Count a deadline once under the store lock; retries/outages are not cycles."""
+    def advance(records):
+        current = records[record['qid']]
+        deadline = current.get('cycle_deadline_at', current['deadline_at'])
+        if current['state'] not in ('open', 'escalated') or at < deadline or (
+                current.get('claim') and at - current['claim']['at'] < 300):
+            return current
+        if current['tier'] == 1 and not current.get('tier1_missed'):
+            current['tier1_missed'] = True
+        elif current['tier'] != 2 or not current.get('anx_ask_id'):
+            return current
+        current['cycles'] = current.get('cycles', 0) + 1
+        current['cycle_deadline_at'] = at + wait_seconds(manifest, current)
+        return current
+    return update(manifest, advance)
+
+
+def apply_default(manifest, record, at):
+    """Publish an auditable decision before marking the default answered and delivering it."""
+    from . import bus
+    due = lambda r: r['state'] in ('open', 'escalated') and r.get('cycles', 0) >= 2 and r.get('default') and not (
+        r.get('claim') and at - r['claim']['at'] < 300)
+    if not claim(manifest, record['qid'], 'default', at, due):
+        return False
+    answer_id = 'qd-' + record['qid']
+    if not any(row.get('id') == answer_id for row in bus.read()):
+        post(manifest, 'coordkit', record['asker'], 'decision', record['default'], record,
+             bus_id=answer_id, re_id=record.get('bus_id') or record['qid'], rollback=DEFAULT_ROLLBACK)
+    mark(manifest, record['qid'], applied_default=True)
+    close(manifest, record, 'default', record['default'], answer_id)
+    return True
+
+
+def capture_bus_asks(manifest, rows, at):
+    """An explicit --default opts a bus ask into the durable question ladder."""
+    records = load_all(manifest)
+    seen = {rid for r in records.values() for rid in [r['qid'], r.get('bus_id'), *r.get('bus_ids', [])]}
+    closed = {r.get('re') for r in rows if r.get('kind') in ('answer', 'decision', 'reply')}
+    out = []
+    for row in rows:
+        if row.get('kind') != 'ask' or not row.get('default') or row.get('copy_of') or row['id'] in seen | closed:
+            continue
+        record, fresh = create(manifest, row['frm'], row.get('text', ''), default=row['default'],
+                               capture='bus', bus_id=row['id'], bus_target=row['to'],
+                               urgent=row.get('priority') == 'urgent',
+                               at=parse_ts(row['ts']).timestamp())
+        seen.add(row['id'])
+        if record and fresh:
+            out.append(f'QUESTION_CAPTURED {record["qid"]} bus {row["id"]}')
+    return out
 
 
 def ladder(manifest, at=None, rows=None, anx_answers=None, anx_known=None):
@@ -436,6 +526,11 @@ def ladder(manifest, at=None, rows=None, anx_answers=None, anx_known=None):
             # Gone from a complete anx listing: withdrawn or retired there. Close it and tell the asker.
             close(manifest, record, 'anx', 'the ask was withdrawn in anx; re-ask with a brief if it still matters')
             out.append(f'QUESTION_CLOSED {record["qid"]} withdrawn in anx')
+            continue
+        record = missed_cycle(manifest, record, at)
+        if record.get('cycles', 0) >= 2 and record.get('default'):
+            if apply_default(manifest, record, at):
+                out.append(f'QUESTION_DEFAULTED {record["qid"]} default applied after {record["cycles"]} cycles')
             continue
         retry = record.get('anx_failed_at') and at - record['anx_failed_at'] >= 300
         if record['tier'] <= 1 and (at >= record['deadline_at'] or retry) and not record.get('brief_refused_at'):
@@ -831,11 +926,16 @@ def status_line(manifest, at=None):
     items = open_questions(manifest, at)
     over = [i for i in items if i['age'] >= 1800]
     oldest = int(max((i['age'] for i in items), default=0) // 60)
-    return f'QUESTIONS open={len(items)} over30m={len(over)} oldest={oldest}m'
+    defaulted = sum(bool(r.get('applied_default')) for r in load_all(manifest).values())
+    return f'QUESTIONS open={len(items)} over30m={len(over)} oldest={oldest}m' + (
+        f' defaulted={defaulted}' if defaulted else '')
 
 
 def sweep(manifest, at=None, out=print):
-    lines = scan_transcripts(manifest, at) + scan_notifications(manifest, at)
+    from . import bus
+    bus.configure(manifest)
+    lines = capture_bus_asks(manifest, bus.read(), now() if at is None else at)
+    lines += scan_transcripts(manifest, at) + scan_notifications(manifest, at)
     answers, known = {}, None
     if manifest.mode == 'live' and any(r.get('anx_ask_id') for r in open_questions(manifest, at)):
         answers = anx_answers(manifest)
@@ -910,7 +1010,7 @@ def main(argv, manifest):
             for r in sorted(rows, key=lambda r: r['created_at']):
                 age = int((now() - r['created_at']) // 60)
                 print(f'{r["qid"]} {r["state"]} tier={r["tier"]} age={age}m asker={r["asker"]} '
-                      f'target={r.get("target")} anx={r.get("anx_ask_id")} {r["question"][:100]}')
+                      f'target={r.get("target")} anx={r.get("anx_ask_id")} {summary(r)}')
             print(status_line(manifest))
         return 0
     if o.cmd == 'answer':

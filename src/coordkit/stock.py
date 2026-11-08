@@ -1,11 +1,13 @@
-"""Read-only obligation stock used by reconciliation."""
+"""Obligation stock and local report snapshots used by reconciliation."""
+import argparse
+import datetime as dt
 import time
 from . import bus, deadletters
 from .actl import AgentctlClient
 from .anxcli import AnxClient
 from .merge import holds_on, PR_MENTION
 from .process import parse_ts, ToolError
-from .state import read_json
+from .state import read_json, write_json
 
 
 def held(rows, warn=None):
@@ -88,9 +90,28 @@ def stock(manifest, at=None, since=None, hold_warning=None):
     return result
 
 
-def report(manifest, prefix='STATUS', at=None, since=None, hold_warning=None):
+def report(manifest, prefix='STATUS', at=None, since=None, hold_warning=None, full=False):
+    from . import addressed, machine
+    at = time.time() if at is None else at
     result = stock(manifest, at, since, hold_warning)
-    for kind, item in result.items():
-        print(f'{prefix} stock {kind} count={item["count"]} oldest={item["oldest"]:.0f}s threshold={item["threshold"]}'
-              + (' age=unknown' if item['age_unknown'] else ''))
+    path = manifest.paths.root/'state'/'stock-last.json'
+    snapshot = {kind: {key: item[key] for key in ('count', 'oldest')} for kind, item in result.items()}
+    verified_at = dt.datetime.fromtimestamp(at, dt.timezone.utc).isoformat(timespec='seconds')
+    with addressed.locked(path.with_suffix('.lock')):
+        previous = read_json(path, {})
+        for kind, item in result.items():
+            if full or previous.get(kind) != snapshot[kind]:
+                print(f'{prefix} stock {kind} count={item["count"]} oldest={item["oldest"]:.0f}s threshold={item["threshold"]}'
+                      + (' age=unknown' if item['age_unknown'] else '') + f' verified_at={verified_at}')
+        write_json(path, snapshot)
+    for line in machine.lines(manifest):
+        print(line)
     return result
+
+
+def main(argv, manifest):
+    parser = argparse.ArgumentParser(prog='coordkit stock', allow_abbrev=False)
+    parser.add_argument('--full', action='store_true', help='print every stock kind, including unchanged kinds')
+    args = parser.parse_args(argv)
+    report(manifest, full=args.full)
+    return 0

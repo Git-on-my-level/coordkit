@@ -44,3 +44,26 @@ writes the relay file instead. Unset paging routes and the write-only event jour
 `hooks.install_questions(manifest, config_dir, backup)` adds the three hooks to `<config_dir>/settings.json` under a
 receipt (`<root>/hook-questions-<dir>.json`), preserving unrelated hooks. `coordkit down` reverses each one.
 Doctor, `up --plan` and reconcile report a managed config dir that lacks them.
+
+## Explicit defaults and repeated asks
+
+`bus post --kind ask --default "Keep the current setting" ...` opts an ask into
+question capture on the next question sweep. The original asker, recipient and
+bus id are preserved. `create(..., default=...)` supports the same explicit
+contract for capture adapters; a recommendation alone never becomes a default.
+
+Each missed tier-1 deadline counts once. A successfully filed tier-2 ANX ask gets
+its own urgent/normal deadline; each unanswered waiting window counts once.
+Repeated sweeps and ANX outage retries do not count as new cycles. After two
+unanswered cycles, an explicit default becomes a bus decision to the asker with
+`--re` pointing to the original ask and a rollback line. Delivery uses the normal
+answer path, and `QUESTION_DEFAULTED` plus `QUESTIONS ... defaulted=N` expose it.
+Without a default the question continues waiting. ANX still requires an authored
+brief; refusing a raw capture or failing to file an ask does not simulate a human
+waiting cycle.
+
+Within a session, re-asks differing only in case, whitespace, clock times, q-ids
+or bare numbers join the existing open record. PR numbers (`#123`) and
+UPPER_SNAKE flag keys remain distinct, as do options, recommendations and defaults.
+Joined records keep their original creation/deadline and show `re-asked Nx` in
+summaries and question listings. Only fresh records route again.

@@ -258,3 +258,10 @@ row('lifecycle.py', 'relay/service.json', 'relay installation receipt includes t
 row('selfupdate.py', 'relay/service.json', 'update reconciles explicitly installed relay service',
     'explicit relay uninstall or down', 'only owned services may be reinstalled',
     'manager failure triggers existing update rollback')
+
+row('stock.py', 'stock-last.json|.lock|writer:report', 'stock report compares a complete observation',
+    'atomic replacement on every successful report; remove to reset the diff baseline',
+    'one snapshot per local root, serialized by its sibling lock', 'read/write errors fail the report')
+row('machine.py', 'state|machine|lane-watch|quiet-prs.lines', 'stock report or hourly digest reads producer files',
+    'read-only; producers replace or remove files', 'last 20 matching lines, no local cache',
+    'missing files ignored; malformed prefixes excluded')

@@ -488,6 +488,8 @@ def dispatch(o):
             old = next((r for r in rows if r.get('id') == o.id), None)
             payload = {k: getattr(o,k) for k in ('frm','to','topic','kind','owner','state','subject','needs',
                                                   'rollback','irreversible','evidence','re','signal')}
+            if o.default:
+                payload['default'] = o.default
             payload['text_hash'] = hashlib.sha256(o.text.encode()).hexdigest()
             payload['prs'] = list(dict.fromkeys(o.pr.replace(' ', ',').split(','))) if o.pr else []
             payload['ref'] = str(pathlib.Path(o.ref).resolve()) if o.ref else None
@@ -554,6 +556,8 @@ def dispatch(o):
         if o.subject and not SUBJECT.match(o.subject):
             print(f'refused: --subject {o.subject!r} must be one token (letters, digits, _.:#/@+-)', file=sys.stderr)
             sys.exit(2)
+        if o.default and o.kind != 'ask':
+            print('refused: --default is only for --kind ask', file=sys.stderr); sys.exit(2)
         if o.kind == 'decision':
             if not (o.re or o.subject):
                 print('refused: a decision needs --re <ask/blocker id> or --subject', file=sys.stderr); sys.exit(2)
@@ -626,6 +630,7 @@ def dispatch(o):
                               and r.get('re') == o.re and r.get('owner') == o.owner
                               and r.get('subject') == o.subject and r.get('state') == o.state
                               and all(r.get(k) == getattr(o, k) for k in ('needs', 'rollback', 'evidence', 'signal', 'priority'))
+                              and r.get('default', '') == o.default
                               and bool(r.get('irreversible')) == o.irreversible and r.get('prs', []) == prs
                               and (not o.ref or r.get('ref') == str(pathlib.Path(o.ref).resolve()))
                               and r.get('text_hash', hashlib.sha256(r.get('text', '').encode()).hexdigest()) == digest
@@ -688,6 +693,7 @@ def dispatch(o):
             if getattr(o, key): rec[key] = getattr(o, key)
         if o.irreversible: rec['irreversible'] = True
         if o.priority: rec['priority'] = o.priority
+        if o.default: rec['default'] = o.default
         if role: rec['role'] = role
         if getattr(o, 'site_local', False): rec['site_local'] = True
         recs = [rec]

@@ -105,7 +105,7 @@ def main(argv=None):
             return mcp_main(rest, manifest)
         if options.command in ("up", "down", "doctor", "lead"):
             return lifecycle_main(rest, manifest, options.command)
-        if options.command in ("bus", "loop", "lane", "wait", "reconcile", "shadow", "obligations", "review", "question"):
+        if options.command in ("stock", "bus", "loop", "lane", "wait", "reconcile", "shadow", "obligations", "review", "question"):
             module = __import__(f"coordkit.{options.command if options.command != 'question' else 'questions'}", fromlist=["main"])
             return module.main(rest, manifest)
         raise ManifestError(f"not_implemented: {options.command}")
