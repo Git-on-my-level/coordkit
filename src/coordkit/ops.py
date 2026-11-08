@@ -262,7 +262,7 @@ COMMANDS = {
     'lane': 'lane', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
     'obligations': 'obligations', 'review': 'review', 'question': 'questions',
     'init': 'lifecycle', 'up': 'lifecycle', 'down': 'lifecycle', 'doctor': 'lifecycle', 'lead': 'lifecycle',
-    'ops': 'ops', 'version': 'ops', 'retire': 'wake', 'unretire': 'wake', 'wake-scan': 'wake', 'sessions': 'sessions', 'hooks': 'hooks', 'update': 'selfupdate', 'mcp': 'mcp_install',
+    'ops': 'ops', 'version': 'ops', 'retire': 'wake', 'unretire': 'wake', 'wake-scan': 'wake', 'sessions': 'sessions', 'wake-helper': 'peerwake', 'hooks': 'hooks', 'update': 'selfupdate', 'mcp': 'mcp_install',
 }
 OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down','relay') else 'read',
                                                 handler=module+':main') for name,module in COMMANDS.items() if name != 'bus')
@@ -291,6 +291,9 @@ CLI_ARGS = {
     'retire': (Arg('lane'), Arg('--to')),
     'unretire': (Arg('lane'),),
     'wake-scan': (Arg('--dry-run',action='store_true'),),
+    'wake-helper': (Arg('--profile',required=True,help='config profile dir name, e.g. .claude-1'),
+                    Arg('--timeout',type=float,default=45,help='minutes'),Arg('--poll',type=float,default=2,help='seconds'),
+                    Arg('--ack',metavar='KEY'),Arg('--result',choices=('sent','failed'),default='sent'),Arg('--reason')),
     'sessions': (Arg('--lane',help='tmux session, explicit name, or profile:pid'),Arg('--json',action='store_true')),
     'relay': (Arg('action',choices=('run','status','install','uninstall')), Arg('--apply',action='store_true')),
     'hooks': (Arg('action',choices=('install','status','uninstall')), Arg('--settings')),

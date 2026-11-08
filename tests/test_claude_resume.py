@@ -215,7 +215,7 @@ builtin.ClaudeCode().wake(load(sys.argv[1]), 'worker', [], 'parent-request')
         fallback.wake.return_value = {'status': 'woken'}
         with patch('coordkit.adapters.builtin.Agentctl', return_value=fallback):
             adapters = discover_wake_adapters(self.manifest)
-        self.assertEqual([a.name for a in adapters], ['claude-code', 'agentctl'])
+        self.assertEqual([a.name for a in adapters], ['claude-code', 'agentctl', 'claude-peer'])
         row = dict(id='ask', frm='lead', to='worker', kind='ask')
         with patch.object(wake, 'wake_adapters', return_value=adapters), \
                 patch.object(wake, 'is_listening', return_value=False):

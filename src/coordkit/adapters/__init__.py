@@ -25,6 +25,10 @@ def available(manifest):
         found.append(Agentctl())
     if manifest.anx.workspace and shutil.which(os.environ.get('ANX', 'anx')):
         found.append(Anx())
+    # Last resort: a held interactive session is unresumable by ClaudeCode, so ask
+    # a resident helper in the same profile to deliver instead.
+    from ..peerwake import ClaudePeer
+    found.append(ClaudePeer())
     # Explicit entry point names are optional; absent plugins do not poison core reads.
     from importlib import metadata
     selected = manifest.adapters
