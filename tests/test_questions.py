@@ -930,3 +930,12 @@ class DefaultAndDedupeTests(QuestionCase):
         decisions = [r for r in self.rows() if r['kind'] == 'decision']
         self.assertEqual(len(decisions), 1)
         self.assertEqual(decisions[0]['rollback'], questions.DEFAULT_ROLLBACK)
+
+    def test_long_default_keeps_a_full_decision_ref(self):
+        text = 'Keep waiting. ' * 60
+        record = self.pending(text)
+        questions.ladder(self.manifest, at=self.now + 31*60)
+        questions.ladder(self.manifest, at=self.now + 62*60)
+        decision = next(r for r in self.rows() if r.get('id') == 'qd-' + record['qid'])
+        self.assertEqual(Path(decision['ref']).read_text().strip(), text.strip())
+        self.assertEqual(decision['rollback'], questions.DEFAULT_ROLLBACK)

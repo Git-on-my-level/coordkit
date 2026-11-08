@@ -268,6 +268,12 @@ def post(manifest, frm, to, kind, text, record, bus_id=None, tier=None, re_id=No
         addressed.to_relay_file(manifest, f'QUESTION tier={tier} {text}')
         return None
     bus.configure(manifest)
+    if rollback:
+        # Use the normal publication path so a long default has a durable full-text ref.
+        bus.main(['post', '--from', frm, '--to', to, '--kind', kind, '--topic', 'question',
+                  '--id', bus_id, '--re', re_id, '--rollback', rollback, '--priority',
+                  record.get('priority', 'normal'), '--no-mirror', '--force', text], manifest)
+        return bus_id
     row = {'ts': iso(now()), 'id': bus_id or ('qe-' + secrets.token_hex(3)), 'frm': frm, 'to': to,
            'topic': 'question', 'kind': kind, 'text': text[:manifest.bus.text_cap],
            'priority': record.get('priority', 'normal'), 'question': record['qid']}
@@ -275,8 +281,6 @@ def post(manifest, frm, to, kind, text, record, bus_id=None, tier=None, re_id=No
         row['escalation'] = f'question_escalated tier={tier}'
     if re_id:
         row['re'] = re_id
-    if rollback:
-        row['rollback'] = rollback
     if kind == 'ask' and record.get('default'):
         row['default'] = record['default']
     bus.append([row], project=False)

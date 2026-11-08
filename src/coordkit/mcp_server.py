@@ -415,7 +415,7 @@ def ref_file(manifest, row, full=False):
     """Trust only manifest-derived roots; resolve the candidate to reject traversal and symlink escapes.
 
     The bus caps row text and spills the rest to a refs file named in a `[full: PATH]` marker. full=true (or a
-    row with no ref) reads that file, so remote readers see what was cut (11-07: lead2's 37665d handoff)."""
+    row with no ref) reads that file, so remote readers see what was cut."""
     ref = row.get('ref')
     spill = SPILL.search(str(row.get('text') or ''))
     if spill and (full or not ref):
