@@ -52,6 +52,9 @@ def main(argv=None):
         if options.command == 'bus':
             from .bus import main as bus_main
             return bus_main(rest, load(options.manifest))
+        if options.command == 'sessions':
+            from .sessions import main as sessions_main
+            return sessions_main(rest)
         if options.command in ('ops', 'version'):
             if options.command == 'version':
                 print(__version__)

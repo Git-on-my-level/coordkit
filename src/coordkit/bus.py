@@ -458,6 +458,22 @@ def _main(argv, *, site_local=False):
     return dispatch(o)
 
 
+ORPHAN_OK_ENV = 'COORDKIT_WAIT_DETACHED_OK'
+
+
+def refuse_orphaned_wait(lane):
+    """A waiter whose launching shell exited (``(bus wait ... &)``) wakes nobody,
+    yet its held cursor lock makes the lane look listening and suppresses every
+    wake. Exit before reading so the lock is released and the lane is wakeable.
+    Supervised waiters (launchd children) opt out with COORDKIT_WAIT_DETACHED_OK=1.
+    """
+    if os.getppid() == 1 and os.environ.get(ORPHAN_OK_ENV) != '1':
+        print(f'BUS_WAIT orphaned {lane}: launching shell exited, so no session would see this wait '
+              f'(run it as a tracked background task, never with &; set {ORPHAN_OK_ENV}=1 under a supervisor)',
+              file=sys.stderr)
+        sys.exit(4)
+
+
 def dispatch(o):
     if o.cmd == 'reply':
         original = next((r for r in read() if r.get('id') == o.id), None)
@@ -820,6 +836,7 @@ def dispatch(o):
         if start is None: start = read_from(10 ** 12)[0]  # first wait: only messages from now on
         deadline = time.time() + o.timeout * 60
         while True:
+            refuse_orphaned_wait(o.to)
             total, indexed = read_from(start)
             hits = [r for _, r in indexed if (r.get('orig_kind') or r.get('kind')) in kinds and r['frm'] != o.to
                     and for_lane(r, o.to)]
