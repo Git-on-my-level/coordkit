@@ -281,7 +281,7 @@ def post(manifest, frm, to, kind, text, record, bus_id=None, tier=None, re_id=No
         row['escalation'] = f'question_escalated tier={tier}'
     if re_id:
         row['re'] = re_id
-    if kind == 'ask' and record.get('default'):
+    if kind == 'ask' and bus_id == record['qid'] and record.get('default'):
         row['default'] = record['default']
     bus.append([row], project=False)
     return row['id']

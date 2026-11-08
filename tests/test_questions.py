@@ -876,6 +876,8 @@ class DefaultAndDedupeTests(QuestionCase):
         stored = self.records()[record['qid']]
         self.assertEqual(stored['cycles'], 1)
         self.assertFalse(stored.get('applied_default'))
+        questions.capture_bus_asks(self.manifest, self.rows(), self.now + 80*60)
+        self.assertEqual(len(self.records()), 1, 'internal escalation asks must not be captured as fresh questions')
 
     def test_bus_ask_default_capture_is_opt_in_and_reasks_captured_once(self):
         from coordkit import bus
