@@ -281,8 +281,6 @@ def lead_names(manifest):
 
 
 def to_lead_digest(manifest, event, text, row=None, at=None):
-    from . import machine
-    machine_lines = machine.lines(manifest)
     path = home(manifest)/'lead-digest.ndjson'
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a') as stream:
@@ -296,6 +294,8 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
     """One hourly FYI; consume the shared queue under the same lock writers take."""
     if at - state.get('lead_digest_at', 0) < DIGEST_EVERY:
         return
+    from . import machine
+    machine_lines = machine.lines(manifest)
     path = home(manifest)/'lead-digest.ndjson'
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a+') as stream:

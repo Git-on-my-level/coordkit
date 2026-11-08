@@ -90,20 +90,24 @@ def stock(manifest, at=None, since=None, hold_warning=None):
     return result
 
 
-def report(manifest, prefix='STATUS', at=None, since=None, hold_warning=None, full=False):
+def report(manifest, prefix='STATUS', at=None, since=None, hold_warning=None, full=False, persist=True):
     from . import addressed, machine
     at = time.time() if at is None else at
     result = stock(manifest, at, since, hold_warning)
     path = manifest.paths.root/'state'/'stock-last.json'
     snapshot = {kind: {key: item[key] for key in ('count', 'oldest')} for kind, item in result.items()}
     verified_at = dt.datetime.fromtimestamp(at, dt.timezone.utc).isoformat(timespec='seconds')
-    with addressed.locked(path.with_suffix('.lock')):
-        previous = read_json(path, {})
+    def show(previous):
         for kind, item in result.items():
             if full or previous.get(kind) != snapshot[kind]:
                 print(f'{prefix} stock {kind} count={item["count"]} oldest={item["oldest"]:.0f}s threshold={item["threshold"]}'
                       + (' age=unknown' if item['age_unknown'] else '') + f' verified_at={verified_at}')
-        write_json(path, snapshot)
+    if persist:
+        with addressed.locked(path.with_suffix('.lock')):
+            show(read_json(path, {}))
+            write_json(path, snapshot)
+    else:
+        show(read_json(path, {}))
     for line in machine.lines(manifest):
         print(line)
     return result
