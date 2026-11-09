@@ -64,6 +64,38 @@ class RosterReviewTests(AddressedCase):
             self.invoke('ack', 'work', '--from', 'lead-a')
         self.assertEqual(self.roster()['lead-a']['session_id'], 'acked-session')
 
+    def test_removed_manifest_identity_does_not_become_runtime_registration(self):
+        for via in ('post', 'hook'):
+            with self.subTest(via=via):
+                name = 'manifest-' + via
+                self.manifest.addressed.agents[name] = {'fallback': 'lead-a'}
+                if via == 'post':
+                    self.invoke('post', '--from', name, '--to', 'all', 'hello')
+                else:
+                    routing.refresh_identity(self.manifest, name)
+                self.assertIn(name, self.register())
+                self.assertEqual(addressed.target_kind(self.manifest, name), 'name')
+                del self.manifest.addressed.agents[name]
+                self.assertIsNone(addressed.target_kind(self.manifest, name))
+                self.assertNotIn(name, addressed.known_names(self.manifest))
+                # Cached identity remains available without granting a route.
+                self.assertIn(name, self.register())
+                # A later real local activity can explicitly register the name.
+                routing.write_register(self.manifest, name, 'wait', env={})
+                self.assertEqual(addressed.target_kind(self.manifest, name), 'name')
+
+    def test_runtime_registration_survives_manifest_removal_and_legacy_policy(self):
+        routing.write_register(self.manifest, 'runtime', 'post', {'session_id': 's1'})
+        self.manifest.addressed.agents['runtime'] = {'fallback': 'lead-a'}
+        routing.write_register(self.manifest, 'runtime', 'ack', env={})
+        del self.manifest.addressed.agents['runtime']
+        self.assertEqual(addressed.target_kind(self.manifest, 'runtime'), 'name')
+        entries = self.register()
+        entries['legacy'] = {'role': 'review', 'fallback': 'lead-a'}
+        write_json(routing.home(self.manifest)/'register.json', entries)
+        self.assertEqual(addressed.target_kind(self.manifest, 'legacy'), 'name')
+        self.assertIn('legacy', routing.roles(self.manifest)['review'])
+
     def test_shared_unpinned_models_remain_unknown(self):
         for pinned in (False, True):
             with self.subTest(other_pinned=pinned):

@@ -216,7 +216,7 @@ row('bus.py', 'aliases.json', 'read shared transport aliases', 'reader takes the
 
 # Import directories and archive roots are read-only configuration, not blocking latches.
 row('paths.py', 'src|coordkit|current', 'package import or explicit home', 'process exit', 'read-only install lookup', 'operator repairs missing installation')
-row('manifest.py', 'state/refs', 'manifest ref-root default', 'manifest replacement', 'read-only archive boundary', 'MCP refuses files outside roots')
+row('manifest.py', 'state/refs', 'manifest ref-root default', 'manifest replacement', 'read-only archive boundary', 'CLI and MCP refuse files outside roots')
 
 row('tail.py', 'writer:read', 'read complete rows', 'checkpoint atomically replaced', 'hint only; rebuilt on replacement or truncation', 'read error to caller')
 row('bus.py', 'append.offset.json|tail.offset.json', 'append or incremental read', 'count and byte boundary checkpoint', 'invalid hint falls back to scan', 'malformed lines reported without moving physical positions')

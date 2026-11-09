@@ -404,14 +404,11 @@ def line(r, full=False):
     text = r.get('text') or ''
     if not full:
         return f"{r.get('id', '-')} {r.get('kind', 'msg')} {r['frm']}→{r['to']}: {' '.join(text.split())[:200]}"
-    spill = re.search(r' … \[full: (.+)\]$', text)
-    if spill:
-        path = pathlib.Path(spill.group(1))
-        if not path.is_absolute():
-            path = BUS.parent/path
+    if r.get('ref') or r.get('spill_ref'):
+        from .refs import ref_file
         try:
-            text = path.read_text().removesuffix('\n')
-        except (OSError, UnicodeError):
+            text = ref_file(CONFIG, r, full=True).read_text().removesuffix('\n')
+        except (OSError, UnicodeError, ValueError):
             pass
     return f"{r.get('id', '-')} {r['ts']} {r['frm']}→{r['to']} [{r.get('kind', 'msg')}/{r.get('topic', 'general')}] {text}"
 

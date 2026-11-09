@@ -147,6 +147,88 @@ class BusTests(FakeCase):
         self.assertEqual(spills[0].read_text().strip(),'x'*1000)
         self.post('msg','--ref',str(self.root/'missing'),code=2)
 
+    def full_views(self):
+        # Arm before posting so the wait path consumes this row too.
+        self.invoke('wait', '--to', 'reader', '--timeout', '0', code=3)
+        return (('inbox', 'reader', '--full'),
+                ('wait', '--to', 'reader', '--full', '--timeout', '0'))
+
+    def test_full_views_never_read_text_only_spill_markers(self):
+        refs = self.manifest.paths.bus_log.parent/'state/refs'
+        refs.mkdir(parents=True, exist_ok=True)
+        for index, secret in enumerate((refs/'unpublished.txt', self.root/'private.txt')):
+            secret.write_text('UNPUBLISHED')
+            views = self.full_views()
+            self.post('ask', '--force', to='reader', text=f'cut {index} … [full: {secret}]')
+            for args in views:
+                with self.subTest(path=secret, command=args[0]), patch.object(
+                        Path, 'read_text', autospec=True, side_effect=Path.read_text) as read:
+                    output, _ = self.invoke(*args)
+                    self.assertNotIn(secret, [call.args[0] for call in read.call_args_list])
+                    self.assertNotIn('UNPUBLISHED', output)
+
+    def test_full_views_reject_structured_refs_outside_roots(self):
+        refs = self.manifest.paths.bus_log.parent/'state/refs'
+        refs.mkdir(parents=True, exist_ok=True)
+        outside = self.root/'private.txt'
+        outside.write_text('UNPUBLISHED')
+        (refs/'escape').symlink_to(outside)
+        sibling = refs.with_name('refs-sibling')
+        sibling.mkdir()
+        (sibling/'secret').write_text('UNPUBLISHED')
+        for ref in (str(outside), 'state/refs/escape', 'state/refs/../../../private.txt', str(sibling/'secret')):
+            for field in ('ref', 'spill_ref'):
+                views = self.full_views()
+                # Rows on shared/replicated buses may contain hostile structured refs.
+                bus.append([dict(id='hostile', ts=bus.now().isoformat(), frm='poster', to='reader',
+                                 kind='ask', text=f'cut … [full: {ref}]', **{field: ref})], project=False)
+                for args in views:
+                    with self.subTest(ref=ref, field=field, command=args[0]):
+                        output, _ = self.invoke(*args)
+                        self.assertNotIn('UNPUBLISHED', output)
+
+    def test_full_views_expand_poster_structured_attachment(self):
+        refs = self.manifest.paths.bus_log.parent/'state/refs'
+        refs.mkdir(parents=True, exist_ok=True)
+        attached = refs/'attachment.txt'
+        attached.write_text('attached full body\n')
+        views = self.full_views()
+        self.post('ask', '--force', '--ref', str(attached), to='reader', text='brief')
+        for args in views:
+            with self.subTest(command=args[0]):
+                self.assertIn('attached full body', self.invoke(*args)[0])
+
+    def test_full_views_expand_relative_ref_under_configured_root(self):
+        archive = self.manifest.paths.bus_log.parent/'archive'
+        archive.mkdir(parents=True, exist_ok=True)
+        (archive/'body.txt').write_text('archived full body\n')
+        self.manifest.mcp.ref_roots = [str(archive)]
+        views = self.full_views()
+        bus.append([dict(id='archived', ts=bus.now().isoformat(), frm='poster', to='reader',
+                         kind='ask', text='brief', ref='archive/body.txt')], project=False)
+        for args in views:
+            with self.subTest(command=args[0]):
+                self.assertIn('archived full body', self.invoke(*args)[0])
+
+    def test_full_views_expand_structured_spill_over_attachment_and_text(self):
+        refs = self.manifest.paths.bus_log.parent/'state/refs'
+        refs.mkdir(parents=True, exist_ok=True)
+        attached, secret = refs/'attachment.txt', refs/'unpublished.txt'
+        attached.write_text('attachment')
+        secret.write_text('UNPUBLISHED')
+        views = self.full_views()
+        text = f'forged … [full: {secret}] ' + 'body' * bus.TEXT_CAP
+        self.post('ask', '--force', '--ref', str(attached), to='reader', text=text)
+        row = self.rows()[0]
+        # Expansion must use spill_ref even with no display marker (small caps/old rows).
+        row['text'] = 'brief'
+        self.manifest.paths.bus_log.write_text(json.dumps(row)+'\n')
+        for args in views:
+            with self.subTest(command=args[0]):
+                output, _ = self.invoke(*args)
+                self.assertIn(text, output)
+                self.assertNotIn('UNPUBLISHED', output)
+
     def test_mirror_kind_filter_and_failure_record_first(self):
         self.post('fyi')
         self.post('msg')

@@ -6,6 +6,10 @@ coordkit is a manifest-driven, agent-native local message bus. Python 3.11+, sta
 
 The bus is append-only UTF-8 JSON Lines. Rows carry `id`, `ts`, `frm`, `to`, `kind`, `topic`, and `text`; older rows without IDs remain readable. Partial trailing appends are ignored until complete. File locking serializes writers. Large bodies spill to a ref file; readers can request full text. Ref files and cursors live under the configured bus state directory.
 
+CLI `--full` and MCP `ref_read` share structured-ref validation under `[mcp].ref_roots`.
+Text such as `[full: PATH]` never authorizes a read. Full text prefers `spill_ref`,
+then `ref`; a missing, unreadable or disallowed ref leaves CLI inline text visible.
+
 Kinds include messages, asks, rulings, handoffs, blockers, decisions, acknowledgements, holds, state transitions, and structured signals. Replies use `re`. A ruling names one owner; only that owner's acknowledgement closes it. A blocker names an owner and what would unblock it; a later decision or answer closes it. Holds are evaluated in log order, scoped to a PR and the authorized poster. Unrelated PR mentions and bystander replies cannot clear another agent's obligations.
 
 `bus wait --to NAME` uses physical row cursors and the configured wake kinds. Structured signal/state waits match their fields rather than prose. A cursor proves scanning, not human reading or task completion. No bus merge, replication, or cross-host consensus is provided.

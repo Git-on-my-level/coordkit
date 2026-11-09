@@ -16,7 +16,13 @@ def registry(manifest):
     """Manifest agents plus runtime registrations; manifest policy stays authoritative."""
     out = {name: dict(spec, name=name, source='manifest') for name, spec in cfg(manifest).agents.items()}
     for name, spec in (read_json(home(manifest)/'register.json', {}) or {}).items():
-        out.setdefault(name, dict(spec, name=name, source='register'))
+        # Manifest posts/hooks save identity only. Removing their declaration must
+        # not turn that cache into a runtime registration. Retain older policy
+        # records as well as registrations bearing explicit provenance.
+        metadata = {'registered_at', 'registered_by', 'role', 'runtime', 'adapter',
+                    'fallback', 'target', 'remote', 'human', 'label', 'description'}
+        if isinstance(spec, dict) and metadata.intersection(spec):
+            out.setdefault(name, dict(spec, name=name, source='register'))
     return out
 
 

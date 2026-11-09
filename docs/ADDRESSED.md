@@ -8,8 +8,10 @@ Internal senders (including `lead`, `coordkit`, and configured internal names) a
 Relay-applied rows never auto-register remote senders. Use `coordkit retire NAME` to
 retire an obsolete registration; manual removal forgets it. Any local poster becomes a
 routable recipient, with normal deaf-recipient escalation.
-Manifest names save identity-only metadata without changing policy. Registration
-errors log and allow post/ack/wait to continue; an explicit-ID post retry can recover
+Manifest names save identity-only metadata without changing policy; that cache does
+not keep them routable after their manifest declaration is removed. Explicit runtime
+registrations (including older policy records) remain routable until retired or removed.
+Registration errors log and allow post/ack/wait to continue; an explicit-ID post retry can recover
 registration without appending a second row.
 A role uses its first listening member. Roles marked `human = true`, and their members,
 do not need machine listening evidence.
