@@ -32,7 +32,8 @@ Read tools inspect the bus and bounded agentctl/train metadata. Every write tool
 `question_answer`) requires the token's `write` grant. `post` defaults to its `identity`; extra senders must
 be in its `post_as`. Posting as a manifest-designated human (including human roles and members) also requires
 `answer`. This grant is required for `kind=answer`, for `kind=msg` with `re` naming an open/escalated question,
-for `question_answer`, and for `ack state=done` targeting an open/escalated question (it emits an answer).
+for `question_answer`, for acknowledgements as a human identity, and for `ack state=done` targeting an
+open/escalated question (it emits an answer).
 Acknowledgements must be assigned to the client's identity; question answers
 require an open tier-2 question and record that identity as the answerer. The bearer is the authorization;
 client confirmation is still recommended but is not the server's enforcement mechanism.
@@ -43,7 +44,8 @@ gates. Gates are checked again immediately before invoking the append operation.
 confirm each write with the operator.
 
 Every call is journaled without secrets in `<root>/state/mcp/calls.ndjson`, mode 0600 (also after rotation;
-existing journals are tightened at startup). Each line includes `client`, the matched entry id or `legacy`;
+the active journal and rotated `calls.ndjson.*` files are tightened at startup without following symlinks).
+Each line includes `client`, the matched entry id or `legacy`;
 unauthenticated/admission failures use `anonymous` when no token was matched. Over-limit requests are not
 journaled individually to bound disk use. Output is untrusted agent text, explicitly labelled and capped.
 See the security document for rate limits, slot pools and resource bounds.
@@ -166,6 +168,18 @@ grants, never secrets; `revoke NAME` removes an entry. Repeat `--post-as` for mo
 `--clients-file PATH` or the environment override for a different file. The helper defaults identity to the
 name; edit the private JSON to use a different bus identity. Helper edits are serialized and atomically
 replace the file. An existing name is never overwritten by `add`.
+
+`mcp-clients add` (and `revoke`) tighten an existing credential directory to 0700
+only after verifying that the opened directory belongs to the current user;
+symlink directories and directories owned by another user are refused.
+
+For optional managed service installation, create a named token first, then run
+`coordkit --manifest ~/project/coordkit.toml mcp install`. Use `--clients-file PATH`
+for a custom file; the installer records its resolved path in the service arguments.
+Installation and reinstallation never create a legacy secret. A pre-existing
+private legacy secret remains supported for migration, but once removed it stays
+retired unless an operator deliberately restores it. Missing or invalid credentials
+refuse installation before any service or installation receipt is written.
 
 The manifest must be live. Use your host supervisor for persistent service operation. The [example plist](../examples/omi/launchd/com.example.coordkit-mcp.plist) is a template: expand its home-relative placeholders to absolute paths before installation; launchd does not expand `~` or shell variables. Its label must remain outside the project's managed prefix if it is supervised separately.
 

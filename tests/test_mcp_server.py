@@ -1521,3 +1521,78 @@ class McpClientTests(McpCase):
                 mcp_server.clients_main(['add', 'writer', '--clients-file', str(self.clients)])
         self.assertEqual(out.getvalue(), '')
         self.assertEqual(self.clients.read_bytes(), before)
+
+    def test_ack_as_human_requires_answer_for_every_ack_state(self):
+        # Acks append answer rows too; human voice must be protected on this path.
+        self.enable_writes()
+        self.manifest.addressed.agents['relay']['human'] = True
+        self.manifest.addressed.roles['coordinator'] = {'members': ['coordinator', 'human-member'], 'human': True}
+        for sender in ('relay', 'coordinator', 'human-member'):
+            self.incumbent_row('work-' + sender, 'worker-ui', sender)
+        for allowed in (False, True):
+            for sender in ('relay', 'coordinator', 'human-member'):
+                self.clients.write_text(json.dumps({'connector': dict(secret=self.TOKEN, identity=sender, write=True, answer=allowed)}))
+                self.clients.chmod(0o600)
+                for state in ('received', 'blocked', 'done'):
+                    with self.subTest(answer=allowed, sender=sender, state=state):
+                        before = len(self.rows())
+                        error, text = self.client_tool('ack', id='work-' + sender, state=state, note='operator acknowledgement')
+                        self.assertEqual(error, not allowed, text)
+                        self.assertEqual(len(self.rows()), before + int(allowed))
+                        if allowed:
+                            self.assertEqual(self.rows()[-1]['frm'], sender)
+                        else:
+                            self.assertIn('answer permission', text)
+
+    def test_startup_tightens_all_rotated_journals_without_changing_contents(self):
+        directory = mcp_server.home(self.manifest)
+        directory.mkdir(parents=True)
+        paths = [directory/'calls.ndjson'] + [directory/('calls.ndjson.' + suffix) for suffix in ('1', '2', 'old')]
+        for path in paths:
+            path.write_text('historical audit data\n'); path.chmod(0o444 if path.name.endswith('old') else 0o644)
+        self.start_server()
+        for path in paths:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.read_text(), 'historical audit data\n')
+
+    def test_startup_refuses_rotated_journal_symlink_without_chmodding_target(self):
+        directory = mcp_server.home(self.manifest)
+        directory.mkdir(parents=True)
+        target = self.root/'unrelated.txt'
+        target.write_text('unrelated'); target.chmod(0o644)
+        (directory/'calls.ndjson.1').symlink_to(target)
+        with self.assertRaises(OSError):
+            mcp_server.serve(self.manifest, 0, self.secret)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(target.read_text(), 'unrelated')
+
+    def test_helper_tightens_an_existing_owned_credential_directory(self):
+        import contextlib, io
+        directory = self.root/'credentials'
+        directory.mkdir(mode=0o755); directory.chmod(0o755)
+        path = directory/'clients.json'
+        with contextlib.redirect_stdout(io.StringIO()):
+            mcp_server.clients_main(['add', 'reader', '--clients-file', str(path)])
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_helper_refuses_foreign_owned_directory_before_chmod_or_writes(self):
+        from types import SimpleNamespace
+        directory = self.root/'foreign-credentials'
+        directory.mkdir(mode=0o755); directory.chmod(0o755)
+        with patch.object(mcp_server.os, 'fstat', return_value=SimpleNamespace(st_uid=os.geteuid() + 1)), \
+                patch.object(mcp_server.os, 'fchmod') as chmod:
+            with self.assertRaisesRegex(ValueError, 'owned by the current user'):
+                mcp_server.clients_main(['add', 'reader', '--clients-file', str(directory/'clients.json')])
+        chmod.assert_not_called()
+        self.assertEqual(list(directory.iterdir()), [])
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+
+    def test_helper_refuses_symlink_credential_directory(self):
+        target = self.root/'credential-target'
+        target.mkdir(mode=0o755); target.chmod(0o755)
+        link = self.root/'credential-link'; link.symlink_to(target, target_is_directory=True)
+        with self.assertRaises(OSError):
+            mcp_server.clients_main(['add', 'reader', '--clients-file', str(link/'clients.json')])
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(list(target.iterdir()), [])

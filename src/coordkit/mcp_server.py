@@ -110,10 +110,15 @@ def journal(manifest, client='anonymous', **fields):
         fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def private_journal(path):
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    stream = os.fdopen(fd, 'a')
+def private_journal(path, mode='a'):
+    # Read-only opens let startup repair historical journals with no write bit.
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK
+    flags |= os.O_WRONLY | os.O_APPEND | os.O_CREAT if mode == 'a' else os.O_RDONLY
+    fd = os.open(path, flags, 0o600)
+    stream = os.fdopen(fd, mode)
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError('connector journal must be a regular file')
         os.fchmod(fd, 0o600)
         return stream
     except OSError:
@@ -1085,7 +1090,8 @@ def write_call(manifest, tool, args, client, origin):
         row = next((r for r in bus.read() if r.get('id') == msg_id), None)
         if row is None or client.identity not in addressed.assignees(row, manifest):
             raise ValueError(f'{msg_id} is not addressed to {client.identity}')
-        if state == 'done' and not client.answer and open_question(msg_id):
+        if not client.answer and (addressed.is_human(manifest, client.identity) or
+                                  state == 'done' and open_question(msg_id)):
             raise ValueError('client requires answer permission')
         note = text_arg(args, 'note', 500, required=False)
         check_writes()
@@ -1214,8 +1220,14 @@ def serve(manifest, port=PORT, secret_path=None, ready=None, clients_path=None):
         load_secret(secret_path)  # at least one private credential is required
     path = home(manifest)/'calls.ndjson'
     path.parent.mkdir(parents=True, exist_ok=True)
-    with private_journal(path):  # tighten a pre-existing journal before serving
+    with private_journal(path):  # tighten active and historical journals before serving
         pass
+    for archived in path.parent.glob(path.name + '.*'):
+        try:
+            with private_journal(archived, mode='r'):
+                pass
+        except FileNotFoundError:  # a concurrent rotation may remove a matched file
+            continue
     limiter = Limiter()
 
     slots = threading.BoundedSemaphore(MAX_HANDLERS)
@@ -1386,6 +1398,18 @@ def serve(manifest, port=PORT, secret_path=None, ready=None, clients_path=None):
     server.serve_forever()
 
 
+def private_directory(path):
+    """Tighten only the opened, user-owned directory; never chmod a symlink target."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if os.fstat(fd).st_uid != os.geteuid():
+            raise ValueError('credential directory must be owned by the current user')
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
 def clients_main(argv, manifest=None):
     """Local credential edits; serialize helpers and atomically publish private files."""
     import secrets
@@ -1405,7 +1429,7 @@ def clients_main(argv, manifest=None):
                                       write=spec.get('write', False), answer=spec.get('answer', False),
                                       post_as=spec.get('post_as', []))))
             return 0
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_directory(path.parent)
         fd = os.open(path.with_name(path.name + '.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)

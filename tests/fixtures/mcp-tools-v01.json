@@ -617,7 +617,7 @@
   },
   {
     "name": "ack",
-    "description": "Acknowledge a bus row addressed to the client identity; requires write permission. Completing an open question also requires answer permission. Confirm with the operator before calling: this acts on the live bus.",
+    "description": "Acknowledge a bus row addressed to the client identity; requires write permission. Human identities and completing an open question also require answer permission. Confirm with the operator before calling: this acts on the live bus.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
