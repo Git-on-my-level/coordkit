@@ -195,6 +195,36 @@ class OpenCodeUsageTests(FakeCase):
         self.assertEqual(Path(str(copy) + '-journal').read_bytes(), b'journal')
         self.assertFalse(Path(str(copy) + '-wal').exists())
 
+    def test_hot_rollback_journal_is_recovered_in_the_private_copy(self):
+        """Copy a store mid-commit (uncommitted pages spilled to the db file, hot
+        -journal present): the snapshot reads the committed value, not the
+        partial write and not an unreadable result."""
+        import shutil, sqlite3
+        src = self.root / 'hot'
+        src.mkdir()
+        live = src / 'store.db'
+        writer = sqlite3.connect(live, isolation_level=None)
+        writer.execute('PRAGMA journal_mode=DELETE')
+        writer.execute('CREATE TABLE t (v TEXT)')
+        writer.execute("INSERT INTO t VALUES ('committed')")
+        writer.execute('PRAGMA cache_size=1')
+        writer.execute('BEGIN')
+        writer.execute("UPDATE t SET v = 'partial'")
+        writer.executemany('INSERT INTO t VALUES (?)', [('x' * 2000,)] * 200)  # force a spill
+        self.assertTrue(Path(str(live) + '-journal').exists())
+        snap = self.root / 'snap2'
+        snap.mkdir()
+        copy = snap / 'opencode.db'
+        shutil.copyfile(live, copy)
+        shutil.copyfile(str(live) + '-journal', str(copy) + '-journal')
+        writer.execute('ROLLBACK'); writer.close()
+        connection = usage._opencode_connect(copy)
+        try:
+            rows = connection.execute('SELECT v FROM t').fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(rows, [('committed',)])
+
     def test_failed_snapshot_copy_leaves_no_private_directory(self):
         connection = self.store()
         connection.execute("INSERT INTO session_v2 VALUES ('ses_repo', '/work/repo')")

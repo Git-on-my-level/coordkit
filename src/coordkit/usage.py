@@ -314,9 +314,15 @@ def _opencode_snapshot(path):
 
 
 def _opencode_connect(path):
-    # mode=ro plus query_only makes an accidental write impossible; any WAL
-    # sidecars belong to the caller's private snapshot directory.
-    connection = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.25)
+    """Open the caller's private snapshot copy, never the live store.
+
+    The copy is opened read-write on purpose: a copied hot rollback journal (or
+    WAL) must be recovered, and SQLite writes during that recovery; `mode=ro`
+    fails with SQLITE_READONLY_ROLLBACK instead. Everything it writes stays in
+    the private snapshot directory. `query_only` still refuses every
+    statement-level write, so coordkit itself never changes the data.
+    """
+    connection = sqlite3.connect(path.resolve().as_uri() + '?mode=rw', uri=True, timeout=0.25)
     connection.execute('PRAGMA query_only = ON')
     return connection
 
