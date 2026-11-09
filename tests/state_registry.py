@@ -165,10 +165,15 @@ row('questions.py', 'coordination defaults', 'committed ask or repeated capture'
     'questions.auto_default_reasks (authored re-asks or actual ladder windows) and bus-only auto_default_after',
     'unanswered_no_default appears once after publication; no_default_digested survives hourly queue drains')
 row('questions.py', 'question store caps and default coverage',
-    'question capture stores authored ref stat identity and priority; a default checks the locked bounded bus tail',
+    'question capture stores authored ref stat identity and priority; settlement_scan persists file, offset, physical count, boundary, last_row_id and no_answer_through',
     'changed payload supersedes; answer/default clears pending work; coverage deferral clears on proof or real answer',
     '8 MiB and 10000 records fail closed without overwriting; 256 KiB and 10000 bus rows per read',
     'question_store_limit requests archiving; question list and MCP expose default_deferred; guard off freezes settlement')
+row('questions.py', 'settlement_scan|default_deferred_swept|default_deferred_digested|append.offset.json',
+    'bounded scans advance a per-question no-answer prefix; first deferral is reported once per output channel',
+    'file replacement, truncation or boundary change restarts proof; real answer or verified default settles; closed retention seven days',
+    'each call scans at most 256 KiB and 10000 complete rows; final proof and sequence-hint repair run under bus flock',
+    'sweep names qid and reason before marking swept; hourly digest marks digested only after successful publication')
 row('questions.py', 'refs|.txt|coord-|id|writer:spill_row', 'generated escalation or default answer exceeds the bus text cap',
     'structured ref retains complete text; append-only evidence is kept', 'bus.text_cap; archive has no latch',
     'question receipt and normal CLI/MCP ref readers')

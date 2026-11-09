@@ -344,6 +344,7 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
     questions.reconcile_defaults(manifest, rows, at)
     opened = questions.open_questions(manifest, at)
     unanswered = [r for r in opened if r.get('unanswered_no_default') and not r.get('no_default_digested')]
+    deferred = [r for r in opened if r.get('default_deferred') and not r.get('default_deferred_digested')][:12]
     missing = approvals.findings(manifest, rows, at)
     path = home(manifest)/'lead-digest.ndjson'
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -356,6 +357,7 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
         lines.extend(machine_lines)
         lines += ['- ' + i['text'] for i in missing[:12]]
         lines += [f"- {r['qid']}: unanswered, no default ({r.get('reasks', 0)} re-asks)" for r in unanswered[:12]]
+        lines += [f"- {r['qid']}: default deferred: {r['default_deferred']}" for r in deferred]
         if opened:
             oldest = max(opened, key=lambda r: r['age'])
             lines.insert(0, f"- open questions: {len(opened)}; oldest {oldest['qid']} age={int(oldest['age'] // 60)}m; " +
@@ -376,7 +378,7 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
                          '. Reassign each to a listening lane, or close it with a reply.')
         kind = 'ask' if dead_ids and dead_ids != state.get('dead_owner_ids') else 'fyi'
         text = (f'coordkit hourly digest: {len(dead)} to re-home, {len(pending)} obligations, '
-                f'{len(items) + len(missing) + len(unanswered)} findings, {len(opened)} open questions; '
+                f'{len(items) + len(missing) + len(unanswered) + len(deferred)} findings, {len(opened)} open questions; '
                 'coordkit obligations report for the full backlog\n' + '\n'.join(lines))
         if manifest.mode == 'live':
             from . import bus
@@ -386,6 +388,8 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
             to_relay_file(manifest, text, at)
         for record in unanswered[:12]:
             questions.mark(manifest, record['qid'], no_default_digested=at)
+        for record in deferred:
+            questions.mark(manifest, record['qid'], default_deferred_digested=at)
         # A failed publish leaves the queue intact. Keep its inode so concurrent writers cannot
         # append to an unlinked file; there are no sent archives to rotate.
         stream.seek(0); stream.truncate(); stream.flush(); os.fsync(stream.fileno())

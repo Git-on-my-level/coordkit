@@ -838,10 +838,10 @@ class DefaultAndDedupeTests(QuestionCase):
 
     def test_reworded_reask_same_key_joins_existing_open_question(self):
         self.lease('lead-a')
-        first, fresh = questions.create(self.manifest, 'worker-ui', 'Retry at 12:30Z q-abcdef attempt 1?',
+        first, fresh = questions.create(self.manifest, 'worker-ui', 'Retry at 2026-11-09T12:30Z q-abcdef attempt 1?',
                                        session_id='dedupe', at=self.now)
         with patch.object(questions, 'route') as route:
-            second, fresh = questions.create(self.manifest, 'worker-ui', 'RETRY   at 13:45Z q-123abc attempt 22?',
+            second, fresh = questions.create(self.manifest, 'worker-ui', 'RETRY   at 2026-11-09T13:45Z q-123abc attempt 22?',
                                             session_id='dedupe', at=self.now + 60)
         self.assertFalse(fresh)
         route.assert_not_called()
@@ -884,13 +884,13 @@ class DefaultAndDedupeTests(QuestionCase):
         from coordkit import bus
         self.lease('lead-a')
         bus.main(['post', '--from', 'worker-ui', '--to', 'lead-a', '--kind', 'ask', '--default', 'Wait',
-                  '--force', 'Retry at 12:30Z attempt 1?'], self.manifest)
+                  '--force', 'Retry at 2026-11-09T12:30Z attempt 1?'], self.manifest)
         questions.capture_bus_asks(self.manifest, self.rows(), self.now)
         record = next(iter(self.records().values()))
         original_id = record['qid']
         self.assertEqual((record['default'], record['target'], record['capture']), ('Wait', 'lead-a', 'bus'))
         bus.main(['post', '--from', 'worker-ui', '--to', 'lead-a', '--kind', 'ask', '--default', 'Wait',
-                  '--force', 'RETRY at 13:30Z attempt 2?'], self.manifest)
+                  '--force', 'RETRY at 2026-11-09T13:30Z attempt 2?'], self.manifest)
         for _ in range(3):
             questions.capture_bus_asks(self.manifest, self.rows(), self.now)
         self.assertEqual(len(self.records()), 1)
@@ -900,16 +900,16 @@ class DefaultAndDedupeTests(QuestionCase):
 
     def test_existing_fingerprint_migrates_and_different_choices_do_not_join(self):
         self.lease('lead-a')
-        record, _ = questions.create(self.manifest, 'worker-ui', 'Retry at 12:30Z attempt 1?',
+        record, _ = questions.create(self.manifest, 'worker-ui', 'Retry at 2026-11-09T12:30Z attempt 1?',
                                      session_id='old-record', at=self.now)
         questions.mark(self.manifest, record['qid'], fingerprint='legacy-fingerprint')
-        joined, fresh = questions.create(self.manifest, 'worker-ui', 'RETRY at 14:20z attempt 2?',
+        joined, fresh = questions.create(self.manifest, 'worker-ui', 'RETRY at 2026-11-09T14:20z attempt 2?',
                                          session_id='old-record', at=self.now + 60)
         self.assertFalse(fresh)
         self.assertEqual(record['qid'], joined['qid'])
         for kwargs in ({'options': ['Wait', 'Retry']}, {'default': 'Wait'}, {'recommendation': 'Retry'}):
             with self.subTest(kwargs=kwargs):
-                _, fresh = questions.create(self.manifest, 'worker-ui', 'RETRY at 14:20z attempt 2?',
+                _, fresh = questions.create(self.manifest, 'worker-ui', 'RETRY at 2026-11-09T14:20z attempt 2?',
                                              session_id='old-record', at=self.now + 60, **kwargs)
                 self.assertTrue(fresh)
 

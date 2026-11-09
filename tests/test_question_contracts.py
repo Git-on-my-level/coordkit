@@ -40,7 +40,7 @@ class QuestionContractTests(AddressedCase):
         real = dict(id='real-answer', ts=ts(self.now), frm='lead-a', to='worker-ui',
                     kind='answer', text='Fetch fresh data', re=qid)
         appended, errors, writers = threading.Event(), [], []
-        append, recent = bus.append, questions.recent_rows
+        append, scan = bus.append, questions.settlement_rows
         locked_checks = []
 
         def writer():
@@ -61,18 +61,18 @@ class QuestionContractTests(AddressedCase):
                 self.assertTrue(appended.wait(10), 'answer writer did not commit')
             return append(rows, **kwargs)
 
-        def inspect_lock(manifest, **kwargs):
-            if kwargs.get('coverage'):
+        def inspect_lock(manifest, stream, record):
+            if stream is not None:
                 # Rechecking immediately before append is insufficient unless writers are excluded.
                 with manifest.paths.bus_log.open('rb') as other:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 locked_checks.append(True)
-            return recent(manifest, **kwargs)
+            return scan(manifest, stream, record)
 
         try:
             with patch.object(bus, 'append', side_effect=interleave), \
-                    patch.object(questions, 'recent_rows', side_effect=inspect_lock), \
+                    patch.object(questions, 'settlement_rows', side_effect=inspect_lock), \
                     patch.object(questions, 'deliver', return_value='waiter'):
                 if harness:
                     questions.apply_default(self.manifest, questions.load_all(self.manifest)[qid],
@@ -220,19 +220,78 @@ class QuestionContractTests(AddressedCase):
         # The path wrapper plus its open-stream call make up one physical read.
         self.assertEqual(recent.call_count, 2)
 
-    def test_default_defers_when_bounded_tail_cannot_prove_the_old_ask_is_unanswered(self):
-        qid = self.post('Use cache?', '--default', 'Use cache')['id']
-        stale = self.rows()
-        self.incumbent_row('real-answer', 'lead-a', 'worker-ui', 'answer', 'Use fresh data', ago=0, re=qid)
+    def fill_history(self):
+        # Enough complete small records to evict the ask from the tail and require
+        # multiple bounded passes, without relying on wall-clock time or CLI cost.
         with self.manifest.paths.bus_log.open('ab') as stream:
-            stream.write(json.dumps(dict(kind='fyi', text='x' * questions.MAX_BUS_BYTES)).encode() + b'\n')
-        questions.reconcile_defaults(self.manifest, stale, self.now + 7200)
-        stored = questions.load_all(self.manifest)[qid]
-        self.assertEqual(stored['state'], 'open')
-        self.assertIn('default deferred', questions.summary(stored))
-        projected = mcp_server.question_rows(self.manifest, {}, {}, self.now + 7200)
-        self.assertEqual(projected['questions'][0]['default_deferred'], stored['default_deferred'])
+            for i in range(800):
+                stream.write(json.dumps(dict(id=f'fyi-{i}', ts=ts(self.now), frm='worker-ui', to='lead-a', kind='fyi', text='x' * 1000)).encode() + b'\n')
+
+    def catch_up(self, qid, at):
+        offsets = []
+        for _ in range(10):
+            questions.reconcile_defaults(self.manifest, questions.recent_rows(self.manifest), at)
+            record = questions.load_all(self.manifest)[qid]
+            offsets.append(record.get('settlement_scan', {}).get('offset', 0))
+            if record['state'] == 'closed':
+                return record, offsets
+        self.fail('bounded settlement never caught up')
+
+    def test_old_ask_defaults_after_age_or_two_reasks_with_durable_progress(self):
+        for reasks in (0, 2):
+            with self.subTest(reasks=reasks):
+                qid = self.post(f'Use cache variant {reasks}?', '--default', 'Use cache')['id']
+                questions.mark(self.manifest, qid, reasks=reasks)
+                self.fill_history()
+                self.assertFalse(any(r.get('id') == qid for r in questions.recent_rows(self.manifest)))
+                # Rebuild the unrelated sequence hint from the verified question
+                # prefix as well; deleting it must not cause permanent deferral.
+                (bus.STATE/'append.offset.json').unlink(missing_ok=True)
+                record, offsets = self.catch_up(qid, self.now + (7200 if reasks == 0 else 1))
+                self.assertTrue(record['auto_default_applied'])
+                self.assertGreater(len(offsets), 1)
+                self.assertEqual(offsets, sorted(offsets))
+                self.assertLessEqual(max(b-a for a, b in zip([0]+offsets, offsets)), questions.MAX_BUS_BYTES)
+                self.assertEqual(sum(r.get('re') == qid and r.get('auto_default', False) for r in self.rows()), 1)
+                rows = self.rows()
+                self.assertEqual(rows[-1]['seq'], len(rows)-1)
+
+    def test_answer_older_than_tail_wins_without_its_projection(self):
+        qid = self.post('Use cache?', '--default', 'Use cache')['id']
+        self.fill_history()
+        self.incumbent_row('old-answer', 'lead-a', 'worker-ui', 'answer', 'Use fresh data', ago=0, re=qid)
+        self.fill_history()
+        self.assertFalse(any(r.get('id') == 'old-answer' for r in questions.recent_rows(self.manifest)))
+        record, offsets = self.catch_up(qid, self.now + 7200)
+        self.assertGreater(len(offsets), 1)
+        self.assertEqual((record['answered_by'], record['answer_id']), ('lead-a', 'old-answer'))
         self.assertFalse(any(r.get('auto_default') for r in self.rows()))
+
+    def test_answer_after_checkpoint_wins_on_a_later_sweep(self):
+        qid = self.post('Use cache?', '--default', 'Use cache')['id']
+        questions.reconcile_defaults(self.manifest, self.rows(), self.now + 1)
+        checkpoint = questions.load_all(self.manifest)[qid]['settlement_scan']
+        self.assertEqual(checkpoint['no_answer_through'], checkpoint['offset'])
+        self.incumbent_row('later-answer', 'lead-a', 'worker-ui', 'answer', 'Fetch fresh', ago=0, re=qid)
+        self.fill_history()
+        record, _ = self.catch_up(qid, self.now + 7200)
+        self.assertEqual(record['answer_id'], 'later-answer')
+        self.assertFalse(record.get('auto_default_applied'))
+
+    def test_replaced_or_rewritten_bus_invalidates_the_no_answer_proof(self):
+        for replace in (False, True):
+            with self.subTest(replace=replace):
+                qid = self.post(f'Use cache {replace}?', '--default', 'Use cache')['id']
+                questions.reconcile_defaults(self.manifest, self.rows(), self.now + 1)
+                path = self.manifest.paths.bus_log
+                raw = path.read_bytes()
+                answer = dict(id='replacement-answer', ts=ts(self.now), frm='lead-a', to='worker-ui',
+                              kind='answer', text='Fresh', re=qid)
+                if replace:
+                    path.unlink()
+                path.write_bytes(json.dumps(answer).encode() + b'\n' + raw)
+                record, _ = self.catch_up(qid, self.now + 7200)
+                self.assertEqual(record['answer_id'], 'replacement-answer')
 
     def test_oversized_store_fails_closed_and_preserves_its_bytes(self):
         self.post()
@@ -282,4 +341,41 @@ class QuestionContractTests(AddressedCase):
         self.assertEqual(path.read_bytes(), before)
         stored = questions.load_all(self.manifest)[qid]
         self.assertEqual(stored['state'], 'open')
-        self.assertIn('sequence recovery', stored['default_deferred'])
+        self.assertIn('row exceeds settlement byte limit', stored['default_deferred'])
+
+    def test_clock_choices_remain_distinct_for_bus_and_harness_questions(self):
+        for suffix in ('', 'Z'):
+            a, b = f'Deploy at 12:30{suffix}?', f'Deploy at 14:30{suffix}?'
+            self.assertNotEqual(questions.fingerprint('worker', a), questions.fingerprint('worker', b))
+            self.assertNotEqual(self.post(a)['id'], self.post(b)['id'])
+
+    def test_unprovable_history_reports_reason_once_in_sweep_and_digest(self):
+        from coordkit import addressed
+        qid = self.post('Use cache?', '--default', 'Use cache')['id']
+        with self.manifest.paths.bus_log.open('ab') as stream:
+            stream.write(json.dumps(dict(kind='fyi', text='x' * questions.MAX_BUS_BYTES)).encode() + b'\n')
+        with patch.object(questions, 'scan_transcripts', return_value=[]), \
+                patch.object(questions, 'scan_notifications', return_value=[]):
+            first, second = [], []
+            questions.sweep(self.manifest, self.now + 7200, out=first.append)
+            questions.sweep(self.manifest, self.now + 7201, out=second.append)
+        self.assertTrue(any(qid in line and 'QUESTION_DEFERRED' in line and 'checked through byte' in line for line in first))
+        self.assertFalse(any('QUESTION_DEFERRED' in line for line in second))
+        state = {}
+        self.quiet(addressed.flush_lead_digest, self.manifest, state, self.now + 7202)
+        self.assertIn(qid + ': default deferred: bus row exceeds settlement byte limit', self.digest_text())
+        self.quiet(addressed.flush_lead_digest, self.manifest, state, self.now + 10803)
+        self.assertEqual(self.digest_text().count('default deferred:'), 1)
+        projected = mcp_server.question_rows(self.manifest, {}, {}, self.now + 10803)
+        self.assertIn('row exceeds settlement byte limit', projected['questions'][0]['default_deferred'])
+
+    def test_failed_digest_does_not_consume_the_deferral_notice(self):
+        from coordkit import addressed
+        qid = self.post('Use cache?', '--default', 'Use cache')['id']
+        self.manifest.paths.bus_log.write_bytes(b'x' * (questions.MAX_BUS_BYTES + 1))
+        with patch.object(bus, 'main', side_effect=OSError('publish unavailable')):
+            with self.assertRaises(OSError):
+                addressed.flush_lead_digest(self.manifest, {}, self.now + 7200, out=lambda _: None)
+        record = questions.load_all(self.manifest)[qid]
+        self.assertIn('default_deferred', record)
+        self.assertNotIn('default_deferred_digested', record)

@@ -22,9 +22,10 @@ is bounded at 5s (`perl alarm`).
 `bus post --kind ask` and machine escalations share the durable question projection.
 Use `--key KEY` for a stable explicit key; otherwise the key hashes normalized
 sender, recipient (the declared role before member selection), topic and text.
-Case, whitespace, timestamps, q-ids, marked retry/attempt counters and marked
+Case, whitespace, dated timestamps, q-ids, marked retry/attempt counters and marked
 ages (`age=35m`, `35m old`) do not create a question. Other numbers remain
-meaningful: `30s` and `60s` timeouts are distinct.
+meaningful: `30s` and `60s` timeouts are distinct, as are clock choices such as
+`12:30` and `14:30` (including standalone `12:30Z`).
 PR numbers (`#123`) and UPPER_SNAKE flag keys remain distinct. Captured harness
 questions also include session, options, recommendation and default in their
 fingerprint. Identical repeats increment
@@ -54,7 +55,8 @@ reference the original ask, preserve full text in a ref when needed and carry a
 rollback directing a correcting answer or a new ask with changed information.
 `QUESTION_DEFAULTED` and `QUESTIONS ... defaulted=N` expose applied ladder defaults.
 A real bus answer takes precedence: default publication rechecks the committed
-bus tail while holding the same file lock as bus appends. Answer callbacks may
+bus history through its durable scan checkpoint while holding the same file lock
+as bus appends. Answer callbacks may
 be waiting for the question lock; their already-committed rows still veto a default. No default is inferred from a recommendation. Without an explicit
 default the question stays open and appears once as
 "unanswered, no default" in the hourly digest after its cycle/age limit. Bus pickup
@@ -82,16 +84,27 @@ it resumes the existing policy. `--no-auto-default` (or
 `no_auto_default`; `open_questions` exposes default, re-ask count and resolution
 metadata. Bus asks stay on the bus/digest path rather than entering the harness
 ANX ladder. Closed records retain their dedupe evidence for seven days. Capture
-fallbacks and question sweeps read at most 256 KiB / 10,000 complete recent bus
-rows; sweeps reuse that snapshot. Partial physical lines are discarded within
-the byte limit, including a giant unterminated row. If the locked tail no longer
-covers the original ask and no real answer/default receipt is visible, the default
-is deferred rather than guessing that unseen history contains no answer. The
-question remains open; `question list` and MCP expose `default_deferred`.
-Default appends also bound sequence-checkpoint catch-up to 256 KiB; a missing or
-stale checkpoint requiring more history defers publication until normal bus
-activity recovers it. A real
-answer can still settle it through its post-append projection.
+fallbacks and question sweeps reuse a snapshot of at most 256 KiB / 10,000 complete
+recent bus rows. Settlement additionally advances a durable per-question scan
+from the start of the log, at most 256 KiB / 10,000 physical rows per call. The
+question store records the file identity, byte offset, physical row count, last
+row ID, boundary hash and "no answer seen through this offset" proof, plus whether
+the original ask and a default receipt were seen. Later calls continue after
+that checkpoint. Asks and answers outside the recent tail therefore still settle;
+a large backlog can require several sweeps. A real answer ends the scan immediately.
+The final scan reaches the current end under the bus append lock before a default
+can publish. Its verified physical count also repairs a missing append-sequence
+hint without an unbounded second scan. A replacement, truncation or changed
+checkpoint boundary restarts the proof from zero. The log is append-only; edits
+to older history outside that boundary require discarding the scan checkpoints.
+
+Settlement never skips an incomplete physical row or a row larger than its byte
+limit. Such rows, an unreadable log or a missing original bus ask defer a default
+instead of assuming no answer exists. Repair the log to resume. While catching
+up or blocked, `question list` and MCP expose `default_deferred`; sweep output and
+the hourly digest each name the question and reason once per question. A failed
+digest publication leaves its notice pending. Normal post-append answer projection
+can also close the question without waiting for scan catch-up.
 
 The question store has an 8 MiB / 10,000-record cap on both reads and writes.
 Exceeding either raises `question_store_limit` and preserves the existing file;

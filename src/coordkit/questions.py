@@ -115,7 +115,7 @@ TRANSIENT = re.compile(
     r'(?:\s+(?:(?i:count|number)\s*)?[:=]?\s*|[:=]\s*)\d+\b)'
     r'|(?P<age>\b(?i:age|aged|oldest)\s*[:=]?\s*\d+(?:\.\d+)?[smhd]\b|\b\d+[mhd]\s+(?i:old)\b)'
     r'|(?P<qid>\b[qQ]-[0-9a-fA-F]{6}\b)'
-    r'|(?P<clock>\b(?:\d{4}-\d{2}-\d{2}[Tt ])?\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:\d{2})?\b)')
+    r'|(?P<clock>\b\d{4}-\d{2}-\d{2}[Tt ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:\d{2})?\b)')
 
 
 def normalize(text):
@@ -231,12 +231,76 @@ def default_due(manifest, record, at):
               at - record['created_at'] >= duration(cfg(manifest).auto_default_after))))
 
 
+def settlement_rows(manifest, stream, record):
+    """Advance a durable no-answer proof, at most one bounded chunk per call.
+
+    Checkpoints cover the entire physical log prefix, including malformed rows,
+    rather than a moving tail. The final call runs under the append flock. A
+    replaced/truncated log or changed boundary invalidates the proof and restarts
+    from zero. Never skip an oversized or incomplete physical row.
+    """
+    from . import bus
+    info = os.fstat(stream.fileno())
+    identity = [info.st_dev, info.st_ino]
+    prior = record.get('settlement_scan', {})
+    prior = prior if isinstance(prior, dict) else {}
+    offset, count = prior.get('offset'), prior.get('count')
+    valid = (prior.get('file') == identity and type(offset) is int and type(count) is int
+             and 0 <= offset <= info.st_size and count >= 0
+             and prior.get('no_answer_through') == offset)
+    if valid:
+        stream.seek(max(0, offset - 128))
+        valid = hashlib.sha256(stream.read(min(offset, 128))).hexdigest() == prior.get('boundary')
+    if not valid:
+        prior, offset, count = {}, 0, 0
+    stream.seek(offset)
+    data = stream.read(MAX_BUS_BYTES)
+    lines = data.split(b'\n')[:-1][:MAX_RECORDS]
+    consumed = sum(len(line) + 1 for line in lines)
+    fresh = [dict(row, id=f'legacy-L{count + index}') if row.get('id') == f'legacy-L{index}' else row
+             for index, row in bus.parse_lines([line.decode('utf-8', errors='replace') for line in lines])]
+    offset += consumed
+    stream.seek(max(0, offset - 128))
+    checkpoint = dict(file=identity, offset=offset, count=count + len(lines),
+                      boundary=hashlib.sha256(stream.read(min(offset, 128))).hexdigest(),
+                      original_seen=bool(prior.get('original_seen')) or any(
+                          r.get('id') in (record['qid'], record.get('bus_id')) for r in fresh),
+                      default_seen=bool(prior.get('default_seen')) or any(
+                          r.get('id') == ('auto-' if record.get('capture') == 'bus' else 'qd-') + record['qid']
+                          for r in fresh),
+                      last_row_id=next((r.get('id') for r in reversed(fresh)), prior.get('last_row_id')))
+    # Persist only an actually checked prefix; an answer ends settlement instead.
+    if not replies(manifest, fresh, record):
+        checkpoint['no_answer_through'] = offset
+    record['settlement_scan'] = checkpoint
+    complete = offset == info.st_size
+    if not complete:
+        reason = ('bus row exceeds settlement byte limit' if not consumed and len(data) == MAX_BUS_BYTES else
+                  'incomplete bus row' if not consumed else 'bus answer scan catching up')
+        record['default_deferred'] = f'{reason} (checked through byte {offset} of {info.st_size})'
+    elif record.get('capture') == 'bus' and not checkpoint['original_seen']:
+        record['default_deferred'] = 'original ask missing from bus history'
+        complete = False
+    else:
+        record.pop('default_deferred', None)
+    return fresh, complete
+
+
 def settle(manifest, record, rows, at):
     """Under the question lock: one receipt-first default publisher for bus and ladder."""
     if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off' or record['state'] not in ('open', 'escalated'):
         return
     is_bus = record.get('capture') == 'bus'
     answer_id = ('auto-' if is_bus else 'qd-') + record['qid']
+    due = default_due(manifest, record, at)
+    # Advance even before the deadline, and find old answers outside the tail.
+    if is_bus and (not due or not (record.get('default') or '').strip() or manifest.mode != 'live'):
+        try:
+            with manifest.paths.bus_log.open('rb') as stream:
+                fresh, _ = settlement_rows(manifest, stream, record)
+            rows = [*rows, *fresh]
+        except OSError as exc:
+            record['default_deferred'] = f'bus answer scan unavailable: {exc.strerror or type(exc).__name__}'
     # An actual answer always wins, including at the default deadline.
     answer = replies(manifest, rows, record) if is_bus else None
     if answer:
@@ -245,7 +309,7 @@ def settle(manifest, record, rows, at):
         record.update(state='closed', closed_at=at, answered_at=at, answered_by=answer.get('frm'),
                       answer=answer.get('text', ''), answer_id=answer.get('id'))
         return
-    if not default_due(manifest, record, at):
+    if not due:
         return
     if not (record.get('default') or '').strip():
         record['unanswered_no_default'] = True
@@ -269,7 +333,11 @@ def settle(manifest, record, rows, at):
         # on our Q lock even though their real answer is already durable.
         if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
             return False
-        start, fresh = recent_rows(manifest, stream=stream, coverage=True)
+        try:
+            fresh, complete = settlement_rows(manifest, stream, record)
+        except OSError as exc:
+            record['default_deferred'] = f'bus answer scan unavailable: {exc.strerror or type(exc).__name__}'
+            return False
         answer = replies(manifest, [*rows, *fresh], record)
         if answer:
             record.pop('default_deferred', None)
@@ -279,18 +347,25 @@ def settle(manifest, record, rows, at):
             return False
         if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
             return False
-        receipted = any(r.get('id') == answer_id for r in [*rows, *fresh] if isinstance(r, dict))
+        if not complete:
+            return False
+        receipted = record['settlement_scan']['default_seen']
         if receipted:
             return False
-        # If an old original lies outside the bounded view, defer instead of
-        # assuming that an unseen answer does not exist. Never trade safety for a cap.
-        if start and not any(r.get('id') in (record['qid'], record.get('bus_id')) for r in fresh):
-            record['default_deferred'] = 'answer history outside bounded bus tail'
-            return False
+        # This verified physical-line count also repairs a missing append hint,
+        # under the same flock, without a second scan of the historical prefix.
+        from . import state
+        checkpoint = record['settlement_scan']
+        state.write_json(bus.STATE/'append.offset.json', {k: checkpoint[k] for k in ('file', 'offset', 'count', 'boundary')})
         record.pop('default_deferred', None)
         spill_row(manifest, row)
         return True
-    if not bus.append([row], project=False, before_append=unanswered, max_scan_bytes=MAX_BUS_BYTES) and not receipted:
+    try:
+        appended = bus.append([row], project=False, before_append=unanswered, max_scan_bytes=MAX_BUS_BYTES)
+    except OSError as exc:
+        record['default_deferred'] = f'bus default publication unavailable: {exc.strerror or type(exc).__name__}'
+        return
+    if not appended and not receipted:
         if record['state'] in ('open', 'escalated') and os.environ.get('COORDKIT_QUESTION_GUARD') != 'off':
             record.setdefault('default_deferred', 'bus sequence recovery exceeds bounded scan')
         return
@@ -343,7 +418,7 @@ def repeat_bus_ask(manifest, row, rows, at=None, *, records=None):
 
 
 def reconcile_defaults(manifest, rows, at=None):
-    """One projection pass; due defaults recheck the bounded tail under the append lock."""
+    """Advance durable answer scans; due defaults finish under the append lock."""
     if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
         return
     at = now() if at is None else at
@@ -1262,6 +1337,12 @@ def sweep(manifest, at=None, out=print):
     lines += ladder(manifest, at, rows=rows, anx_answers=answers, anx_known=known)
     for line in lines:
         out(line)
+    for record in open_questions(manifest, at):
+        if record.get('default_deferred') and not record.get('default_deferred_swept'):
+            line = f"QUESTION_DEFERRED {record['qid']}: {record['default_deferred']}"
+            out(line)
+            mark(manifest, record['qid'], default_deferred_swept=now() if at is None else at)
+            lines.append(line)
     out(status_line(manifest, at))
     return lines
 
