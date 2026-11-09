@@ -828,10 +828,14 @@ def dispatch(o):
         start = get_cursor(o.to, 'wait', None)
         if start is None: start = read_from(10 ** 12)[0]  # first wait: only messages from now on
         deadline = time.time() + o.timeout * 60
+        own_asks = {r['id'] for r in read() if r['frm'] == o.to and r.get('kind') == 'ask'} if o.own_asks else set()
         while True:
             total, indexed = read_from(start)
-            hits = [r for _, r in indexed if (r.get('orig_kind') or r.get('kind')) in kinds and r['frm'] != o.to
-                    and for_lane(r, o.to)]
+            if o.own_asks:
+                own_asks.update(r['id'] for _, r in indexed if r['frm'] == o.to and r.get('kind') == 'ask')
+            hits = [r for _, r in indexed if r['frm'] != o.to and
+                    (((r.get('orig_kind') or r.get('kind')) in kinds and for_lane(r, o.to))
+                     or r.get('re') in own_asks)]
             if hits:
                 set_cursor(o.to, 'wait', total)
                 for r in hits: print(line(r, full=o.full))

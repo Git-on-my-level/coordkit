@@ -39,11 +39,12 @@ resume="headless"
         return subprocess.CompletedProcess([], code, out, err)
 
     def test_process_snapshot_ignores_zombies_and_preserves_full_argv(self):
-        text = ('123 S Fri Nov  6 12:00:00 2026 claude --resume '+self.session+' -p task\n'
-                '124 Z Fri Nov  6 12:00:00 2026 zombie '+self.session+'\ninvalid\n')
+        text = ('123 1 S Fri Nov  6 12:00:00 2026 claude --resume '+self.session+' -p task\n'
+                '124 1 Z Fri Nov  6 12:00:00 2026 zombie '+self.session+'\ninvalid\n')
         with patch.object(resume, 'probe', return_value=self.result(text)):
             rows = resume.processes()
         self.assertEqual(set(rows), {123})
+        self.assertEqual(rows[123]['ppid'], 1)
         self.assertEqual(rows[123]['started'], 'Fri Nov 6 12:00:00 2026')
         self.assertIn('--resume '+self.session, rows[123]['argv'])
 
@@ -124,11 +125,11 @@ resume="headless"
             while not ready.exists() and time.monotonic() < deadline:
                 time.sleep(.02)
             self.assertTrue(ready.exists())
-            snapshot = resume.processes()
-            self.assertNotIn(self.session, snapshot[child.pid]['argv'])
             # A full-host lsof sweep can exceed the production fail-closed budget
             # on a loaded test host; allow headroom only for this integration check.
             with patch.object(resume, 'PROBE_TIMEOUT', 8):
+                snapshot = resume.processes()
+                self.assertNotIn(self.session, snapshot[child.pid]['argv'])
                 self.assertTrue(resume.holder_present(self.manifest, self.lane, snapshot))
         finally:
             if child.poll() is None:

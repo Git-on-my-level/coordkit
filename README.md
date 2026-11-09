@@ -48,6 +48,7 @@ For agent delivery, run `bus wait --to NAME --timeout 1` in one terminal and pos
 | Managed lanes and usage | `agentctl`, configured pools |
 | PR/CI observations | `gh` authenticated for the configured repository |
 | Claude Code lead/question hooks | Claude Code configuration, `perl` for bounded hook execution |
+| Claude lane moves | Usable destination account; `agent-heartbeat` for the default restart recipe |
 | Deaf-agent answer delivery | Optional `tmux` adapter or `[questions].delivery_cli` |
 | Scheduled `up` / `down` lifecycle | macOS launchd or Linux systemd user services |
 | Remote MCP access | Explicit bearer secret, loopback server, operator-managed TLS tunnel |
@@ -110,18 +111,27 @@ coordkit lane-move worker --to-config /path/to/new-account --apply
 
 Apply uses this sequence:
 
-1. Post a freeze ask to the lane: finish the current turn and take no new work.
-   The lane must acknowledge that ask and pick up every open obligation it owns.
+1. Write an editable `<receipt>.move-state.json` inventory and print its path, then
+   post a freeze ask: finish the current turn and take no new work. The lane fills
+   the handoff fields and every restart recipe, sets `inventory_complete=true`,
+   acknowledges the ask, and picks up every open obligation it owns.
    `obligations.report` is checked without an age cutoff; any remaining obligation
    refuses the move. The freeze is a cooperative protocol; callers must stop
    assigning new work while the move is pending.
-2. Poll until `claude_resume.holder_present` is false and the exact session's
+2. After recording every background shell, the operator runs `/exit` and chooses
+   **"Exit and stop tasks" (stop background shells)** at Claude's three-way prompt
+   (stop / background / stay). Poll until `claude_resume.holder_present` is false and the exact session's
    transcripts have been idle for `--idle-seconds` (default 10). Probe errors fail
-   closed. Coordkit **never kills or signals** a process, and there is no
+   closed. Record descendant PID/start-time identities before exit; a lingering
+   background-shell child blocks quiescence even after its parent exits and the
+   child is reparented. Coordkit **never kills or signals** a process, and there is no
    `--stop-command`. A holder timeout posts an attention ask and leaves the plan
    resumable. `--timeout` bounds each holder/re-arm wait in seconds (default 60).
-3. Post `kind=state subject=lane-move state=DONE` on the lane's behalf with its
-   session id and source transcript path, then verify absence again.
+3. Finalize the move-state file and snapshot it in the receipt. It contains `goal`,
+   `open_prs`, `lanes_in_flight` (including execution IDs), `waiters` (each name and
+   flags), `bus_name`, `next_steps`, session/transcript paths, `background_shells`,
+   and `re_arms`. Post `kind=state subject=lane-move state=DONE` with its path, session
+   id and source transcript, then verify absence again.
 4. Copy the session JSONL into the matching `projects/<encoded-cwd>/` directory
    under the new account. `--apply` authorizes this copy: the original is retained,
    the checksum is receipted before copying, and both copies must match. An
@@ -134,14 +144,21 @@ Apply uses this sequence:
    values are preserved. A concurrent change to the lane refuses. Unusual TOML
    that cannot be isolated safely also refuses without editing it.
 6. Print the exact quoted operator command with `cd`, `CLAUDE_CONFIG_DIR`, `COORDKIT_AS` and
-   `claude --resume SESSION`. By default the operator runs it and re-arms the lane,
+   `claude --resume SESSION`. By default the operator runs it,
    then reruns `--apply`. Only `resume="headless"` explicitly allows an automatic
    headless resume. Launch intent is saved first; a crash with an uncertain launch
    requires operator inspection and re-arm, never an automatic second launch.
-7. Verify `listening()` with a newly armed waiter, refreshed wait cursor, or a
-   fresh hook note for the destination transcript. Old posts, busy-copy mtimes and
-   old hook notes cannot finish the move. Missing evidence posts an attention ask;
-   rerun after the operator has resumed and re-armed the lane.
+7. Verify fresh destination resume evidence, then **arm and verify every recorded
+   re-arm entry**. The default recipes start a bus waiter for the lane name with
+   `--own-asks` (any kind of reply linked with `--re` to the lane's own asks, plus
+   normal addressed wake kinds), and `agent-heartbeat 50` with the session's explicit
+   heartbeat key. Include every extra waiter, monitor, watcher and background shell:
+   they die with the old session. Each launch intent, PID/start time, output log,
+   verification result and error is recorded in `rearm_outcomes`. A generic
+   `listening()` result cannot substitute for any entry. Missing evidence posts an
+   attention ask and leaves the move resumable; uncertain spawns never repeat.
+   `--no-rearm` is the operator exception: skip automatic starts, record each skip,
+   and still verify each manually armed entry.
 8. Post a handoff with before/after `usage.collect` readings and roster identity
    in the receipt: configuration directory, account directory name and observed
    model. Account names follow the roster convention; these are not billing or
@@ -155,3 +172,22 @@ For rollback, quiesce the resumed lane first and review the backup against any
 later manifest edits before restoring the original entry; the source JSONL is
 still present. Receipts contain private paths and identity and must not be posted
 to public repositories.
+
+Restart recipes in `re_arms` have a unique `name`, a `kind` (`bus-waiter`,
+`heartbeat`, `monitor`, `watcher`, or `background-shell`), and an `argv` array with
+the exact command and flags. Optional `env` values apply to that recipe; optional
+`verify_argv` runs a bounded readiness check in addition to PID/start-time liveness.
+Heartbeat recipes require `verify_argv`, whose JSON status must report `event=arm`
+and the same owner PID. Bus waiters require their exact recorded flags and, for
+lane waiters, a freshly written cursor. Use foreground, bounded commands; move
+receipts retain each process's output log for the resumed lane/operator to collect.
+Move-state `background_shells` maps each observed child `pid` to a recipe's `rearm`
+name, or an explicit `completed_reason` for a task that needs no restart. Confirm
+unobserved/previously exited tasks in the inventory too. `waiters` is derived from
+the recipes when final state is written, so its flags stay consistent.
+
+With `--no-rearm`, add the manually armed process's `pid` and `started` (the
+normalized `ps -o lstart=` value) to each file entry before rerunning apply. These
+fields may be updated after resume; restart recipes are frozen in the receipt.
+An uncertain automatic spawn requires inspecting the recorded PID/log before any
+manual recovery. Coordkit never stops those processes or retries an ambiguous arm.

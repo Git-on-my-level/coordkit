@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 import time
 import tomllib
 from unittest.mock import Mock, patch
@@ -17,6 +18,8 @@ from coordkit.adapters import claude_resume
 from coordkit.manifest import load
 from coordkit.state import read_json, write_json
 from tests.support import FakeCase
+
+REAL_PROCESSES = claude_resume.processes
 
 
 class LaneMoveTests(FakeCase):
@@ -59,6 +62,8 @@ effort = "low"
         p = patch.dict(os.environ, HOME=str(self.root/'home'), CLAUDE_CONFIG_DIR='unrelated-inherited-account',
                        COORDKIT_AS='unrelated-inherited-lane')
         p.start(); self.addCleanup(p.stop)
+        self.rearm_patch = patch.object(lanemove, 'rearm_all', return_value=True)
+        self.rearm_patch.start(); self.addCleanup(self.rearm_patch.stop)
 
     def invoke(self, *args):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -66,7 +71,8 @@ effort = "low"
         return result, out.getvalue()
 
     def plan(self):
-        return read_json(next(lanemove.home(self.manifest).glob('*.json')))
+        return next(read_json(path) for path in lanemove.home(self.manifest).glob('*.json')
+                    if 'plan_file' in read_json(path))
 
     def rows(self):
         return bus.read_path(self.manifest.paths.bus_log)
@@ -77,6 +83,9 @@ effort = "low"
         plan = self.plan()
         with contextlib.redirect_stdout(io.StringIO()):
             bus.main(['ack', plan['id']+'-freeze-ask', 'done', '--from', 'worker'], self.manifest)
+        state = read_json(Path(plan['move_state_file']))
+        state['inventory_complete'] = True
+        write_json(Path(plan['move_state_file']), state)
         return plan
 
     def hook(self, plan=None, *, old=False):
@@ -104,6 +113,256 @@ effort = "low"
         self.assertEqual(self.plan()['id'], plan['id'])
         self.assertEqual(plan['before_reading']['account'], 'old-account')
         self.assertEqual(plan['before_reading']['observed_model'], 'claude-opus-4-5')
+
+    def test_final_state_records_complete_restart_inventory_and_exit_answer(self):
+        self.frozen()
+        path = Path(self.plan()['move_state_file'])
+        state = read_json(path)
+        self.assertTrue({'goal', 'open_prs', 'lanes_in_flight', 'bus_name', 'next_steps',
+                         'background_shells', 're_arms'} <= state.keys())
+        self.assertEqual(state['re_arms'][0]['argv'][-3:], ['--to', 'worker', '--own-asks'])
+        state.update(goal='Finish the release', open_prs=[17], lanes_in_flight=[{'exec_id': 'exec-example'}],
+                     next_steps=['Check the canary'])
+        for kind in ('bus-waiter', 'monitor', 'watcher', 'background-shell'):
+            argv = ['bus', 'wait', '--to', 'other', '--kinds', 'answer,state'] if kind == 'bus-waiter' else ['check-'+kind]
+            state['re_arms'].append(dict(name='extra-'+kind, kind=kind, argv=argv))
+        state['background_shells'] = [dict(pid=22, rearm='extra-background-shell')]
+        write_json(path, state)
+        result, printed = self.complete()
+        self.assertEqual(result, 0)
+        recorded = self.plan()['move_state']
+        self.assertEqual(recorded['re_arms'], state['re_arms'])
+        self.assertEqual(recorded['goal'], state['goal'])
+        self.assertEqual(recorded['waiters'][-1], dict(name='extra-bus-waiter',
+                                                     flags=['--to', 'other', '--kinds', 'answer,state']))
+        self.assertIn('"Exit and stop tasks" (stop background shells)', printed)
+        self.assertEqual(read_json(path)['background_shells'], state['background_shells'])
+
+    def test_inventory_must_be_confirmed_and_cover_observed_children(self):
+        self.frozen()
+        plan = self.plan()
+        path = Path(plan['move_state_file'])
+        state = read_json(path)
+        state['inventory_complete'] = False
+        write_json(path, state)
+        with self.assertRaisesRegex(lanemove.Refusal, 'move_state_inventory_required'):
+            self.invoke('--apply')
+        state['inventory_complete'] = True
+        write_json(path, state)
+        plan['holders'] = {'11': dict(started='parent', argv='claude'),
+                           '22': dict(started='shell', argv='sh watch', ppid=11)}
+        lanemove.save(plan)
+        with self.assertRaisesRegex(lanemove.Refusal, 'background_shell_inventory_required'):
+            self.invoke('--apply')
+        self.assertFalse(self.target.exists())
+
+    def test_reparented_background_shell_blocks_quiesce_without_session_arg(self):
+        self.frozen()
+        plan = self.plan()
+        parent = dict(started='parent', argv='claude --resume session-one', ppid=1)
+        shell = dict(started='shell', argv='/bin/sh monitor', ppid=11)
+        with patch.object(claude_resume, 'processes', return_value={11: parent, 22: shell}):
+            with self.assertRaisesRegex(lanemove.Refusal, 'background_holder_present_timeout'):
+                lanemove.quiesce(self.manifest, plan, 0, 0)
+        shell = dict(shell, ppid=1)
+        with patch.object(claude_resume, 'processes', return_value={22: shell}):
+            with self.assertRaisesRegex(lanemove.Refusal, 'background_holder_present_timeout'):
+                lanemove.quiesce(self.manifest, plan, 0, 0)
+        with patch.object(claude_resume, 'processes', return_value={22: dict(shell, started='reused')}), patch.object(
+                claude_resume, 'transcript_holders', return_value=set()):
+            lanemove.quiesce(self.manifest, plan, 0, 0)
+
+    def test_open_transcript_parent_without_resume_arg_tracks_its_shells(self):
+        self.frozen()
+        plan = self.plan()
+        with patch.object(claude_resume, 'processes', return_value={
+                11: dict(started='parent', argv='claude', ppid=1),
+                22: dict(started='shell', argv='/bin/sh monitor', ppid=11)}), patch.object(
+                claude_resume, 'transcript_holders', return_value={11}):
+            with self.assertRaisesRegex(lanemove.Refusal, 'background_holder_present_timeout'):
+                lanemove.quiesce(self.manifest, plan, 0, 0)
+        self.assertIn('22', self.plan()['holders'])
+
+    def test_explicitly_recorded_detached_shell_is_also_a_holder(self):
+        self.frozen()
+        plan = self.plan()
+        state = read_json(Path(plan['move_state_file']))
+        state['background_shells'] = [dict(pid=22, started='shell', rearm='heartbeat')]
+        write_json(Path(plan['move_state_file']), state)
+        with patch.object(claude_resume, 'processes', return_value={
+                22: dict(started='shell', argv='/bin/sh watch', ppid=1)}), patch.object(
+                claude_resume, 'transcript_holders', return_value=set()):
+            lanemove.move_state(self.manifest, plan)
+            with self.assertRaisesRegex(lanemove.Refusal, 'background_holder_present_timeout'):
+                lanemove.quiesce(self.manifest, plan, 0, 0)
+
+    def rearm_fixture(self):
+        self.rearm_patch.stop()
+        self.frozen()
+        plan = self.plan()
+        lanemove.final_state(self.manifest, plan)
+        return plan
+
+    def test_rearm_starts_and_verifies_every_recorded_entry_with_receipts(self):
+        plan = self.rearm_fixture()
+        entries = plan['move_state']['re_arms']
+        entries += [dict(name=kind, kind=kind, argv=['fake-'+kind])
+                    for kind in ('monitor', 'watcher', 'background-shell')]
+        entries.append(dict(name='other-waiter', kind='bus-waiter',
+                            argv=['bus', 'wait', '--to', 'other', '--kinds', 'answer,state']))
+        processes, commands = {}, []
+        def spawn(argv, **kwargs):
+            self.assertEqual(self.plan()['rearm_outcomes'][entries[len(commands)]['name']]['status'], 'intent')
+            pid = 200 + len(commands)
+            commands.append(argv)
+            processes[pid] = dict(started='started', argv=shlex.join(argv))
+            if 'wait' in argv:
+                cursor = self.manifest.paths.bus_log.parent/'state/cursors'/(argv[argv.index('--to')+1]+'.wait')
+                cursor.parent.mkdir(parents=True, exist_ok=True)
+                cursor.write_text('0')
+            return Mock(pid=pid)
+        status = subprocess.CompletedProcess([], 0, json.dumps(dict(event='arm', owner='201:timer')), '')
+        with patch.object(lanemove.subprocess, 'Popen', side_effect=spawn), patch.object(
+                claude_resume, 'start_time', return_value='started'), patch.object(
+                claude_resume, 'processes', return_value=processes), patch.object(
+                lanemove.subprocess, 'run', return_value=status):
+            self.assertTrue(lanemove.rearm_all(self.manifest, plan))
+            self.assertTrue(lanemove.rearm_all(self.manifest, plan))
+            processes.pop(203)  # A lane-wide hook cannot hide a missing watcher.
+            self.hook()
+            self.assertFalse(lanemove.rearm_all(self.manifest, plan))
+        self.assertEqual(commands, [entry['argv'] for entry in entries])
+        outcomes = self.plan()['rearm_outcomes']
+        self.assertEqual(set(outcomes), {entry['name'] for entry in entries})
+        self.assertFalse(outcomes['watcher']['verified'])
+        self.assertTrue(outcomes['worker']['verified'])
+
+    def test_no_rearm_records_each_skip_and_still_requires_verification(self):
+        plan = self.rearm_fixture()
+        with patch.object(lanemove.subprocess, 'Popen') as spawn:
+            self.assertFalse(lanemove.rearm_all(self.manifest, plan, no_rearm=True))
+        spawn.assert_not_called()
+        outcomes = self.plan()['rearm_outcomes']
+        self.assertEqual(set(outcomes), {'worker', 'heartbeat'})
+        self.assertTrue(all(o['no_rearm'] and o['status'] == 'skipped' and not o['verified'] for o in outcomes.values()))
+
+    def test_no_rearm_verifies_manual_entries_and_cli_passes_exception(self):
+        plan = self.rearm_fixture()
+        state = read_json(Path(plan['move_state_file']))
+        snapshot = {}
+        for index, entry in enumerate(state['re_arms']):
+            entry.update(pid=200+index, started='manual')
+            snapshot[200+index] = dict(started='manual', argv=shlex.join(entry['argv']))
+        write_json(Path(plan['move_state_file']), state)
+        cursor = self.manifest.paths.bus_log.parent/'state/cursors/worker.wait'
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        status = subprocess.CompletedProcess([], 0, json.dumps(dict(event='arm', owner='201:timer')), '')
+        with patch.object(lanemove.subprocess, 'Popen') as spawn, patch.object(
+                claude_resume, 'processes', return_value=snapshot), patch.object(
+                lanemove.subprocess, 'run', return_value=status):
+            self.assertFalse(lanemove.rearm_all(self.manifest, plan, no_rearm=True))
+            cursor.write_text('0')
+            self.assertTrue(lanemove.rearm_all(self.manifest, plan, no_rearm=True))
+        spawn.assert_not_called()
+        with patch.object(lanemove, 'rearmed', return_value=True), patch.object(
+                lanemove, 'rearm_all', return_value=True) as rearm:
+            self.invoke('--apply', '--no-rearm', '--idle-seconds', '0')
+        self.assertTrue(rearm.call_args.args[-1])
+
+    def test_no_rearm_can_adopt_manually_inspected_uncertain_spawn(self):
+        plan = self.rearm_fixture()
+        state = read_json(Path(plan['move_state_file']))
+        for index, entry in enumerate(state['re_arms']):
+            entry.update(pid=200+index, started='manual')
+        write_json(Path(plan['move_state_file']), state)
+        plan['rearm_outcomes'] = {e['name']: dict(status='intent', requested_at=time.time()-10)
+                                  for e in state['re_arms']}
+        cursor = self.manifest.paths.bus_log.parent/'state/cursors/worker.wait'
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        cursor.write_text('0')
+        snapshot = {e['pid']: dict(started=e['started'], argv=shlex.join(e['argv'])) for e in state['re_arms']}
+        status = subprocess.CompletedProcess([], 0, json.dumps(dict(event='arm', owner='201:manual')), '')
+        with patch.object(lanemove.subprocess, 'Popen') as spawn, patch.object(
+                claude_resume, 'processes', return_value=snapshot), patch.object(
+                lanemove.subprocess, 'run', return_value=status):
+            self.assertTrue(lanemove.rearm_all(self.manifest, plan, no_rearm=True))
+        spawn.assert_not_called()
+        self.assertTrue(all(o['manual_recovery_at'] for o in self.plan()['rearm_outcomes'].values()))
+
+    def test_rearm_crash_intent_never_duplicates_launch(self):
+        plan = self.rearm_fixture()
+        with patch.object(lanemove.subprocess, 'Popen', side_effect=RuntimeError('crash after intent')) as spawn:
+            with self.assertRaisesRegex(RuntimeError, 'crash after intent'):
+                lanemove.rearm_all(self.manifest, plan)
+        self.assertEqual(self.plan()['rearm_outcomes']['worker']['status'], 'intent')
+        with patch.object(lanemove.subprocess, 'Popen', side_effect=OSError('missing tool')) as spawn:
+            self.assertFalse(lanemove.rearm_all(self.manifest, self.plan()))
+        self.assertEqual(spawn.call_count, 1)  # Only the heartbeat, never the uncertain waiter.
+        self.assertEqual(self.plan()['rearm_outcomes']['heartbeat']['status'], 'failed')
+
+    def test_rearm_environment_binds_lane_and_drops_movers_process_identity(self):
+        self.invoke('--plan')
+        with patch.dict(os.environ, CLAUDE_PID='123', CLAUDE_CODE_SESSION_ID='mover-session',
+                        AGENTCTL_EXECUTION_ID='mover-exec', CODEX_THREAD_ID='mover-thread'):
+            env = lanemove.rearm_env(self.plan(), dict(env={'AGENT_HEARTBEAT_KEY': 'session-one'}))
+        self.assertEqual(env['CLAUDE_CODE_SESSION_ID'], 'session-one')
+        self.assertEqual(env['COORDKIT_AS'], 'worker')
+        self.assertEqual(env['CLAUDE_CONFIG_DIR'], str(self.target))
+        self.assertEqual(env['AGENT_HEARTBEAT_KEY'], 'session-one')
+        self.assertTrue({'CLAUDE_PID', 'AGENTCTL_EXECUTION_ID', 'CODEX_THREAD_ID'}.isdisjoint(env))
+
+    def test_real_rearm_children_arm_wait_cursor_heartbeat_and_monitor(self):
+        plan = self.rearm_fixture()
+        entries = plan['move_state']['re_arms']
+        entries[0]['argv'] += ['--timeout', '0.25', '--poll', '0.03']
+        finish, status = self.root/'finish', self.root/'heartbeat.json'
+        binary = self.root/'agent-heartbeat'
+        binary.write_text('#!'+sys.executable+'\n'+f'''
+import json, os, sys, time
+from pathlib import Path
+status, finish = Path({str(status)!r}), Path({str(finish)!r})
+if sys.argv[1] == 'status':
+    print(status.read_text() if status.exists() else '{{}}')
+else:
+    if sys.argv[1] == '50':
+        status.write_text(json.dumps(dict(event='arm', owner=str(os.getpid())+':fake')))
+    until = time.monotonic()+15
+    while not finish.exists() and time.monotonic() < until:
+        time.sleep(.02)
+''')
+        binary.chmod(0o700)
+        entries[1]['argv'][0] = str(binary)
+        entries[1]['verify_argv'][0] = str(binary)
+        entries.append(dict(name='monitor', kind='monitor', argv=[str(binary), 'monitor']))
+        children = []
+        actual = subprocess.Popen
+        def spawn(*args, **kwargs):
+            child = actual(*args, **kwargs)
+            if kwargs.get('start_new_session'):
+                children.append(child)
+            return child
+        # Give the waiter an own ask whose non-wake-kind reply will end it naturally.
+        bus.configure(self.manifest)
+        bus.append([dict(id='mine', ts='2026-01-01T00:00:00Z', frm='worker', to='other', kind='ask', text='help')])
+        try:
+            with patch.object(lanemove.subprocess, 'Popen', side_effect=spawn), patch.object(
+                    claude_resume, 'processes', side_effect=REAL_PROCESSES), patch.dict(
+                    os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]/'src')), patch.object(
+                    claude_resume, 'PROBE_TIMEOUT', 8):
+                deadline = time.monotonic()+10
+                while not lanemove.rearm_all(self.manifest, plan) and time.monotonic() < deadline:
+                    time.sleep(.03)
+                self.assertTrue(all(o['verified'] for o in plan['rearm_outcomes'].values()), plan['rearm_outcomes'])
+                bus.configure(self.manifest)
+                bus.append([dict(id='reply', ts='2026-01-01T00:00:01Z', frm='other', to='worker',
+                                 kind='fyi', re='mine', text='reply under another kind')])
+                self.assertEqual(children[0].wait(timeout=5), 0)
+        finally:
+            finish.touch()
+            for child in children:
+                child.wait(timeout=16)  # All fakes and the bounded waiter exit naturally.
+        self.assertEqual(len(children), 3)
+        self.assertIn('reply under another kind', Path(plan['rearm_outcomes']['worker']['log']).read_text())
 
     def test_freeze_requires_ack_and_existing_open_obligations(self):
         self.frozen()
@@ -409,7 +668,8 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
         self.complete()
         self.target = self.root/'third-account'
         self.invoke('--plan')
-        plans = [read_json(path) for path in lanemove.home(self.manifest).glob('*.json')]
+        plans = [read_json(path) for path in lanemove.home(self.manifest).glob('*.json')
+                 if 'plan_file' in read_json(path)]
         self.assertEqual(len(plans), 2)
         pending = next(plan for plan in plans if 'done' not in plan['completed'])
         self.assertEqual(pending['before']['config_dir'], str(self.root/'new account'))

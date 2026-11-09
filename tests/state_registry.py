@@ -268,3 +268,8 @@ row('lanemove.py', 'plan:before_reading|plan:manifest_input_sha256|.json|.jsonl|
     'retry same lane and destination rolls forward; done receipts and original sessions remain; kernel releases locks',
     'holder and re-arm polls have a command deadline; ambiguous launch never repeats; no automatic retention deletion',
     'open obligations or holders refuse; timeout posts one attention ask per cause; changed files refuse without overwrite')
+row('lanemove.py', '.log|.move-state.json|.rearm-|plan:holders|plan:move_state|plan:move_state_file|plan:rearm_outcomes|plan:resume_verified_at|state:observed_holders|state:waiters|writer:move_state|writer:final_state',
+    'freeze writes editable restart inventory and records process identities; final-state seals recipes before copy',
+    'quiesce waits for recorded descendants; re-arm records intent, process identity and verification per recipe',
+    'command timeout bounds polls; waiter and heartbeat argv bound child lifetime; uncertain spawn never repeats',
+    'unconfirmed or incomplete inventory refuses; surviving children block; missing re-arm evidence leaves attention receipt')

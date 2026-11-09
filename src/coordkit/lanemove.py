@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
@@ -22,6 +23,9 @@ from .state import name_key, read_json, write_json
 
 PHASES = ('freeze', 'quiesce', 'final-state', 'stop', 'copy', 'manifest', 'resume', 're-arm', 'done')
 SESSION = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}')
+EXIT_GUIDANCE = ('After recording every background shell in move-state, run /exit and choose '
+                 '"Exit and stop tasks" (stop background shells), not background or stay. '
+                 'Coordkit never kills; lingering shell children block quiescence.')
 
 
 class Refusal(ToolError):
@@ -115,7 +119,8 @@ def lane_for(manifest, name):
 
 
 def prepare(manifest, name, destination):
-    plans = [read_json(path) for path in home(manifest).glob('*.json')]
+    plans = [value for path in home(manifest).glob('*.json')
+             if isinstance(value := read_json(path), dict) and 'plan_file' in value]
     active = [p for p in plans if p['name'] == name and 'done' not in p['completed']]
     if len(active) > 1:
         raise Refusal('multiple_moves', name)
@@ -149,8 +154,118 @@ def prepare(manifest, name, destination):
                 source=str(source), destination=str(usage.transcript_dir(after)/source.name),
                 stop_policy='verify-only', session_policy='copy-preserve-original',
                 before_reading=reading(manifest, before))
+    plan['move_state_file'] = str(Path(plan['plan_file']).with_suffix('.move-state.json'))
     save(plan)
     return plan
+
+
+def tracked_holders(manifest, plan, snapshot):
+    """Remember descendants before /exit, including children later reparented to init."""
+    recorded = plan.setdefault('holders', {})
+    live = {int(pid) for pid, row in recorded.items()
+            if snapshot.get(int(pid), {}).get('started') == row['started']}
+    live.update(pid for pid, row in snapshot.items() if plan['before']['session_id'] in row['argv'])
+    identity = routing.roster_identity(manifest, plan['name'])
+    pid = identity.get('pid')
+    if pid in snapshot and snapshot[pid]['started'] == identity.get('pid_started'):
+        live.add(pid)
+    if snapshot and not live:
+        live.update(claude_resume.transcript_holders(manifest, UsageLane(**plan['before'])) & snapshot.keys())
+    while True:
+        children = {pid for pid, row in snapshot.items() if row.get('ppid') in live}
+        if children <= live:
+            break
+        live.update(children)
+    for pid in live:
+        previous = recorded.get(str(pid), {})
+        recorded[str(pid)] = dict(snapshot[pid], origin_parent=previous.get('origin_parent', snapshot[pid].get('ppid')))
+    save(plan)
+    return live
+
+
+def move_state(manifest, plan):
+    """The lane completes this inventory before acknowledging freeze and exiting."""
+    path = Path(plan.setdefault('move_state_file', str(Path(plan['plan_file']).with_suffix('.move-state.json'))))
+    snapshot = claude_resume.processes()
+    tracked_holders(manifest, plan, snapshot)
+    if not path.exists():
+        command = [sys.executable, '-m', 'coordkit.cli', '--manifest', str(manifest.file), 'bus']
+        write_json(path, dict(goal='', open_prs=[], lanes_in_flight=[], bus_name=plan['name'], next_steps=[],
+                             session_id=plan['before']['session_id'], transcript=plan['source'],
+                             inventory_complete=False, background_shells=[],
+                             waiters=[dict(name=plan['name'], flags=['--to', plan['name'], '--own-asks'])],
+                             re_arms=[dict(name=plan['name'], kind='bus-waiter',
+                                           argv=command + ['wait', '--to', plan['name'], '--own-asks']),
+                                      dict(name='heartbeat', kind='heartbeat', argv=['agent-heartbeat', '50'],
+                                           env=dict(AGENT_HEARTBEAT_KEY=plan['before']['session_id']),
+                                           verify_argv=['agent-heartbeat', 'status'])]))
+    state = read_json(path)
+    if not isinstance(state, dict) or not isinstance(state.get('background_shells'), list):
+        raise Refusal('invalid_move_state', str(path))
+    for shell in state.get('background_shells', []):
+        if not isinstance(shell, dict):
+            raise Refusal('invalid_background_shell', str(path))
+        pid = shell.get('pid')
+        if type(pid) is not int or pid <= 0:
+            raise Refusal('invalid_background_shell_pid', str(path))
+        current = snapshot.get(pid)
+        if current and (not shell.get('started') or current['started'] == shell['started']):
+            previous = plan['holders'].get(str(pid), {})
+            plan['holders'][str(pid)] = dict(current, origin_parent=previous.get('origin_parent', current.get('ppid')))
+    save(plan)
+    # Keep observed process evidence alongside the lane's explicitly recorded restart recipes.
+    state['observed_holders'] = plan['holders']
+    write_json(path, state)
+    return state
+
+
+def final_state(manifest, plan):
+    state = move_state(manifest, plan)
+    entries = state.get('re_arms', [])
+    if state.get('inventory_complete') is not True or not isinstance(entries, list) or not entries:
+        raise Refusal('move_state_inventory_required', plan['move_state_file'])
+    if state.get('bus_name') != plan['name']:
+        raise Refusal('move_state_lane_mismatch', plan['move_state_file'])
+    names = set()
+    for entry in entries:
+        if (not isinstance(entry, dict) or not isinstance(entry.get('name'), str) or not entry['name'] or entry['name'] in names
+                or not isinstance(entry.get('argv'), list) or not entry['argv']
+                or not all(isinstance(arg, str) and arg for arg in entry['argv'])
+                or entry.get('kind') not in ('bus-waiter', 'heartbeat', 'monitor', 'watcher', 'background-shell')):
+            raise Refusal('invalid_rearm_entry', plan['move_state_file'])
+        names.add(entry['name'])
+        if entry.get('verify_argv') is not None and (not isinstance(entry['verify_argv'], list)
+                or not entry['verify_argv'] or not all(isinstance(arg, str) and arg for arg in entry['verify_argv'])):
+            raise Refusal('invalid_rearm_verifier', entry['name'])
+        if entry['kind'] == 'bus-waiter' and ('wait' not in entry['argv'] or not any(
+                flag in entry['argv'] and len(entry['argv']) > entry['argv'].index(flag)+1
+                for flag in ('--to', '--signal', '--subject'))):
+            raise Refusal('invalid_bus_waiter', entry['name'])
+        if entry['kind'] == 'heartbeat' and not entry.get('verify_argv'):
+            raise Refusal('heartbeat_verifier_required', entry['name'])
+        if not isinstance(entry.get('env', {}), dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in entry.get('env', {}).items()):
+            raise Refusal('invalid_rearm_environment', entry['name'])
+    if not any(e['kind'] == 'heartbeat' for e in entries) or not any(
+            e['kind'] == 'bus-waiter' and '--to' in e['argv']
+            and e['argv'][e['argv'].index('--to')+1:e['argv'].index('--to')+2] == [plan['name']]
+            for e in entries):
+        raise Refusal('default_rearms_required', plan['move_state_file'])
+    if any(not isinstance(shell, dict) or (shell.get('rearm') not in names and not shell.get('completed_reason'))
+           for shell in state.get('background_shells', [])):
+        raise Refusal('background_shell_rearm_required', plan['move_state_file'])
+    # Every observed descendant must have a restart recipe (or an explicit completed-task reason).
+    covered = {str(shell.get('pid')) for shell in state.get('background_shells', [])}
+    children = {pid for pid, row in plan['holders'].items()
+                if str(row.get('origin_parent', row.get('ppid'))) in plan['holders']}
+    if not children <= covered:
+        raise Refusal('background_shell_inventory_required', ','.join(sorted(children - covered)))
+    state['waiters'] = [dict(name=e['name'], flags=e['argv'][e['argv'].index('wait')+1:])
+                        for e in entries if e['kind'] == 'bus-waiter']
+    write_json(Path(plan['move_state_file']), state)
+    plan['move_state'] = state
+    save(plan)
+    return state
 
 
 def open_work(manifest, plan):
@@ -160,8 +275,11 @@ def open_work(manifest, plan):
     return [item for item in obligations.report(manifest) if item['owner'] == name]
 
 
-def quiet(manifest, target, idle):
-    if claude_resume.holder_present(manifest, target, claude_resume.processes()):
+def quiet(manifest, target, idle, plan=None):
+    snapshot = claude_resume.processes()
+    if plan and tracked_holders(manifest, plan, snapshot):
+        return False, 'background_holder_present'
+    if claude_resume.holder_present(manifest, target, snapshot):
         return False, 'holder_present'
     # Include explicitly bound alternate paths: a stale canonical path cannot hide activity.
     for path in claude_resume.transcript_paths(manifest, target):
@@ -176,10 +294,10 @@ def quiet(manifest, target, idle):
 def quiesce(manifest, plan, timeout, idle):
     deadline = time.monotonic() + timeout
     while True:
-        ready, reason = quiet(manifest, UsageLane(**plan['before']), idle)
+        ready, reason = quiet(manifest, UsageLane(**plan['before']), idle, plan)
         if ready:
             # Destination must also be free; it may already contain an old copy.
-            ready, reason = quiet(manifest, UsageLane(**plan['after']), idle)
+            ready, reason = quiet(manifest, UsageLane(**plan['after']), idle, plan)
         if ready:
             return
         if time.monotonic() >= deadline:
@@ -325,6 +443,100 @@ def rearmed(manifest, plan):
             and str(Path(note.get('transcript_path', '')).expanduser().resolve()) == plan['destination'])
 
 
+def rearm_env(plan, entry):
+    env = dict(os.environ)
+    # These are the mover's identity, not the resumed lane's. In particular a
+    # heartbeat must not treat the coordinator's turns as wakes for this lane.
+    for key in ('CLAUDE_PID', 'AGENTCTL_EXECUTION_ID', 'CODEX_THREAD_ID'):
+        env.pop(key, None)
+    return {**env, 'CLAUDE_CONFIG_DIR': plan['after']['config_dir'], 'COORDKIT_AS': plan['name'],
+            'CLAUDE_CODE_SESSION_ID': plan['after']['session_id'], **entry.get('env', {})}
+
+
+def verify_rearm(manifest, plan, entry, outcome, snapshot):
+    """Verify this entry, never substitute a lane-wide listening() result."""
+    pid = outcome.get('pid')
+    current = snapshot.get(pid, {})
+    if not pid or not outcome.get('started') or current.get('started') != outcome['started']:
+        return False
+    if entry['kind'] == 'bus-waiter':
+        argv = shlex.split(current.get('argv', ''))
+        # A live generic waiter with different flags cannot satisfy the recorded recipe.
+        if 'wait' not in argv or argv[argv.index('wait'):] != entry['argv'][entry['argv'].index('wait'):]:
+            return False
+        if '--to' in entry['argv'] and not any(flag in entry['argv'] for flag in ('--signal', '--subject')):
+            name = entry['argv'][entry['argv'].index('--to')+1]
+            cursor = manifest.paths.bus_log.parent/'state/cursors'/(name_key(name)+'.wait')
+            if not cursor.exists() or cursor.stat().st_mtime < outcome['requested_at']:
+                return False
+    if entry.get('verify_argv'):
+        result = subprocess.run(entry['verify_argv'], cwd=plan['after']['cwd'], env=rearm_env(plan, entry),
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2)
+        if result.returncode:
+            return False
+        if entry['kind'] == 'heartbeat':
+            try:
+                status = json.loads(result.stdout)
+            except ValueError:
+                return False
+            if (not isinstance(status, dict) or status.get('event') != 'arm'
+                    or str(status.get('owner', '')).split(':')[0] != str(pid)):
+                return False
+    return True
+
+
+def rearm_all(manifest, plan, no_rearm=False):
+    state = plan.get('move_state')
+    if not state:  # Older, paused receipts acquire the same mandatory inventory.
+        state = final_state(manifest, plan)
+    outcomes = plan.setdefault('rearm_outcomes', {})
+    for index, entry in enumerate(state['re_arms']):
+        outcome = outcomes.setdefault(entry['name'], {})
+        if not outcome:
+            outcome.update(status='skipped' if no_rearm else 'intent', requested_at=time.time(),
+                           argv=entry['argv'], no_rearm=no_rearm)
+            save(plan)  # Never repeat an ambiguous spawn after a crash.
+            if not no_rearm:
+                try:
+                    log_path = Path(plan['plan_file']).with_suffix(f'.rearm-{index}.log')
+                    with log_path.open('ab') as log:
+                        os.chmod(log.name, 0o600)
+                        child = subprocess.Popen(entry['argv'], cwd=plan['after']['cwd'], env=rearm_env(plan, entry),
+                                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                                 start_new_session=True)
+                    outcome.update(status='started', pid=child.pid, log=str(log_path),
+                                   started=claude_resume.start_time(child.pid))
+                except (OSError, subprocess.SubprocessError) as exc:
+                    outcome.update(status='failed', error=str(exc))
+                save(plan)
+        if no_rearm:
+            # Operator supplies the exact resumed process identity in move-state for manual arms.
+            manual = next((e for e in read_json(Path(plan['move_state_file']))['re_arms']
+                           if e['name'] == entry['name']), {})
+            if manual.get('pid') and manual.get('started'):
+                outcome.update(pid=manual['pid'], started=manual['started'], no_rearm=True,
+                               manual_recovery_at=time.time())
+    # Probe once after all starts: a successful spawn alone never proves readiness.
+    snapshot = claude_resume.processes()
+    complete = True
+    for entry in state['re_arms']:
+        outcome = outcomes[entry['name']]
+        try:
+            verified = verify_rearm(manifest, plan, entry, outcome, snapshot)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            outcome['verification_error'] = str(exc)
+            verified = False
+        outcome['verified'] = verified
+        outcome['checked_at'] = time.time()
+        if verified:
+            outcome['status'] = 'verified'
+        elif outcome['status'] == 'verified':
+            outcome['status'] = 'verification_pending'
+        save(plan)
+        complete = verified and complete
+    return complete
+
+
 def resume(manifest, plan):
     target = UsageLane(**plan['after'])
     plan['operator_command'] = operator_command(target)
@@ -333,6 +545,8 @@ def resume(manifest, plan):
         plan['resume_requested_at'] = time.time()
         save(plan)
     print('LANE_MOVE_RESUME ' + plan['operator_command'], flush=True)
+    print('LANE_MOVE_REARM Rerun --apply after resume: arm and verify every move-state entry '
+          '(--no-rearm verifies operator-managed entries). Outcomes and output logs are in the receipt.', flush=True)
     if target.resume != 'headless' or plan.get('launch'):
         return
     ready, reason = quiet(manifest, target, 0)
@@ -345,11 +559,12 @@ def resume(manifest, plan):
     # Write intent BEFORE Popen. An uncertain launch is never automatically repeated.
     plan['launch'] = dict(status='intent', requested_at=time.time())
     save(plan)
-    command = ['coordkit', '--manifest', str(manifest.file), 'bus']
-    prompt = (f'Your bus name is {target.name}. Read your inbox with '
-              + shlex.join(command + ['inbox', target.name, '--full']) + '. Re-arm a background '
-              + shlex.join(command + ['wait', '--to', target.name])
-              + '; take no new work until the lane-move handoff confirms listening.')
+    inbox = shlex.join(['coordkit', '--manifest', str(manifest.file), 'bus', 'inbox', target.name, '--full'])
+    prompt = (f'Your bus name is {target.name}. Read your inbox with {inbox}. '
+              f'Read move-state {plan["move_state_file"]}. '
+              'Lane-move arms and verifies its recorded waiters, heartbeat and monitors by default; '
+              'do not create duplicate waiters. With --no-rearm the operator handles each entry. '
+              'Take no new work until the lane-move handoff confirms all re-arms.')
     argv = ['claude', '--resume', target.session_id, '-p', prompt]
     with Path(plan['plan_file']).with_suffix('.resume.log').open('ab') as log:
         os.chmod(log.name, 0o600)
@@ -361,7 +576,7 @@ def resume(manifest, plan):
     save(plan)
 
 
-def apply(manifest, plan, timeout, idle):
+def apply(manifest, plan, timeout, idle, no_rearm=False):
     if 'done' in plan['completed']:
         print('LANE_MOVE_DONE ' + plan['plan_file'])
         return 0
@@ -369,13 +584,19 @@ def apply(manifest, plan, timeout, idle):
     if current not in (plan['declared_before'], plan['after']):
         raise Refusal('manifest_lane_changed', plan['name'])
     if 'manifest' not in plan['completed']:
+        move_state(manifest, plan)
+        print('LANE_MOVE_STATE ' + plan['move_state_file'], flush=True)
+        print('LANE_MOVE_EXIT ' + EXIT_GUIDANCE, flush=True)
         publish(manifest, plan, 'freeze-ask', 'ask',
                 f"Lane {plan['name']}: finish the current turn, take no new work; ack this freeze "
-                'only after picking up all open obligations. Stop is verify-only; coordkit never signals.',
+                f"only after picking up all open obligations and completing {plan['move_state_file']} "
+                '(goal, open PRs, lanes/exec IDs, bus name, next steps, every re-arm and background shell). '
+                + EXIT_GUIDANCE,
                 to=plan['name'])
         work = open_work(manifest, plan)
         if work:
             raise Refusal('open_obligations', ','.join(item['id'] for item in work))
+        final_state(manifest, plan)
         phase(manifest, plan, 'freeze')
         # Hold both account/session locks across quiesce, copy and manifest commit.
         # Other coordkit resumes share these locks; external holders are probed afresh.
@@ -385,9 +606,10 @@ def apply(manifest, plan, timeout, idle):
                     raise Refusal('session_resume_locked', target.config_dir)
             quiesce(manifest, plan, timeout, idle)
             phase(manifest, plan, 'quiesce')
+            final_state(manifest, plan)
             publish(manifest, plan, 'final-state-post', 'state',
                     f"Lane {plan['name']} final state: session={plan['before']['session_id']} "
-                    f"transcript={plan['source']}", subject='lane-move', state='DONE')
+                    f"transcript={plan['source']} move-state={plan['move_state_file']}", subject='lane-move', state='DONE')
             phase(manifest, plan, 'final-state')
             quiesce(manifest, plan, timeout, idle)
             phase(manifest, plan, 'stop')
@@ -418,9 +640,18 @@ def apply(manifest, plan, timeout, idle):
     else:
         print('LANE_MOVE_RESUME ' + plan['operator_command'], flush=True)
     deadline = time.monotonic() + timeout
-    while not rearmed(manifest, plan):
+    # Prove the destination resumed before creating waiters: our own waiter is not resume evidence.
+    while not plan.get('resume_verified_at'):
+        if rearmed(manifest, plan):
+            plan['resume_verified_at'] = time.time()
+            save(plan)
+            break
         if time.monotonic() >= deadline:
             attention(manifest, plan, 'rearm_timeout')
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    while not rearm_all(manifest, plan, no_rearm):
+        if time.monotonic() >= deadline:
+            attention(manifest, plan, 'rearm_entries_timeout')
         time.sleep(min(1, max(0, deadline - time.monotonic())))
     phase(manifest, plan, 're-arm')
     if 'after_reading' not in plan:
@@ -449,4 +680,4 @@ def main(argv, manifest):
         if not args.apply:
             print(json.dumps(plan, indent=2))
             return 0
-        return apply(manifest, plan, args.timeout, args.idle_seconds)
+        return apply(manifest, plan, args.timeout, args.idle_seconds, args.no_rearm)

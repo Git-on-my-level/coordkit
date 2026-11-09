@@ -140,6 +140,23 @@ class BusTests(FakeCase):
         self.post('signal','--signal','READY_NOW')
         self.assertIn('BUS_SIGNAL',self.invoke('wait','--signal','READY_NOW','--since','1h','--timeout','0')[0])
 
+    def test_own_ask_replies_wake_regardless_of_kind_or_addressee(self):
+        self.manifest.bus.mirror = False
+        self.post('ask', to='worker', frm='lead')
+        mine = self.rows()[-1]['id']
+        self.post('ask', to='lead', frm='worker')
+        other = self.rows()[-1]['id']
+        self.invoke('wait', '--to', 'lead', '--own-asks', '--kinds', 'answer', '--timeout', '0', code=3)
+        bus.configure(self.manifest)
+        for kind in ('answer', 'ruling', 'state', 'fyi'):
+            bus.append([dict(id='reply-'+kind, ts=T0.isoformat(), frm='worker', to='elsewhere',
+                             kind=kind, re=mine, text='reply')])
+            self.assertIn('reply-'+kind, self.invoke('wait', '--to', 'lead', '--own-asks',
+                          '--kinds', 'ask', '--timeout', '0')[0])
+        bus.append([dict(id='unrelated', ts=T0.isoformat(), frm='worker', to='lead',
+                         kind='fyi', re=other, text='not my ask')])
+        self.invoke('wait', '--to', 'lead', '--own-asks', '--kinds', 'ask', '--timeout', '0', code=3)
+
     def test_text_spill_and_ref_refusal(self):
         self.post(text='x'*1000,to='worker')
         self.assertTrue(all(len(r['text'])<=400 for r in self.rows()))
