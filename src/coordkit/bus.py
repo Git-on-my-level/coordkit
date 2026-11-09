@@ -564,19 +564,25 @@ def dispatch(o):
         return
     if o.cmd == 'post':
         from .routing import register_activity
-        from .handoffs import check_pickup, local_digests, stored_ref, validate_post
+        from .handoffs import check_pickup, local_digests, path_like, portable, stored_ref, validate_post
         try:
             degraded = validate_post(CONFIG, o)
+            if degraded and o.evidence and path_like(o.evidence):
+                o.evidence = stored_ref(o.evidence)
             degraded_digests = local_digests(CONFIG, o) if degraded else {}
         except ValueError as exc:
             print(f'refused: {exc}', file=sys.stderr); sys.exit(2)
         # Validate the recipient so work does not silently reach an unknown lane.
         # Known but silent for IDLE_HOURS -> post it AND copy the lead so it isn't lost.
         rows = read()
-        if o.kind == 'claim' and o.re:
+        verified_handoff = None
+        if o.re:
             work = next((r for r in rows if r.get('id') == o.re), None)
-            if work and not check_pickup(CONFIG, work, o.frm, rows):
-                sys.exit(2)
+            if (work and work.get('kind') == 'handoff' and o.frm != work['frm']
+                    and (o.kind == 'claim' or portable(work) or CONFIG.handoffs.required)):
+                if not check_pickup(CONFIG, work, o.frm, rows):
+                    sys.exit(2)
+                verified_handoff = work['id']
         if o.kind == 'claim' and o.re and o.topic == 'general':
             original = next((r for r in rows if r.get('id') == o.re), None)
             if original and isinstance(original.get('topic'), str):
@@ -815,6 +821,7 @@ def dispatch(o):
         if o.id: rec['publication_hash'] = signature
         if o.owner: rec['owner'] = o.owner
         if o.re: rec['re'] = o.re
+        if verified_handoff: rec['handoff_verified'] = verified_handoff
         if spill_ref:
             rec['ref'] = rec['spill_ref'] = spill_ref
         if o.ref: rec['ref'] = stored_ref(o.ref)
@@ -879,6 +886,7 @@ def dispatch(o):
             owner = o.owner or o.frm
             append([dict(ts=now().isoformat(timespec='seconds'), id=secrets.token_hex(3), origin='coordkit', frm=o.frm, to=work['frm'],
                          topic=work.get('topic', 'general'), kind='ack', re=o.id, owner=owner,
+                         **({'handoff_verified': work['id']} if work['kind'] == 'handoff' else {}),
                          text=o.note or (f'picked up by {owner}' if owner == o.frm else f'reassigned to {owner}'))])
             from .routing import register_activity
             register_activity(CONFIG, o.frm, 'ack')

@@ -36,7 +36,7 @@ readability, SHA-256, committed HEAD content, size, directory, and filename.
 Traversal, symlinks, unknown repositories, missing/uncommitted files, and mismatched
 digests refuse. `--force` does not bypass these checks.
 
-`bus ack`, `bus post --kind claim --re ID`, and connector acknowledgements repeat
+`bus ack`, replies/answer posts, `bus post --kind claim --re ID`, and connector acknowledgements repeat
 the checks on the consuming host synchronously. A failure refuses the pickup and
 writes one repair handoff directly to the original poster, linked to the failed
 handoff. The original obligation is replaced by this repair obligation, so there
@@ -44,6 +44,8 @@ is no false successful claim and no wait for the hourly sweep. Repeated failed
 pickup attempts by the same reader reuse that bounce. The poster repairs and
 reposts the authority, then acknowledges the bounce. A bystander cannot bounce
 someone else's handoff. A blocked receipt remains a blocked receipt, not pickup.
+Successful replies carry a pickup-verification marker; old or foreign replies
+without it cannot close portable obligations or hide them from the inbox.
 
 For deliberate local-only work, `--degrade-handoff "manual transfer pending"`
 prints a warning and stores `handoff_degraded` on the row (also visible through

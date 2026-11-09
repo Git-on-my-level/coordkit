@@ -60,7 +60,7 @@ row('bus.py', 'spill_ref|origin=mcp', 'bus spill or connector-originated post',
     'text never grants ref access; service origin never proves a local listener')
 row('bus.py', '--', 'per-writer spill filename separator', 'retained with bus history',
     'no latch; same retention as spill_ref', 'read failures surface to reader')
-row('handoffs.py', 'handoff_degraded|handoff_local_digests|handoff_bounce',
+row('handoffs.py', 'handoff_degraded|handoff_local_digests|handoff_bounce|handoff_verified',
     'explicit degradation or failed consumer pickup', 'immutable bus history; poster acknowledges repair obligation and reposts',
     'pickup checks synchronously; bounce uses normal obligation pickup ladder',
     'failed pickup returns a deduplicated handoff directly to poster')

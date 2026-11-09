@@ -91,6 +91,10 @@ def open_obligations(manifest, rows, at, pr_state=lambda number: None):
                     or reply.get('copy_of') or reply.get('escalation'):
                 continue
             from .addressed import assignees
+            from .handoffs import portable
+            if (row['kind'] == 'handoff' and portable(row)
+                    and not (reply.get('handoff_verified') == row['id'] or reply.get('handoff_bounce'))):
+                continue  # old/foreign replies cannot silently claim portable payloads they never probed
             if (reply.get('kind') == 'ack' or reply.get('ack')) and canonical(reply.get('frm')) not in {canonical(n) for n in assignees(dict(row, owner=owner), manifest)}:
                 continue  # only the assigned reader can pick up or reassign work
             if flags:

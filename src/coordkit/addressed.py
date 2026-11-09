@@ -544,6 +544,11 @@ def ack_state(row, by_re, manifest=None):
     for reply in by_re.get(row['id'], []):
         if reply.get('frm') not in allowed or is_escalation(reply):
             continue
+        from .handoffs import portable
+        if (row.get('kind') == 'handoff' and portable(row)
+                and not (reply.get('handoff_verified') == row['id'] or reply.get('handoff_bounce')
+                         or reply.get('ack') == 'blocked')):
+            continue
         text = (reply.get('ack') or reply.get('text') or '').strip().lower()
         state = next((s for s in ACK_STATES if text.startswith(s)), 'replied')
     return state

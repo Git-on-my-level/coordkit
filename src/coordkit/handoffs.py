@@ -1,5 +1,6 @@
 """Portable, committed handoff authority and consumer-side pickup checks."""
 import hashlib
+import json
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -117,20 +118,35 @@ def local_digests(manifest, options):
     for value in (options.ref, options.evidence):
         if value and not value.startswith('repo:') and (path_like(value) or value == options.ref):
             try:
-                result[stored_ref(value) if value == options.ref else value] = local_digest(manifest, value)
+                result[stored_ref(value)] = local_digest(manifest, value)
             except OSError:
                 raise ValueError('degraded handoff path unavailable on posting host') from None
     return result
 
 
+def portable(work):
+    return bool(work.get('handoff_degraded') or work.get('handoff_bounce')
+                or any(str(work.get(k, '')).startswith('repo:') for k in ('ref', 'evidence')))
+
+
 def check_pickup(manifest, work, reader, rows):
     """Fail a claim immediately and return the repair obligation to its poster."""
-    if work.get('kind') != 'handoff' or work.get('handoff_bounce'):
+    if work.get('kind') != 'handoff':
         return True
     from . import bus
     from .addressed import assignees
-    if bus.resolve(reader) not in {bus.resolve(n) for n in assignees(work, manifest)}:
+    current = work
+    for reply in rows:
+        allowed = {bus.resolve(n) for n in assignees(current, manifest)}
+        if (reply.get('re') == work['id'] and reply.get('kind') == 'ack' and reply.get('owner')
+                and not (reply.get('copy_of') or reply.get('escalation'))
+                and (not portable(work) or reply.get('handoff_verified') == work['id'])
+                and bus.resolve(reply.get('frm')) in allowed and reply['owner'] != reply['frm']):
+            current = dict(current, owner=reply['owner'])
+    if bus.resolve(reader) not in {bus.resolve(n) for n in assignees(current, manifest)}:
         raise ManifestError('handoff pickup requires the assigned reader')
+    if work.get('handoff_bounce'):
+        return True
     try:
         # Automatic long-text spills are local display detail, not handoff authority.
         ref = work.get('ref') if work.get('ref') != work.get('spill_ref') else None
@@ -151,11 +167,22 @@ def check_pickup(manifest, work, reader, rows):
         return True
     except (ValueError, OSError) as exc:
         bounce_id = 'handoff-bounce-' + hashlib.sha256((work['id'] + ':' + reader).encode()).hexdigest()[:16]
+        def absent(stream):
+            # Check under the append flock too, even if a caller supplied stale rows.
+            stream.seek(0)
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get('id') == bounce_id:
+                    return False
+            return True
         if not any(r.get('id') == bounce_id for r in rows):
             bus.append([dict(id=bounce_id, ts=bus.now().isoformat(timespec='seconds'), origin='coordkit',
                              frm=reader, to=work['frm'], owner=work['frm'], kind='handoff',
                              topic=work.get('topic', 'general'), re=work['id'], handoff_bounce=str(exc),
                              text=f"Handoff {work['id']} unreadable: {exc}. Repair authority and repost."[:manifest.bus.text_cap])],
-                       project=False)
+                       project=False, before_append=absent)
         print(f"refused: handoff {work['id']} bounced to {work['frm']}: {exc}", file=sys.stderr)
         return False

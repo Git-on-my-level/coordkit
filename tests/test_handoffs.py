@@ -4,6 +4,7 @@ import hashlib
 import io
 import subprocess
 import time
+import os
 
 from coordkit import addressed, bus, mcp_server, obligations
 from coordkit.manifest import ManifestError, load
@@ -212,3 +213,54 @@ class HandoffTests(FakeCase):
                 self.file.write_text(base + '\n[handoffs]\n' + config + '\n')
                 with self.assertRaises(ManifestError):
                     load(self.file)
+
+    def test_reply_and_direct_answer_probe_before_publishing(self):
+        self.post('--ref', self.ref)
+        original = self.rows()[0]
+        self.path.unlink()
+        self.invoke('reply', original['id'], '--from', 'lead', 'Received', code=2)
+        self.invoke('post', '--from', 'lead', '--to', 'worker', '--kind', 'answer',
+                    '--re', original['id'], 'Received', code=2)
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(self.rows()[-1]['to'], 'worker')
+
+    def test_unverified_foreign_reply_cannot_close_obligation_or_inbox(self):
+        self.post('--ref', self.ref)
+        original = self.rows()[0]
+        reply = dict(id='foreign', ts=original['ts'], frm='lead', to='worker',
+                     kind='answer', re=original['id'], text='Picked up')
+        rows = [original, reply]
+        self.assertEqual(len(obligations.open_obligations(self.manifest, rows, time.time())), 1)
+        self.assertIsNone(addressed.ack_state(original, addressed.replies(rows), self.manifest))
+        self.invoke('post', '--from', 'lead', '--to', 'worker', '--kind', 'answer',
+                    '--re', original['id'], 'Verified reply')
+        self.assertEqual(self.rows()[-1]['handoff_verified'], original['id'])
+        self.assertEqual(obligations.open_obligations(self.manifest, self.rows(), time.time()), [])
+
+    def test_relative_degraded_evidence_keeps_posting_directory(self):
+        before = os.getcwd()
+        try:
+            os.chdir(self.repo)
+            self.post('--evidence', './handoffs/worker--task.md', '--degrade-handoff', 'local transfer')
+            original = self.rows()[0]
+            self.assertEqual(original['evidence'], str(self.path))
+            self.assertIn(str(self.path), original['handoff_local_digests'])
+        finally:
+            os.chdir(before)
+        self.invoke('ack', original['id'], '--from', 'lead')
+
+    def test_stale_pickup_snapshot_cannot_duplicate_bounce(self):
+        from coordkit.handoffs import check_pickup
+        self.post('--ref', self.ref)
+        snapshot = self.rows()
+        self.path.unlink()
+        for _ in range(2):
+            self.assertFalse(check_pickup(self.manifest, snapshot[0], 'lead', snapshot))
+        self.assertEqual(len(self.rows()), 2)
+
+    def test_reassigned_consumer_can_probe_and_claim(self):
+        self.post('--ref', self.ref)
+        original = self.rows()[0]
+        self.invoke('ack', original['id'], '--from', 'lead', '--owner', 'reviewer')
+        self.invoke('ack', original['id'], '--from', 'reviewer')
+        self.assertEqual(obligations.open_obligations(self.manifest, self.rows(), time.time()), [])
