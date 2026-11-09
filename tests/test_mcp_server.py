@@ -210,7 +210,7 @@ class McpToolTests(McpCase):
         self.assertEqual(row['frm'], self.manifest.mcp.identity)
         error, text = self.tool('post', to='lead-a', kind='ask', text='x', frm='lead-a')  # no sender field exists
         self.assertTrue(error); self.assertIn('unexpected arguments', text)
-        for bad in ({'to': '../etc', 'kind': 'ask', 'text': 'x'}, {'to': 'lead-a', 'kind': 'ruling', 'text': 'x'},
+        for bad in ({'to': '../etc', 'kind': 'ask', 'text': 'x'}, {'to': 'lead-a', 'kind': 'signal', 'text': 'x'},
                     {'to': 'lead-a', 'kind': 'ask', 'text': 'x' * 2001}, {'to': 'lead-a', 'kind': 'ask', 'text': ' '}):
             self.assertTrue(self.tool('post', **bad)[0], bad)
 
@@ -1049,7 +1049,8 @@ class McpReadBatchTests(McpCase):
         self.assertTrue(answered['needs_decision'])
         self.assertEqual(set(answered), {'qid', 'state', 'tier', 'asker', 'target', 'answered_by', 'answer_id',
                                          'created_at', 'answered_at', 'question', 'answer', 'truncated',
-                                         'age_minutes', 'needs_decision', 'stale'})
+                                         'age_minutes', 'needs_decision', 'stale', 'default', 'reasks',
+                                         'no_auto_default', 'auto_default_applied', 'unanswered_no_default'})
         tier_one = next(r for r in result['questions'] if r['qid'] == 'q-two')
         self.assertFalse(tier_one['needs_decision'])
         self.assertEqual(answered['answer'], 'q-one: approved in chat')

@@ -6,6 +6,8 @@ All requests require `Authorization: Bearer <secret>`. The secret file defaults 
 
 Read tools inspect the bus and bounded agentctl/train metadata. Write tools (`post`, `ack`, `question_answer`) use `[mcp].identity` (default `ck-<project>-mcp`); `post` also accepts senders explicitly allowlisted in `[mcp].post_as`. Acknowledgements require an assignee; question answers require an open tier-2 question. Writes are disabled until `<root>/state/mcp/writes-enabled` exists and are refused while `kill` exists. Configure clients to confirm each write with the operator.
 
+`post` also accepts optional `topic`, `owner`, `key`, `default`, `no_auto_default` and `no_owner_required`. New `approval`, `ruling` and `claim` kinds use the same identity and write gates. Repeated unchanged asks return the original receipt without another wake. `open_questions` includes the explicit default, `reasks`, exception and auto-default metadata; `topics` includes `owner_missing` and `approval_id`. See [question defaults](QUESTIONS.md) and [approval ownership](ADDRESSED.md).
+
 Every call is journaled without secrets in `<root>/state/mcp/calls.ndjson`. Output is untrusted agent text, explicitly labelled and capped. See the security document for rate limits, slot pools and resource bounds.
 
 ## Read tools

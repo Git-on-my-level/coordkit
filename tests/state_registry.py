@@ -160,6 +160,17 @@ row('review.py', 'review-scan.json|writer:main', 'review scan --relay raises a f
 
 # Question escalation (briefs/question-escalation.md)
 row('questions.py', 'state|questions|questions.json|questions.lock|qid|writer:save_all|writer:main', 'a hook, the sweep or a CLI call captures a question', 'answered: closed and delivered; closed records pruned after 7 days', 'tier deadlines (15m urgent / 30m normal), then anx', 'tier 1 live agent, tier 2 anx ask; status line counts open > 30 min')
+row('questions.py', 'coordination defaults', 'committed ask or repeated capture',
+    'real answer or receipt-first auto-default closes; superseded asks close; closed retention seven days',
+    'questions.auto_default_reasks and auto_default_after; open questions remain until resolved',
+    'unanswered_no_default appears once after publication; no_default_digested survives hourly queue drains')
+row('questions.py', 'refs|.txt|coord-|id|writer:spill_row', 'generated escalation or default answer exceeds the bus text cap',
+    'structured ref retains complete text; append-only evidence is kept', 'bus.text_cap; archive has no latch',
+    'question receipt and normal CLI/MCP ref readers')
+row('approvals.py', 'topic ownership projection', 'approval or ruling without an owner in the existing scan window',
+    'later owner or claim clears the derived finding; no alert latch is stored',
+    'obligations.owner_required_after; addressed.window_hours and 10000 row cap',
+    'hourly digest names topic, approval row and age; no_owner_required exempts the row')
 row('questions.py', 'sessions.json|sessions.lock', 'coordkit question bind', 're-bind overwrites', 'persistent binding, no latch', 'unknown askers route to the relay')
 row('questions.py', 'notifications|.json|writer:hook_notification|writer:scan_notifications', 'Notification hook (waiting for input or permission)', 'removed when the transcript grows or the sweep turns it into a question', 'notification_idle', 'question ladder')
 row('questions.py', 'answers|.md|writer:deliver', 'answer to a deaf asker via delivery_cli', 'pointer file per question, read once by the asker', 'bounded by answered questions', 'relay file when no adapter confirms')

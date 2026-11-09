@@ -579,7 +579,11 @@
             "msg",
             "ask",
             "answer",
-            "fyi"
+            "fyi",
+            "handoff",
+            "approval",
+            "ruling",
+            "claim"
           ]
         },
         "text": {
@@ -590,6 +594,27 @@
         "re": {
           "type": "string",
           "description": "id of the row this replies to"
+        },
+        "topic": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "default": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "no_auto_default": {
+          "type": "boolean",
+          "default": false
+        },
+        "no_owner_required": {
+          "type": "boolean",
+          "default": false
         },
         "as": {
           "type": "string",

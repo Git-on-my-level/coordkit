@@ -194,7 +194,9 @@ class AddressedTests(AddressedCase):
         result = escalation.ask(self.manifest, 'card:task', kind='rulings', situation='Ruling r1 is unacked.',
                                 impact='i', recommend='Chase the owner.', why='w')
         self.assertEqual(result['routed_to'], 'lead_digest')
-        self.assertFalse([r for r in self.rows() if r['frm'] == 'coordkit' and r['kind'] == 'ask'])
+        asks = [r for r in self.rows() if r['frm'] == 'coordkit' and r['kind'] == 'ask']
+        self.assertEqual(len(asks), 1)
+        self.assertTrue(asks[0]['digest_only'])  # durable question, still no individual wake
         self.assertIn('finding:rulings', (addressed.home(self.manifest)/'lead-digest.ndjson').read_text())
 
     def test_8d_awake_agent_ignoring_its_inbox_is_swept(self):

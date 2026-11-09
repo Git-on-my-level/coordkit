@@ -478,6 +478,10 @@ def dispatch(o):
         # Validate the recipient so work does not silently reach an unknown lane.
         # Known but silent for IDLE_HOURS -> post it AND copy the lead so it isn't lost.
         rows = read()
+        if o.kind == 'claim' and o.re and o.topic == 'general':
+            original = next((r for r in rows if r.get('id') == o.re), None)
+            if original and isinstance(original.get('topic'), str):
+                o.topic = original['topic']
         if resolve(o.to) != o.to:
             print(f"note: '{o.to}' is an alias of '{resolve(o.to)}' (manifest aliases); posting to '{resolve(o.to)}'",
                   file=sys.stderr)
@@ -490,6 +494,9 @@ def dispatch(o):
             old = next((r for r in rows if r.get('id') == o.id), None)
             payload = {k: getattr(o,k) for k in ('frm','to','topic','kind','owner','state','subject','needs',
                                                   'rollback','irreversible','evidence','re','signal')}
+            # Preserve signatures for old publications when all new optional fields are absent.
+            payload.update({k: getattr(o, k) for k in ('key', 'default', 'no_auto_default', 'no_owner_required')
+                            if getattr(o, k, None)})
             payload['text_hash'] = hashlib.sha256(o.text.encode()).hexdigest()
             payload['prs'] = list(dict.fromkeys(o.pr.replace(' ', ',').split(','))) if o.pr else []
             payload['ref'] = str(pathlib.Path(o.ref).resolve()) if o.ref else None
@@ -571,15 +578,18 @@ def dispatch(o):
         elif o.evidence and o.kind != 'handoff':
             print('refused: --evidence is only for --kind handoff', file=sys.stderr); sys.exit(2)
         if o.kind == 'ruling':
-            if not o.owner or not re.fullmatch(r'[A-Za-z0-9_.-]+', o.owner) or o.owner in ('all', 'lead'):
+            if o.owner and (not re.fullmatch(r'[A-Za-z0-9_.-]+', o.owner) or o.owner in ('all', 'lead')):
                 print("refused: a ruling needs exactly one --owner (a single lane, not 'all'/'lead'). "
                       "Split work between lanes = two rulings, one owner each.", file=sys.stderr)
                 sys.exit(2)
-            if o.owner not in known and not o.force:
+            if o.owner and o.owner not in known and not o.force:
                 print(f"refused: unknown ruling owner '{o.owner}' (or pass --force)", file=sys.stderr)
                 sys.exit(2)
         elif o.owner and o.kind != 'blocker':
-            print('refused: --owner is only for --kind ruling or blocker', file=sys.stderr); sys.exit(2)
+            if not re.fullmatch(r'[A-Za-z0-9_.-]+', o.owner) or o.owner in ('all', 'lead'):
+                print('refused: --owner needs a single lane', file=sys.stderr); sys.exit(2)
+            if o.owner not in known and not o.force:
+                print(f"refused: unknown owner '{o.owner}' (or pass --force)", file=sys.stderr); sys.exit(2)
         if (o.kind == 'signal') != bool(o.signal):
             print('refused: --kind signal and --signal NAME go together', file=sys.stderr); sys.exit(2)
         if o.signal and not SIGNAL_NAME.match(o.signal):
@@ -623,13 +633,28 @@ def dispatch(o):
                   'Re-home the work rather than waiting on an idle lane (rule 20).', file=sys.stderr)
         if o.ref and not pathlib.Path(o.ref).is_file():
             print(f'refused: --ref {o.ref} is not a file', file=sys.stderr); sys.exit(2)
-        if not o.force and not o.id and o.kind not in ('state', 'fyi'):
+        if o.kind == 'ask' and o.topic != 'coordkit-digest':
+            from . import questions
+            candidate = dict(frm=o.frm, to=role or o.to, topic=o.topic, text=o.text,
+                             key=o.key, default=o.default, no_auto_default=o.no_auto_default, owner=o.owner)
+            duplicate = questions.repeat_bus_ask(CONFIG, candidate, rows, now().timestamp())
+            if duplicate:
+                global LAST_POST
+                original = next((r for r in rows if r.get('id') == duplicate['qid']), None)
+                original = original or dict(candidate, id=duplicate['qid'], kind='ask')
+                LAST_POST = (original, 'deduped')
+                print(f"DEDUPED {duplicate['qid']} reasks={duplicate['reasks']} state={duplicate['state']}")
+                return
+        if not o.force and not o.id and o.kind not in ('state', 'fyi', 'ask'):
             digest = hashlib.sha256(o.text.encode()).hexdigest()
             duplicate = next((r for r in reversed(rows) if r.get('frm') == o.frm and r.get('to') == o.to
                               and r.get('kind') == o.kind and r.get('topic') == o.topic
                               and r.get('re') == o.re and r.get('owner') == o.owner
                               and r.get('subject') == o.subject and r.get('state') == o.state
                               and all(r.get(k) == getattr(o, k) for k in ('needs', 'rollback', 'evidence', 'signal', 'priority'))
+                              and r.get('key') == o.key and r.get('default') == o.default
+                              and bool(r.get('no_owner_required')) == o.no_owner_required
+                              and bool(r.get('no_auto_default')) == o.no_auto_default
                               and bool(r.get('irreversible')) == o.irreversible and r.get('prs', []) == prs
                               and (not o.ref or r.get('ref') == str(pathlib.Path(o.ref).resolve()))
                               and r.get('text_hash', hashlib.sha256(r.get('text', '').encode()).hexdigest()) == digest
@@ -694,6 +719,14 @@ def dispatch(o):
         if o.irreversible: rec['irreversible'] = True
         if o.priority: rec['priority'] = o.priority
         if role: rec['role'] = role
+        for key in ('key', 'default', 'no_auto_default', 'no_owner_required'):
+            if getattr(o, key, None): rec[key] = getattr(o, key)
+        if o.kind == 'ask':
+            from .questions import normalized_hash
+            rec['normalized_text_hash'] = normalized_hash(o.text)
+        from .approvals import requires_owner
+        if requires_owner(rec) and not o.owner:
+            rec['owner_missing'] = True
         if getattr(o, 'site_local', False): rec['site_local'] = True
         recs = [rec]
         if idle and o.kind not in ('blocker', 'fyi'):  # blockers already reach the lead; FYIs never copy
@@ -703,10 +736,15 @@ def dispatch(o):
             if o.kind == 'ruling': recs[-1]['kind'] = 'fyi'  # orig_kind still wakes `bus wait --to lead`
         # Addressed escalation runs before the ANX projection: a mirror failure (exit 1) must never
         # stop a deaf/vacant alert from reaching the fallback, relay file or pager.
-        global LAST_POST
         def committed():
             global LAST_POST
             LAST_POST = (rec, None)
+            if rec.get('kind') == 'ask':
+                from .questions import track_bus_ask
+                track_bus_ask(CONFIG, dict(rec, to=role or rec['to']))
+            elif rec.get('re'):
+                from .questions import track_bus_reply
+                track_bus_reply(CONFIG, rec)
         append(recs, project=not target, on_commit=committed)
         outcome = None
         try:
@@ -719,7 +757,7 @@ def dispatch(o):
         if target:
             project_pending()
         print('posted', rec['ts'], 'id=' + rec['id'] + (f' (recipient {o.to} idle; lead copied)' if len(recs) > 1 else '')
-              + (f' — {o.owner} must run: bus ack {rec["id"]} --from {o.owner}' if o.kind == 'ruling' else '')
+              + (f' — {o.owner} must run: bus ack {rec["id"]} --from {o.owner}' if o.kind == 'ruling' and o.owner else '')
               + (f' — open until a decision/answer with --re {rec["id"]}' if o.kind == 'blocker' else ''))
     elif o.cmd == 'ack':
         rows = read()

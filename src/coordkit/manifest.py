@@ -142,6 +142,7 @@ class Reconciler:
 class Obligations:
     # handoffs, asks and auditor flags each need an owner's pickup.
     ack_after: str = "30m"
+    owner_required_after: str = "30m"
     alert_after: str = "2h"
     realert_after: str = "6h"
     # Addressed asks get a per-recipient deadline (brief section 8.4): one unacked
@@ -228,6 +229,8 @@ class Questions:
     human_actor: str = ""
     urgent_deadline: str = "15m"
     normal_deadline: str = "30m"
+    auto_default_reasks: int = 2
+    auto_default_after: str = "1h"
     guarded_patterns: list = field(default_factory=lambda: list(GUARDED_DEFAULT))
     modal_min_age: str = "10m"                         # sweep: pending AskUserQuestion this old
     notification_idle: str = "10m"
@@ -310,7 +313,7 @@ def _table(cls, data, section, required=()):
     lists = {"flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as"}
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects"}
     booleans = {"stop_requires_waiter", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
-    integers = {"waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
+    integers = {"auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
     numbers = {"wake_debounce_minutes", "idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
     for key, value in data.items():
         ok = (isinstance(value, list) and all(type(x) is (int if key == "ci" else str) for x in value)) if key in lists else (
@@ -479,10 +482,10 @@ def load(path: str | Path | None = None) -> Manifest:
     launchd.python = str(Path(launchd.python).expanduser())
     for section, keys in (("agentctl", ("timeout",)), ("lane", ("lease_ttl", "hung_after")), ("loop", ("default_cadence", "progress_budget", "max_age")),
                           ("reconciler", ("ruling_ask_after", "stale_lease_grace", "blocker_ask_after", "answer_max_age", "state_max_age")),
-                          ("merge", ("max_hold_age",)), ("obligations", ("ack_after", "alert_after", "realert_after", "ask_deadline", "urgent_deadline")), ("wait", ("stale_alert_after",)),
+                          ("merge", ("max_hold_age",)), ("obligations", ("ack_after", "alert_after", "realert_after", "ask_deadline", "urgent_deadline", "owner_required_after")), ("wait", ("stale_alert_after",)),
                           ("addressed", ("lease_ttl", "busy_window", "activity_ttl", "label_ttl", "heartbeat_every", "iteration_deadline", "rearm_grace", "urgent_deadline",
                                          "normal_deadline", "realert_after", "confirm_timeout", "deaf_backlog")),
-                          ("questions", ("urgent_deadline", "normal_deadline", "modal_min_age", "notification_idle")), ("accounts", ("max_age",))):
+                          ("questions", ("urgent_deadline", "normal_deadline", "modal_min_age", "notification_idle", "auto_default_after")), ("accounts", ("max_age",))):
         for key in keys:
             value = getattr(config[section], key)
             if value or key != "timeout":
@@ -506,6 +509,10 @@ def load(path: str | Path | None = None) -> Manifest:
                 or not all(isinstance(v, bool) if k == 'human' else isinstance(v, str) for k, v in spec.items()):
             raise ManifestError(f"invalid_value: addressed.agents.{name} takes role, runtime, adapter, fallback, target, remote strings and human boolean")
     questions = config["questions"]
+    if questions.auto_default_reasks < 1 or duration(questions.auto_default_after) <= 0:
+        raise ManifestError("invalid_value: questions auto-default limits must be positive")
+    if duration(config['obligations'].owner_required_after) <= 0:
+        raise ManifestError("invalid_value: obligations.owner_required_after must be positive")
     if questions.prose_detector not in ("log", "post"):
         raise ManifestError("invalid_value: questions.prose_detector must be log or post")
     for pattern in questions.guarded_patterns:

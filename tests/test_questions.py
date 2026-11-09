@@ -654,7 +654,7 @@ class AuthoredBriefTests(QuestionCase):
         with patch.dict(os.environ, COORDKIT_AS='worker-ui'):
             self.hook('pretooluse', payload)
         record = next(iter(self.records().values()))
-        questions.ladder(self.manifest, at=time.time() + 3600)  # long past the tier-1 deadline
+        questions.ladder(self.manifest, at=time.time() + 1900)  # past tier 1, before the auto-default age
         self.assertEqual([c for c in self.anx_calls if c[0] == 'ask'], [])
         self.assertIn('no decision brief authored yet', self.records()[record['qid']]['brief_refused'])
 
@@ -695,7 +695,8 @@ class RefusalDeliveryTests(QuestionCase):
         # no live tier 1 and no relay file used to mark the refusal done, losing the obligation.
         from coordkit import addressed
         with patch.object(addressed, 'to_relay_file', lambda *a, **k: False):
-            record, _ = questions.create(self.manifest, 'unknown-abcd1234', 'Rerun the gate?', session_id='abcd1234')
+            record, _ = questions.create(self.manifest, 'unknown-abcd1234', 'Rerun the gate?', session_id='abcd1234',
+                                         no_auto_default=True)  # this test exercises the exceptional retry ladder
             after = self.records()[record['qid']]
             self.assertIsNone(after.get('brief_refused_at'))
             self.assertTrue(after['refusal_undelivered_at'])

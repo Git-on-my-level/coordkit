@@ -25,7 +25,8 @@ def ask(manifest, card, kind='finding', **payload):
     from . import addressed, briefs
     validate(manifest)
     brief = briefs.machine(kind, evidence=briefs.pr_evidence(manifest, payload.get('situation', '')),
-                           subject=briefs.subject_words(card), **payload)
+                           subject=briefs.subject_words(card),
+                           **{k: v for k, v in payload.items() if k not in ('key', 'default', 'no_auto_default')})
     to = (manifest.escalation.internal_to if kind in INTERNAL_KINDS else '') or manifest.escalation.ask_to
     from .addressed import digest_only, to_lead_digest
     # Most important first: the bus shows the first 400 characters and spills the rest to a ref file.
@@ -38,10 +39,21 @@ def ask(manifest, card, kind='finding', **payload):
             + (f' [{card}]' if card else '') + f" {situation} Next step: {recommend} {consequences} "
             f"{brief['if_no_answer']}")
     if digest_only(manifest, to):
-        to_lead_digest(manifest, f'finding:{kind}', text)  # Policy: the hourly digest, never a wake
+        if manifest.mode == 'live':
+            from .questions import queue_escalation
+            queue_escalation(manifest, to, f'finding:{kind}', text, key=payload.get('key'),
+                             default=payload.get('default'), no_auto_default=payload.get('no_auto_default', False))
+        else:
+            to_lead_digest(manifest, f'finding:{kind}', text)
         return {'routed_to': 'lead_digest'}
     try:
-        addressed.send(manifest, 'coordkit', to, text, kind='ask', extra=('--force',))  # configured recipient
+        extra = ['--force']
+        for field in ('key', 'default'):
+            if payload.get(field):
+                extra += ['--'+field, payload[field]]
+        if payload.get('no_auto_default'):
+            extra += ['--no-auto-default']
+        addressed.send(manifest, 'coordkit', to, text, kind='ask', topic=f'finding:{kind}', extra=extra)
         result = {'routed_to': to}
     except (SystemExit, Exception) as exc:  # the bus itself is failing (e.g. the mirror-failure finding): relay
         import sys

@@ -77,6 +77,13 @@ manager. See the [v0.2 contracts and operations guide](docs/V02.md) and
 - **Loops:** recurring work with cadence, receipts, and bounded failure escalation.
 - **Shadow mode:** compares read-only protocol views before cutover; local observation state and relay output remain writable.
 
+Coordination safeguards apply by default. Unchanged asks reuse one question and never
+wake twice; after two unanswered re-asks or one hour, an explicit `--default` becomes
+a recorded answer. Without a default, the question enters the hourly digest once
+as "unanswered, no default". Approvals without an owner enter that digest after
+30 minutes; a later `--owner` post or `--kind claim` clears the finding. Per-ask
+`--no-auto-default` and per-approval `--no-owner-required` are exceptions.
+
 See [SPEC](docs/SPEC.md), [addressed routing](docs/ADDRESSED.md), [questions](docs/QUESTIONS.md), and [failure contracts](docs/FOOTGUNS.md). The [MCP connector](docs/MCP.md) is optional; read its [security model](docs/SECURITY.md) before exposing it.
 
 ## Development

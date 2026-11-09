@@ -14,8 +14,45 @@ hook install in `src/coordkit/hooks.py`. Tests: `tests/test_questions.py`.
 
 Identity: `COORDKIT_AS`, then `coordkit question bind --session S --as NAME`, then the transcript's own "Your bus name
 is X". Unknown sessions become `unknown-<session8>` (routed to the relay); coordkit never guesses. Dedupe: one open
-record per session and question. Kill switch: `COORDKIT_QUESTION_GUARD=off`. Hooks no-op in shadow mode. Each hook
+record per asker and question (including options/recommendation). Kill switch: `COORDKIT_QUESTION_GUARD=off`. Hooks no-op in shadow mode. Each hook
 is bounded at 5s (`perl alarm`).
+
+## Unanswered asks converge by default
+
+`bus post --kind ask` and machine escalations share the durable question projection.
+Use `--key KEY` for a stable explicit key; otherwise the key hashes normalized
+sender, recipient (the declared role before member selection), topic and text.
+Whitespace and case changes do not create a question. Identical repeats increment
+`reasks` on the original and return its receipt without appending another ask or
+waking again, including with `--force`. Publication `--id` retries remain idempotent
+and do not count as re-asks. Changed text or default under an explicit key supersedes
+the old open question. A transcript sweep observing the same tool call is not a
+new authored re-ask.
+
+An ask can carry `--default "Use the cached result"`. At the second unanswered
+re-ask, or one hour of age, coordkit first appends an `answer` row referencing the
+original ask, then closes its question. Its text is
+`auto-default applied after N unanswered re-asks: <default>`. A real bus answer
+takes precedence. No default is inferred from a recommendation. Without an explicit
+default the question stays open, stops pickup reminders, and appears once as
+"unanswered, no default" in the hourly digest. Every hourly digest also summarizes
+the open count, oldest age/ID and a bounded question list. New information permits
+a fresh ask; identical repeats after auto-default keep returning the resolution.
+
+`--no-auto-default` is a per-ask exception; deduplication still applies. Manifest
+limits are enabled without configuration:
+
+```toml
+[questions]
+auto_default_reasks = 2
+auto_default_after = "1h"
+```
+
+Both limits must be positive. MCP `post` accepts optional `key`, `default` and
+`no_auto_default`; `open_questions` exposes default, re-ask count and resolution
+metadata. Bus asks stay on the bus/digest path rather than entering the harness
+ANX ladder. Closed records retain their dedupe evidence for seven days. Capture
+fallbacks read at most 256 KiB of recent bus data; sweeps reuse their loaded rows.
 
 ## Ladder
 

@@ -136,6 +136,7 @@ def notify(manifest, rows):
     # Suppress answer/ack feedback, not referenced work. A handoff (or any
     # other work kind) can reference its context and still needs a recipient.
     actionable = [row for row in rows if row.get('kind') != 'fyi' and row.get('to') != 'all'
+                  and not row.get('digest_only')
                   and row.get('frm') != row.get('to')
                   and not (row.get('kind') in ('reply', 'answer', 'ack')
                            and (row.get('re') or recently_woken(manifest, row.get('frm', ''))))]
