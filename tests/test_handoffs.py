@@ -252,6 +252,14 @@ class HandoffTests(FakeCase):
         self.assertEqual(self.rows()[-1]['handoff_verified'], original['id'])
         self.assertEqual(obligations.open_obligations(self.manifest, self.rows(), time.time()), [])
 
+    def test_unverified_pr_or_subject_mentions_do_not_imply_portable_pickup(self):
+        self.invoke('post', '--from', 'worker', '--to', 'lead', '--kind', 'handoff',
+                    '--subject', 'work', '--ref', self.ref, 'PR #123 ready')
+        original = self.rows()[0]
+        later = dict(id='mention', ts=original['ts'], frm='lead', to='all', kind='msg',
+                     text='PR #123 queued', subject='work')
+        self.assertEqual(len(obligations.open_obligations(self.manifest, [original, later], time.time())), 1)
+
     def test_relative_degraded_evidence_keeps_posting_directory(self):
         before = os.getcwd()
         try:
