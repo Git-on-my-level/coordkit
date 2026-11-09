@@ -2,7 +2,12 @@
 import json
 import os
 from .manifest import ManifestError, duration
-from .process import ToolError, call_json, run
+from .process import ToolError, call_json, is_schema, run
+
+
+# The agentctl envelope version this client was written against. agentctl prints
+# schema_version 1 on every success and error document.
+AGENTCTL_SCHEMA_VERSION = 1
 
 
 class AgentctlClient:
@@ -14,6 +19,7 @@ class AgentctlClient:
         return os.environ.get("AGENTCTL", "agentctl")
 
     def call(self, *args, **kwargs):
+        kwargs.setdefault("schema_version", AGENTCTL_SCHEMA_VERSION)
         return call_json([self.binary, *map(str, args), "--output", "json"], **kwargs)
 
     def recent(self, *, nonterminal=False, since=None, label=None):
@@ -116,7 +122,7 @@ class AgentctlClient:
             except ValueError as exc:
                 raise ToolError(self.binary, 6, "invalid delegate plan JSON", "protocol_error") from exc
             native = doc.get("result", {}).get("native", {}) if isinstance(doc, dict) else {}
-            if not isinstance(doc, dict) or doc.get("ok") is not True or not native:
+            if not isinstance(doc, dict) or doc.get("ok") is not True or not native or not is_schema(doc, AGENTCTL_SCHEMA_VERSION):
                 raise ToolError(self.binary, 6, "missing successful native plan", "protocol_error")
             if access == "read_only" and native.get("permissions") != "read_only":
                 raise ToolError(self.binary, 2, "delegate plan did not grant read_only access", "plan_refused")
