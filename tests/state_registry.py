@@ -160,6 +160,37 @@ row('review.py', 'review-scan.json|writer:main', 'review scan --relay raises a f
 
 # Question escalation (briefs/question-escalation.md)
 row('questions.py', 'state|questions|questions.json|questions.lock|qid|writer:save_all|writer:main', 'a hook, the sweep or a CLI call captures a question', 'answered: closed and delivered; closed records pruned after 7 days', 'tier deadlines (15m urgent / 30m normal), then anx', 'tier 1 live agent, tier 2 anx ask; status line counts open > 30 min')
+row('questions.py', 'coordination defaults', 'committed ask or repeated capture',
+    'real answer or receipt-first auto-default closes; superseded asks close; closed retention seven days',
+    'questions.auto_default_reasks (authored re-asks or actual ladder windows) and bus-only auto_default_after',
+    'unanswered_no_default appears once after publication; no_default_digested survives hourly queue drains')
+row('questions.py', 'question store caps and default coverage',
+    'question capture stores authored ref stat identity and priority; settlement_scan persists file, offset, physical count, boundary, last_row_id and no_answer_through',
+    'changed payload supersedes; answer/default clears pending work; coverage deferral clears on proof or real answer',
+    '8 MiB and 10000 records fail closed without overwriting; 256 KiB and 10000 bus rows per read',
+    'question_store_limit requests archiving; question list and MCP expose default_deferred; guard off freezes settlement')
+row('questions.py', 'settlement_scan|default_deferred_swept|default_deferred_digested|append.offset.json',
+    'bounded scans advance a per-question no-answer prefix; first deferral is reported once per output channel',
+    'file replacement, truncation or boundary change restarts proof; real answer or verified default settles; closed retention seven days',
+    'each call scans at most 256 KiB and 10000 complete rows; final proof and sequence-hint repair run under bus flock',
+    'sweep names qid and reason before marking swept; hourly digest marks digested only after successful publication')
+row('questions.py', 'bus_answer',
+    'track_bus_reply persists the first matching harness reply with its timestamp and append sequence',
+    'ladder consumes it through normal close/delivery and ANX withdrawal; inert after closure and pruned with the closed record after seven days',
+    'question store caps bound size; answered records retry delivery each sweep; closed retention seven days',
+    'undelivered answers reach the relay; an unknown asker closes via relay after UNBOUND_DELIVERY_WINDOW')
+row('questions.py', 'refs|.txt|coord-|id|writer:spill_row', 'generated escalation or default answer exceeds the bus text cap',
+    'structured ref retains complete text; append-only evidence is kept', 'bus.text_cap; archive has no latch',
+    'question receipt and normal CLI/MCP ref readers')
+row('approvals.py', 'topic ownership projection', 'approval or ruling without an owner in the existing scan window',
+    'later owner or claim clears the derived finding; no alert latch is stored',
+    'obligations.owner_required_after; addressed.window_hours and 10000 row cap',
+    'hourly digest names topic, approval row and age; no_owner_required exempts the row')
+row('questions.py', 'ladder cycle deadlines and default claim',
+    'tier-1 deadline or successfully filed tier-2 ANX ask starts a waiting window',
+    'missed deadline advances once; answered/closed stops counting; default claim expires after five minutes',
+    'urgent_deadline or normal_deadline; outages and refused briefs never simulate tier-2 windows',
+    'shared receipt-first default publisher, then normal answer delivery and ANX withdrawal')
 row('questions.py', 'sessions.json|sessions.lock', 'coordkit question bind', 're-bind overwrites', 'persistent binding, no latch', 'unknown askers route to the relay')
 row('questions.py', 'notifications|.json|writer:hook_notification|writer:scan_notifications', 'Notification hook (waiting for input or permission)', 'removed when the transcript grows or the sweep turns it into a question', 'notification_idle', 'question ladder')
 row('questions.py', 'answers|.md|writer:deliver', 'answer to a deaf asker via delivery_cli', 'pointer file per question, read once by the asker', 'bounded by answered questions', 'relay file when no adapter confirms')
@@ -296,6 +327,12 @@ row('lanemove.py', 'plan:waiter_restart_count', 'completed move detects a dead o
     'receipt-first recovery replaces only the required lane waiter and re-verifies it',
     'caller timeout bounds recovery polling; uncertain identities never respawn',
     'ambiguous live identity or missing readiness refuses completion')
+row('stock.py', 'stock-last.json|.lock|writer:report', 'stock report compares count and stable oldest-item timestamp',
+    'atomic replacement on every successful report; remove to reset the diff baseline',
+    'one snapshot per local root, serialized by its sibling lock', 'read/write errors fail the report')
+row('machine.py', 'state|machine|lane-watch|quiet-prs.lines', 'stock report or hourly digest reads producer files',
+    'read-only; producers replace or remove files', 'last 20 matching lines, no local cache',
+    'missing files ignored; malformed prefixes excluded')
 row('mcp_server.py', 'clients.json|clients.json.lock|writer:clients_main',
     'explicit mcp-clients add/revoke; external private credentials',
     'revoke removes an entry; lock released on exit',

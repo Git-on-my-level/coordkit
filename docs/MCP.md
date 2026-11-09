@@ -31,9 +31,13 @@ verify your client's bearer-header support before exposing this endpoint.
 Read tools inspect the bus and bounded agentctl/train metadata. Every write tool (`post`, `ack`,
 `question_answer`) requires the token's `write` grant. `post` defaults to its `identity`; extra senders must
 be in its `post_as`. Posting as a manifest-designated human (including human roles and members) also requires
-`answer`. This grant is required for `kind=answer`, for `kind=msg` with `re` naming an open/escalated question,
+`answer`. This grant is required for `kind=ask`, `answer`, `approval` and `ruling`, for any explicit
+`default`, and for `kind=msg` with `re` naming an open/escalated question,
 for `question_answer`, for acknowledgements as a human identity, and for `ack state=done` targeting an
-open/escalated question (it emits an answer).
+open/escalated question or a bus ask not yet projected into the question store (it emits an answer).
+Asks require this grant even with `no_auto_default`: a repeat can settle an existing
+question or supersede it when information changes. The same check applies to all optional post fields;
+`key`, `default` and the opt-out never grant extra authority.
 Acknowledgements must be assigned to the client's identity; question answers
 require an open tier-2 question and record that identity as the answerer. The bearer is the authorization;
 client confirmation is still recommended but is not the server's enforcement mechanism.
@@ -49,6 +53,8 @@ Each line includes `client`, the matched entry id or `legacy`;
 unauthenticated/admission failures use `anonymous` when no token was matched. Over-limit requests are not
 journaled individually to bound disk use. Output is untrusted agent text, explicitly labelled and capped.
 See the security document for rate limits, slot pools and resource bounds.
+
+`post` also accepts optional `topic`, `owner`, `key`, `default`, `no_auto_default` and `no_owner_required`. `approval`, `ruling` and `claim` use the same client identity and write gates; approval/ruling also require `answer`. `claim` only records ownership. Repeated unchanged asks return the original receipt without another wake. `open_questions` includes the explicit default, `reasks`, exception and auto-default metadata; `topics` includes `owner_missing` and `approval_id`. See [question defaults](QUESTIONS.md) and [approval ownership](ADDRESSED.md).
 
 ### Legacy migration
 

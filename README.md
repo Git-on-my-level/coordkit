@@ -78,6 +78,11 @@ manager. See the [v0.2 contracts and operations guide](docs/V02.md) and
 - **Loops:** recurring work with cadence, receipts, and bounded failure escalation.
 - **Shadow mode:** compares read-only protocol views before cutover; local observation state and relay output remain writable.
 
+Coordination safeguards apply by default. Unchanged asks reuse one durable question;
+explicit defaults and ownerless approvals converge through the
+[question policy](docs/QUESTIONS.md#unanswered-asks-converge-by-default).
+Per-item opt-outs cover exceptional asks and approvals.
+
 See [SPEC](docs/SPEC.md), [addressed routing](docs/ADDRESSED.md), [questions](docs/QUESTIONS.md), and [failure contracts](docs/FOOTGUNS.md). The [MCP connector](docs/MCP.md) is optional; read its [security model](docs/SECURITY.md) before exposing it.
 
 ## Development

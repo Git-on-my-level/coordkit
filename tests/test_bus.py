@@ -33,14 +33,14 @@ class BusTests(FakeCase):
         return [json.loads(line) for line in self.manifest.paths.bus_log.read_text().splitlines()]
 
     def test_refusal_matrix(self):
-        cases = [('ruling', []), ('ruling', ['--owner','all']), ('ruling', ['--owner','lead']),
+        cases = [('ruling', ['--owner','all']), ('ruling', ['--owner','lead']),
                  ('ruling', ['--owner','unknown']), ('blocker', []), ('blocker', ['--owner','worker']),
                  ('blocker', ['--owner','all','--needs','tool']), ('decision', []),
                  ('decision', ['--subject','s']), ('decision', ['--subject','s','--rollback','undo','--irreversible']),
                  ('hold', []), ('unhold', []), ('hold', ['--pr','abc']), ('state', []),
                  ('state', ['--state','DONE']), ('state', ['--state','BAD','--subject','s']),
                  ('state', ['--state','DONE','--subject','bad subject']), ('signal', []),
-                 ('signal', ['--signal','lowercase']), ('msg', ['--owner','worker']),
+                 ('signal', ['--signal','lowercase']),
                  ('msg', ['--state','DONE']), ('msg', ['--rollback','undo']), ('msg', ['--pr','123']),
                  ('msg', ['--needs','help']), ('msg', ['--evidence','sha']), ('msg', ['--signal','READY_NOW'])]
         for kind, flags in cases:

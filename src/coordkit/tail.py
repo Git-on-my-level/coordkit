@@ -9,6 +9,35 @@ from pathlib import Path
 from .state import read_json, write_json
 
 
+def read_tail(stream, max_bytes):
+    """(first byte offset, complete physical lines) using at most max_bytes + 1 bytes.
+
+    Inspect the preceding byte instead of readline(): even a giant unterminated
+    physical line cannot cause an unbounded read. The caller owns any file lock.
+    """
+    stream.seek(0, os.SEEK_END)
+    end = stream.tell()
+    start = max(0, end - max_bytes)
+    if start:
+        stream.seek(start - 1)
+        boundary = stream.read(1) == b'\n'
+    else:
+        boundary = True
+        stream.seek(0)
+    data = stream.read(max_bytes)
+    if not boundary:
+        skip = data.find(b'\n') + 1
+        if not skip:
+            return end, b''
+        start += skip
+        data = data[skip:]
+    return start, data[:data.rfind(b'\n') + 1]
+
+
+class TailLimit(ValueError):
+    """A bounded checkpoint catch-up needs more bus history than its caller permits."""
+
+
 class TailReader:
     def __init__(self, path, checkpoint=None):
         self.path = Path(path)
@@ -16,7 +45,7 @@ class TailReader:
         self.state = None
         self.reset = False
 
-    def read(self, start=0):
+    def read(self, start=0, max_bytes=None):
         try:
             stream = self.path.open('rb')
         except FileNotFoundError:
@@ -42,8 +71,13 @@ class TailReader:
                 offset, count = 0, 0
             stream.seek(offset)
             rows = []
+            remaining = max_bytes
             while True:
-                line = stream.readline()
+                line = stream.readline() if remaining is None else stream.readline(remaining + 1)
+                if remaining is not None:
+                    if len(line) > remaining:
+                        raise TailLimit('bus checkpoint catch-up exceeds byte budget')
+                    remaining -= len(line)
                 if not line or not line.endswith(b'\n'):
                     break
                 if count >= start:

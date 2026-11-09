@@ -9,6 +9,7 @@ board = "ck-example"
 [paths]
 root = ".coordkit"
 bus_log = "/path/to/project/data/run-example/swarm/bus.jsonl"
+machine_state = "/path/to/project/data/run-example/swarm/state"
 events = "/path/to/scratch/lead-wait/events.ndjson"
 [agentctl.pools]
 implement = "pool:implement"
