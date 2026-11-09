@@ -117,8 +117,11 @@ def lease(manifest, plan, verb):
 def launch_run(manifest, plan, suffix='', pool=None, prompt=None):
     directory = manifest.paths.out_dir/'req'/(plan['label']+suffix)
     directory.mkdir(parents=True, exist_ok=True)
+    # A different capacity-fallback pool replaces a pinned selector. Relaunching
+    # the plan's own pool keeps the selector the run was launched with.
+    selector = plan.get('selector') if pool in (None, plan.get('pool')) else None
     raw = AgentctlClient(manifest).delegate(prompt or plan['prompt'], directory,
-            key=plan['key']+suffix, pool=pool or plan['pool'], selector=plan.get('selector'), label=plan['label'], detach=True,
+            key=plan['key']+suffix, pool=pool or plan['pool'], selector=selector, label=plan['label'], detach=True,
             card=plan.get('card'), owns=plan['owns'], access=plan['access'], timeout='20m', wakeable=True)
     doc = json.loads(raw)
     if doc.get('ok') is not True:
@@ -463,13 +466,11 @@ def _recover(manifest,plan,dry_run=False):
             evidence = rate_limit(status)
             if evidence:
                 note_rate_limit(manifest, plan, evidence)
-                lease(manifest,plan,'renew')
-                detach_watcher(manifest,plan)
-                print(f'RECONCILE watcher restored {plan["label"]} (rate limited)')
-                return True
-            if hung(manifest, status) and hung(manifest, client.status(plan['execution_id'])):
+            elif hung(manifest, status) and hung(manifest, client.status(plan['execution_id'])):
                 expire(manifest, plan, 'execution_hung')
                 return True
+            # The watcher is gone, so a throttled run's lease may have lapsed too.
+            # Renew, or reacquire when ANX says this lane still owns it (exit 2/13).
             try:
                 lease(manifest,plan,'renew')
             except ToolError as exc:
@@ -479,6 +480,10 @@ def _recover(manifest,plan,dry_run=False):
                 if current.get('owner','').removeprefix('actor:') not in ('',plan['label']):
                     raise Refusal('lease_owner_changed',current['owner']) from exc
                 lease(manifest,plan,'acquire')
+            if evidence:
+                detach_watcher(manifest,plan)
+                print(f'RECONCILE watcher restored {plan["label"]} (rate limited)')
+                return True
         else:
             # Terminal recovery runs synchronously before the zombie-lease sweep.
             return _watch(manifest,plan) == 0

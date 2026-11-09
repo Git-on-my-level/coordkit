@@ -3,6 +3,7 @@ import contextlib
 import datetime as dt
 import io
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 from coordkit import lane
@@ -62,6 +63,38 @@ class RateLimitRecoveryTests(FakeCase):
         self.assertFalse(any('ask' in row['args'] for row in self.calls()))
         events = [__import__('json').loads(line) for line in self.manifest.paths.events.read_text().splitlines()]
         self.assertEqual([row['kind'] for row in events if row['kind'] == 'rate_limited'], ['rate_limited'])
+
+    def test_recovery_reacquires_a_lapsed_lease_before_restoring_the_watcher(self):
+        plan = self.plan()
+        throttled = {'state': 'running', 'liveness': 'unreachable', 'updated_at': stamp(3 * 3600),
+                     'rate_limit': {'retry_after_ms': 2500}}
+        self.respond({'tool': 'anx', 'contains': ['renew'], 'exit': 13,
+                      'json': {'ok': False, 'error': {'code': 'lease_held'}}},
+                     {'tool': 'anx', 'contains': ['show'],
+                      'json': {'ok': True, 'result': {'lease': {'owner': 'worker'}}}})
+        with patch.object(lane.AgentctlClient, 'status', return_value=throttled), \
+                patch.object(lane, 'detach_watcher') as restored:
+            self.assertTrue(self.quiet(lane.recover, self.manifest, plan))
+        restored.assert_called_once()
+        self.assertTrue(any('renew' in row['args'] for row in self.calls()))
+        self.assertTrue(any('acquire' in row['args'] for row in self.calls()))
+        self.assertFalse(any('ask' in row['args'] or 'release' in row['args'] for row in self.calls()))
+        self.assertNotIn('terminal', read_json(Path(plan['plan_file'])))
+
+    def test_rate_limited_recovery_leaves_another_owners_lease(self):
+        plan = self.plan()
+        throttled = {'state': 'running', 'rate_limit': {'retry_after_ms': 2500}}
+        self.respond({'tool': 'anx', 'contains': ['renew'], 'exit': 2,
+                      'json': {'ok': False, 'error': {'code': 'not_found'}}},
+                     {'tool': 'anx', 'contains': ['show'],
+                      'json': {'ok': True, 'result': {'lease': {'owner': 'actor:other'}}}})
+        with patch.object(lane.AgentctlClient, 'status', return_value=throttled), \
+                patch.object(lane, 'detach_watcher') as restored:
+            self.assertTrue(self.quiet(lane.recover, self.manifest, plan))
+        restored.assert_not_called()
+        self.assertFalse(any('acquire' in row['args'] for row in self.calls()))
+        asks = [row for row in self.calls() if 'ask' in row['args']]
+        self.assertTrue(asks and any('lease_owner_changed' in ' '.join(row['args']) for row in asks))
 
     def test_watcher_records_throttling_then_completes(self):
         plan = self.plan()

@@ -1,9 +1,14 @@
 """Pool values may be agentctl selectors; OpenCode lanes need no Claude resume adapter."""
-import json
+import contextlib
+import io
+import time
+from pathlib import Path
+from unittest.mock import patch
 
 from coordkit import lane
 from coordkit.manifest import ManifestError, load, parse_selector
 from coordkit.process import ToolError
+from coordkit.state import write_json
 from tests.support import FakeCase
 
 
@@ -79,3 +84,22 @@ class LaneLaunchTests(FakeCase):
             lane.launch_run(self.manifest, plan)
         self.assertEqual(caught.exception.category, 'plan_refused')
         self.assertFalse(any('delegate' in row['args'] for row in self.calls()))
+
+    def test_capacity_fallback_replaces_a_pinned_selector(self):
+        plan = self.plan(selector={'family': 'kimi'}, execution_id='exec-old', phase='running',
+                         started=time.time(), autocontinued=True)
+        write_json(Path(plan['plan_file']), plan)
+        self.manifest.lane.capacity_fallback = ['plan']
+        capacity = {'state': 'cancelled', 'failure': {'code': 'provider_capacity'}}
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                patch.object(lane.AgentctlClient, 'await_result',
+                             side_effect=[ToolError('agentctl', 10, 'capacity'), 'done']), \
+                patch.object(lane.AgentctlClient, 'status', return_value=capacity):
+            self.assertEqual(lane.watch(self.manifest, plan), 0)
+        self.assertEqual(self.delegate_request()['selector'],
+                         {'pool': 'plan', 'settings': {'access': 'read_only'}})
+
+    def test_relaunch_on_the_original_pool_keeps_the_pinned_selector(self):
+        plan = self.plan(selector={'family': 'kimi'})
+        lane.launch_run(self.manifest, plan, '-r1', pool='implement')
+        self.assertEqual(self.delegate_request()['selector']['family'], 'kimi')

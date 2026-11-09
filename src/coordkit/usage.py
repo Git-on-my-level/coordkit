@@ -260,7 +260,12 @@ def _opencode_tables(connection):
 
 
 def _opencode_sessions(connection, tables, lane):
-    """Sessions in this lane's store, scoped by session id or workspace directory."""
+    """Sessions in this lane's store, scoped by session id or workspace directory.
+
+    Upgraded OpenCode stores keep a migrated session in both session_v2 and
+    session. v2 is the copy still being written, so a v1 id already found there
+    is not a second session.
+    """
     if not {'session', 'session_v2'} & tables:
         return [], False
     directories = {str(lane.cwd)}
@@ -269,7 +274,7 @@ def _opencode_sessions(connection, tables, lane):
     except OSError:
         pass
     marks = ','.join('?' for _ in directories)
-    found, truncated = [], False
+    found, truncated, seen = [], False, set()
     for table in ('session_v2', 'session'):
         if table not in tables:
             continue
@@ -281,6 +286,9 @@ def _opencode_sessions(connection, tables, lane):
                                       (*directories, OPENCODE_MAX_SESSIONS + 1)).fetchall()
         truncated |= len(rows) > OPENCODE_MAX_SESSIONS
         for (identifier,) in rows[:OPENCODE_MAX_SESSIONS]:
+            if identifier in seen:
+                continue
+            seen.add(identifier)
             found.append((table, identifier))
     return found[:OPENCODE_MAX_SESSIONS * 2], truncated
 

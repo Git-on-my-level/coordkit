@@ -93,6 +93,30 @@ class OpenCodeUsageTests(FakeCase):
         self.assertTrue(usage.model_matches('opencode/morph-kimik31', 'morph-kimik31'))
         self.assertTrue(usage.model_matches('morph-kimik31', 'morph-kimik31'))
 
+    def test_migrated_session_is_counted_once_across_schema_generations(self):
+        connection = self.store()
+        connection.execute("INSERT INTO session_v2 VALUES ('ses_repo', '/work/repo')")
+        connection.execute("INSERT INTO session VALUES ('ses_repo', '/work/repo')")
+        connection.execute("INSERT INTO session VALUES ('ses_old', '/work/repo')")
+        self.message(connection, 'ses_repo', 'm-v2', self.assistant(input=10, output=1, read=0, write=0))
+        legacy = {'role': 'assistant', 'modelID': 'old-model',
+                  'time': {'created': millis(AT - timedelta(minutes=5))},
+                  'tokens': {'input': 99, 'output': 99, 'cache': {'read': 0, 'write': 0}}}
+        # Same id would replace the v2 counters; a copied id would add a second turn.
+        self.message(connection, 'ses_repo', 'm-v2', legacy, at=AT - timedelta(minutes=5), table='message')
+        self.message(connection, 'ses_repo', 'm-copy', legacy, at=AT - timedelta(minutes=5), table='message')
+        old = self.assistant(model='legacy-model', input=4, output=1, read=0, write=0,
+                             at=AT - timedelta(minutes=1))
+        old['role'] = 'assistant'
+        self.message(connection, 'ses_old', 'm-old', old, at=AT - timedelta(minutes=1), table='message')
+        connection.commit(); connection.close()
+        reading = usage.collect([self.lane()], AT)[0][1]
+        self.assertEqual((reading.turns, reading.input_tokens), (2, 14))
+        self.assertEqual(reading.context_now, 10)
+        self.assertEqual(set(reading.models), {'morph-kimik31', 'legacy-model'})
+        pinned = usage.collect([self.lane(session='ses_repo')], AT)[0][1]
+        self.assertEqual((pinned.turns, pinned.input_tokens, pinned.latest_model), (1, 10, 'morph-kimik31'))
+
     def test_shared_workspace_scoping_and_ambiguity(self):
         connection = self.store()
         connection.execute("INSERT INTO session_v2 VALUES ('ses_a', '/work/repo')")
