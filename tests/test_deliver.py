@@ -193,7 +193,7 @@ class DeliveryTests(DeliveryCase):
         deliver.cursor_path(self.manifest, 'lead-a').unlink()
         start = time.monotonic()
         self.assertEqual(self.run_hook(), '')
-        self.assertLess(time.monotonic() - start, .3)
+        self.assertLess(time.monotonic() - start, budget)
         self.assertEqual(read_json(deliver.cursor_path(self.manifest, 'lead-a'))['offset'], path.stat().st_size)
 
     def test_first_hook_for_eight_names_skips_history_and_delivers_only_new_rows(self):

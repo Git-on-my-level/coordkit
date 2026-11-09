@@ -1,5 +1,7 @@
 """Append-only typed coordination bus, extracted from the proven protocol."""
 import hashlib
+import io
+import stat
 import tempfile
 from .state import name_key, read_json
 import argparse, datetime as dt, fcntl, json, os, pathlib, re, secrets, subprocess, sys, collections, time
@@ -472,12 +474,79 @@ def _main(argv, *, site_local=False, origin='coordkit'):
             lock_path = cursor_path(who, o.cmd).with_suffix('.'+o.cmd+'.lock')
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open('a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if o.cmd == 'wait' else 0))
+            except BlockingIOError:
+                raise ManifestError('duplicate_waiter: lane cursor already owned') from None
+            if o.cmd == 'wait':
+                from .adapters.claude_resume import start_time
+                from .state import write_json
+                write_json(cursor_path(o.to, 'wait').with_suffix('.wait.owner.json'),
+                           dict(pid=os.getpid(), started=start_time(os.getpid()),
+                                session_id=os.environ.get('CLAUDE_CODE_SESSION_ID', '')))
             return dispatch(o)
     return dispatch(o)
 
 
+WAIT_RECEIVER_TAIL_BYTES = 1024 * 1024
+WAIT_RECEIVER_END = re.compile(r'-- end (\S+)')
+
+
+def wait_receiver_ids(fd):
+    """Recover complete deliveries from a bounded tail of the actual stdout file."""
+    # stdout is usually write-only. Reopen for reading rather than seeking or
+    # reading its descriptor: /dev/fd on macOS shares the writer's file offset.
+    if sys.platform == 'darwin':
+        path = os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b'\0', 1)[0])
+    else:
+        path = f'/proc/self/fd/{fd}'
+    with open(path, 'rb') as receiver:
+        actual, expected = os.fstat(receiver.fileno()), os.fstat(fd)
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            raise OSError('wait receiver changed while reopening its log')
+        offset = max(0, actual.st_size - WAIT_RECEIVER_TAIL_BYTES)
+        receiver.seek(max(0, offset - 1))
+        boundary = not offset or receiver.read(1) == b'\n'
+        receiver.seek(offset)
+        data = receiver.read(WAIT_RECEIVER_TAIL_BYTES)
+        rows = data.split(b'\n')[:-1]
+    if not boundary:
+        rows = rows[1:]
+    # Headers can survive a torn multiline write. Only a newline-terminated end
+    # marker proves completion, for both normal and --full output.
+    ids = {match[1] for row in rows
+           if (match := WAIT_RECEIVER_END.fullmatch(row.decode('utf-8', errors='replace')))}
+    return ids, bool(data and not data.endswith(b'\n'))
+
+
+def deliver_wait_hits(hits, full):
+    """Recover receiver IDs before appending; always sync before cursor commit."""
+    try:
+        fd = sys.stdout.fileno()
+    except (io.UnsupportedOperation, AttributeError):
+        fd = None  # In-memory/test receivers have no kernel durability boundary.
+    regular = fd is not None and stat.S_ISREG(os.fstat(fd).st_mode)
+    sys.stdout.flush()
+    delivered, partial = wait_receiver_ids(fd) if regular else (set(), False)
+    for row in hits:
+        if row['id'] not in delivered:
+            prefix = '\n' if partial else ''
+            # Reserve marker-shaped lines for framing, even inside full bodies.
+            body = '\n'.join(' '+part if WAIT_RECEIVER_END.fullmatch(part) else part
+                             for part in line(row, full=full).split('\n'))
+            # Buffer the body and completion marker together before flushing;
+            # a torn write without the final marker remains eligible for replay.
+            sys.stdout.write(f"{prefix}{body}\n-- end {row['id']}\n")
+            partial = False
+            delivered.add(row['id'])
+    sys.stdout.flush()
+    if regular:
+        os.fsync(fd)  # A failed receiver sync must leave the cursor unchanged.
+
+
 def dispatch(o):
+    if o.cmd == 'wait' and o.timeout is None:
+        o.timeout = 0 if o.persistent else 240
     if o.cmd == 'reply':
         original = next((r for r in read() if r.get('id') == o.id), None)
         if original is None:
@@ -855,6 +924,7 @@ def dispatch(o):
             print(f"refused: --state {','.join(sorted(bad))} is not one of {'/'.join(STATES)}", file=sys.stderr)
             sys.exit(2)
         cut = since(o.since) or now()
+        delivered = collections.deque(maxlen=4096)
         deadline = time.time() + o.timeout * 60
         while True:
             latest = {}
@@ -863,12 +933,15 @@ def dispatch(o):
                         and (not o.frm or r['frm'] == o.frm)):
                     latest[r['frm']] = r
             hits = sorted((r for r in latest.values() if r.get('state') in accept
-                           and parse_ts(r['ts']) >= cut), key=lambda r: r['ts'])
+                           and parse_ts(r['ts']) >= cut and r['id'] not in delivered), key=lambda r: r['ts'])
             if hits:
                 r = hits[0]
-                print(f"BUS_STATE {o.subject} {r['state']} from={r['frm']} ts={r['ts']} id={r.get('id', '')}")
-                sys.exit(4 if r['state'] == 'FAILED' and accept != {'FAILED'} else 0)  # only a FAILED-only wait succeeds on it
-            if time.time() >= deadline:
+                print(f"BUS_STATE {o.subject} {r['state']} from={r['frm']} ts={r['ts']} id={r.get('id', '')}", flush=True)
+                if o.persistent:
+                    delivered.append(r['id'])
+                else:
+                    sys.exit(4 if r['state'] == 'FAILED' and accept != {'FAILED'} else 0)  # only a FAILED-only wait succeeds on it
+            if not (o.persistent and o.timeout == 0) and time.time() >= deadline:
                 print(f"BUS_WAIT timeout subject={o.subject} states={','.join(sorted(accept))}"); sys.exit(3)
             time.sleep(o.poll)
     elif o.cmd == 'inbox' and o.unread:
@@ -886,8 +959,10 @@ def dispatch(o):
             for _, r in indexed:
                 if (r.get('kind') == 'signal' and r.get('signal') == o.signal and (not o.frm or r['frm'] == o.frm)
                         and not (cut and parse_ts(r['ts']) < cut)):
-                    print(f"BUS_SIGNAL {o.signal} from={r['frm']} ts={r['ts']} id={r.get('id', '')}"); return
-            if time.time() >= deadline:
+                    print(f"BUS_SIGNAL {o.signal} from={r['frm']} ts={r['ts']} id={r.get('id', '')}", flush=True)
+                    if not o.persistent:
+                        return
+            if not (o.persistent and o.timeout == 0) and time.time() >= deadline:
                 print(f'BUS_WAIT timeout signal={o.signal}'); sys.exit(3)
             time.sleep(o.poll)
             total, indexed = read_from(total) if total else read_from(0)
@@ -900,17 +975,33 @@ def dispatch(o):
         start = get_cursor(o.to, 'wait', None)
         if start is None: start = read_from(10 ** 12)[0]  # first wait: only messages from now on
         deadline = time.time() + o.timeout * 60
+        own_asks = collections.deque(maxlen=4096)
+        if o.own_asks:
+            # Seed only a bounded physical tail; the live set is capped as well.
+            from .usage import tail_lines
+            rows = [r for _, r in parse_lines(tail_lines(BUS, 1024 * 1024))] if BUS.exists() else []
+            own_asks.extend(r['id'] for r in rows if r['frm'] == o.to and r.get('kind') == 'ask')
         while True:
             total, indexed = read_from(start)
-            hits = [r for _, r in indexed if (r.get('orig_kind') or r.get('kind')) in kinds and r['frm'] != o.to
-                    and for_lane(r, o.to)]
-            if hits:
-                set_cursor(o.to, 'wait', total)
-                for r in hits: print(line(r, full=o.full))
+            if o.own_asks:
+                # The restart seed already holds this tail. Appending those ids again
+                # evicts older asks that are behind the cursor and cannot be reread.
+                for _, r in indexed:
+                    if r['frm'] == o.to and r.get('kind') == 'ask' and r['id'] not in own_asks:
+                        own_asks.append(r['id'])
+            hits = [(index, r) for index, r in indexed if r['frm'] != o.to and
+                    (((r.get('orig_kind') or r.get('kind')) in kinds and for_lane(r, o.to))
+                     or r.get('re') in own_asks)]
+            for index, row in hits:
+                deliver_wait_hits([row], o.full)
+                # Limit crash recovery to the last delivery, even for a batch
+                # whose output would exceed the bounded receiver tail.
+                set_cursor(o.to, 'wait', index + 1)
+            set_cursor(o.to, 'wait', total)
+            if hits and not o.persistent:
                 return
             start = total
-            set_cursor(o.to, 'wait', total)
-            if time.time() >= deadline:
+            if not (o.persistent and o.timeout == 0) and time.time() >= deadline:
                 print(f'BUS_WAIT timeout {o.to} kinds={",".join(sorted(kinds))}'); sys.exit(3)
             time.sleep(o.poll)
     elif o.cmd in ('inbox', 'tail'):

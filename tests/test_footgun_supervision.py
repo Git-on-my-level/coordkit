@@ -147,13 +147,13 @@ class SupervisionTests(FakeCase):
         import sys
         from coordkit.process import run
         pidfile=self.root/'tool.pid'
-        # The child signals only after writing its identity. This removes a race
-        # where the timer expired during an earlier fake card lookup, while still
-        # exercising real signal delivery and process-group termination/reaping.
-        code="import os,sys,signal; open(sys.argv[1],'w').write(str(os.getpid())); os.kill(int(sys.argv[2]),signal.SIGALRM); signal.pause()"
+        # communicate writes the handshake only after Popen returns. Signalling
+        # earlier can interrupt process construction instead of the nested call
+        # this test exercises. Keep real signal delivery and the reaping assertion.
+        code="import os,sys,signal; sys.stdin.read(1); open(sys.argv[1],'w').write(str(os.getpid())); os.kill(int(sys.argv[2]),signal.SIGALRM); signal.pause()"
         self.manifest.loop.max_age='30s'
         def nested(manifest):
-            return run([sys.executable,'-S','-c',code,str(pidfile),str(os.getpid())],timeout=2).stdout
+            return run([sys.executable,'-S','-c',code,str(pidfile),str(os.getpid())],stdin='ready',timeout=2).stdout
         try:
             with patch.object(loop,'snapshot',side_effect=nested):
                 self.assertEqual(self.quiet(loop.run_cycle,self.manifest,'audit'),1)

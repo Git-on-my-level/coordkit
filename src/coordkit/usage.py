@@ -3,23 +3,16 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
+import os
+from itertools import islice
 from pathlib import Path
-import re
+from .identity import encoded_cwd, transcript_dir
 
 TOKEN_FIELDS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')
 
 
 def _count(value):
     return value if type(value) is int and value >= 0 else 0
-
-
-def encoded_cwd(cwd):
-    """The harness project key replaces non-ASCII-alphanumeric path characters."""
-    return re.sub(r'[^a-zA-Z0-9]', '-', str(cwd))
-
-
-def transcript_dir(lane):
-    return Path(lane.config_dir).expanduser() / 'projects' / encoded_cwd(lane.cwd)
 
 
 def transcript_sources(lane):
@@ -40,6 +33,7 @@ def timestamp(value):
 
 @dataclass
 class Usage:
+    truncated: bool = False
     turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -60,11 +54,55 @@ class Usage:
     last_compact_post: int = 0
 
 
-def jsonl_paths(source):
+MAX_FILES = 128
+MAX_ENTRIES = 2048
+TAIL_BYTES = 2 * 1024 * 1024
+TOTAL_BYTES = 16 * 1024 * 1024
+
+
+def tail_lines(path, limit, *, complete=True):
+    """Read complete physical rows from a bounded byte tail, dropping a partial prefix."""
+    with Path(path).open('rb') as stream:
+        size = stream.seek(0, 2)
+        offset = max(0, size - limit)
+        stream.seek(max(0, offset - 1))
+        boundary = not offset or stream.read(1) == b'\n'
+        stream.seek(offset)
+        data = stream.read(limit)
+    lines = data.split(b'\n')
+    if complete or not lines[-1]:
+        lines = lines[:-1]
+    if offset and not boundary:
+        lines = lines[1:]
+    return [line.decode('utf-8', errors='replace') for line in lines]
+
+
+def jsonl_paths(source, *, status=None):
+    """Bound traversal work as well as returned files; never follow directory symlinks."""
     path = Path(source)
     if path.is_file():
         return [path]
-    return list(path.rglob('*.jsonl')) if path.is_dir() else []
+    paths, pending, remaining = [], [(path, 0)], MAX_ENTRIES
+    while pending and remaining > 0 and len(paths) < MAX_FILES:
+        directory, depth = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in islice(entries, remaining):
+                    remaining -= 1
+                    if entry.is_file(follow_symlinks=False) and entry.name.endswith('.jsonl'):
+                        paths.append(Path(entry.path))
+                        if len(paths) >= MAX_FILES:
+                            break
+                    elif entry.is_dir(follow_symlinks=False):
+                        if depth < 8:
+                            pending.append((Path(entry.path), depth + 1))
+                        elif status is not None:
+                            status['truncated'] = True
+        except OSError:
+            continue
+    if status is not None and (pending or remaining == 0 or len(paths) >= MAX_FILES):
+        status['truncated'] = True
+    return paths
 
 
 def parse_transcripts(sources, since, until):
@@ -77,53 +115,63 @@ def parse_transcripts(sources, since, until):
     """
     messages, invalid, unreadable = {}, 0, 0
     compacts = []
-    paths = sorted({p for source in sources for p in jsonl_paths(source)})
-    for path in paths:
+    status = {}
+    selected = list(islice(sources, MAX_FILES + 1))
+    paths = sorted({p for source in selected[:MAX_FILES] for p in jsonl_paths(source, status=status)})
+    truncated = bool(status.get('truncated')) or len(paths) > MAX_FILES or len(selected) > MAX_FILES
+    remaining = TOTAL_BYTES
+    for path in paths[:MAX_FILES]:
         try:
-            with path.open(encoding='utf-8', errors='replace') as stream:
-                for line_number, line in enumerate(stream):
-                    try:
-                        row = json.loads(line)
-                    except ValueError:
-                        invalid += 1
-                        continue
-                    if isinstance(row, dict) and row.get('type') == 'system' and row.get('subtype') == 'compact_boundary':
-                        meta = row.get('compactMetadata') if isinstance(row.get('compactMetadata'), dict) else {}
-                        stamp = timestamp(row.get('timestamp'))
-                        if stamp is not None:
-                            compacts.append((stamp, _count(meta.get('preTokens')), _count(meta.get('postTokens'))))
-                        continue
-                    if not isinstance(row, dict) or row.get('type') != 'assistant':
-                        continue
-                    msg = row.get('message')
-                    if not isinstance(msg, dict):
-                        continue
-                    at = timestamp(row.get('timestamp'))
-                    if at is None:
-                        invalid += 1
-                        continue
-                    # IDs are unique within a scanned lane scope, across parent and subagent files.
-                    key = msg.get('id') or row.get('uuid') or (str(path), line_number)
-                    if not isinstance(key, (str, tuple)):
-                        invalid += 1
-                        continue
-                    usage = msg.get('usage')
-                    valid = isinstance(usage, dict) and any(k in usage for k in TOKEN_FIELDS)
-                    counters = {k: v if type(v := (usage or {}).get(k)) is int and v >= 0 else 0
-                                for k in TOKEN_FIELDS} if isinstance(usage, dict) else dict.fromkeys(TOKEN_FIELDS, 0)
-                    model = msg.get('model') if isinstance(msg.get('model'), str) else ''
-                    if key not in messages:
-                        messages[key] = dict(at=at, model=model, usage=counters, valid=valid)
-                    else:
-                        previous = messages[key]
-                        for k in TOKEN_FIELDS:
-                            previous['usage'][k] = max(previous['usage'][k], counters[k])
-                        previous['valid'] |= valid
-                        if at >= previous['at']:
-                            previous.update(at=at, model=model or previous['model'])
+            limit = min(TAIL_BYTES, remaining)
+            if limit <= 0:
+                truncated = True
+                break
+            size = path.stat().st_size
+            truncated |= size > limit
+            remaining -= min(size, limit)
+            for line_number, line in enumerate(tail_lines(path, limit, complete=False)):
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    invalid += 1
+                    continue
+                if isinstance(row, dict) and row.get('type') == 'system' and row.get('subtype') == 'compact_boundary':
+                    meta = row.get('compactMetadata') if isinstance(row.get('compactMetadata'), dict) else {}
+                    stamp = timestamp(row.get('timestamp'))
+                    if stamp is not None:
+                        compacts.append((stamp, _count(meta.get('preTokens')), _count(meta.get('postTokens'))))
+                    continue
+                if not isinstance(row, dict) or row.get('type') != 'assistant':
+                    continue
+                msg = row.get('message')
+                if not isinstance(msg, dict):
+                    continue
+                at = timestamp(row.get('timestamp'))
+                if at is None:
+                    invalid += 1
+                    continue
+                # IDs are unique within a scanned lane scope, across parent and subagent files.
+                key = msg.get('id') or row.get('uuid') or (str(path), line_number)
+                if not isinstance(key, (str, tuple)):
+                    invalid += 1
+                    continue
+                usage = msg.get('usage')
+                valid = isinstance(usage, dict) and any(k in usage for k in TOKEN_FIELDS)
+                counters = {k: v if type(v := (usage or {}).get(k)) is int and v >= 0 else 0
+                            for k in TOKEN_FIELDS} if isinstance(usage, dict) else dict.fromkeys(TOKEN_FIELDS, 0)
+                model = msg.get('model') if isinstance(msg.get('model'), str) else ''
+                if key not in messages:
+                    messages[key] = dict(at=at, model=model, usage=counters, valid=valid)
+                else:
+                    previous = messages[key]
+                    for k in TOKEN_FIELDS:
+                        previous['usage'][k] = max(previous['usage'][k], counters[k])
+                    previous['valid'] |= valid
+                    if at >= previous['at']:
+                        previous.update(at=at, model=model or previous['model'])
         except OSError:
             unreadable += 1
-    result = Usage(invalid_rows=invalid, unreadable_files=unreadable)
+    result = Usage(invalid_rows=invalid, unreadable_files=unreadable, truncated=truncated)
     ordered = sorted(messages.values(), key=lambda item: item['at'])
     if ordered:
         newest = ordered[-1]['usage']

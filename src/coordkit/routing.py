@@ -173,7 +173,7 @@ def identity_sources(manifest, name, env=None, *, stored=None):
     from pathlib import Path
     from .identity import home as questions_home
     from .state import name_key
-    from .usage import transcript_dir
+    from .identity import transcript_dir
     env = os.environ if env is None else env
     sessions = read_json(questions_home(manifest)/'sessions.json', {}) or {}
     bindings = [dict(binding, session_id=session) for session, binding in sessions.items()
@@ -250,15 +250,15 @@ def identity_pid(record):
 
 
 def probe_identity(record):
-    import subprocess
-    from .adapters import claude_resume
-    from .process import ToolError
     out = dict(record)
     for key in ('pid', 'pid_started'):
         out.pop(key, None)
     from pathlib import Path
     if not out.get('transcript_path') or not Path(out['transcript_path']).is_file():
         return out
+    import subprocess
+    from .adapters import claude_resume
+    from .process import ToolError
     try:
         result = claude_resume.probe([claude_resume.lsof_binary(), '-nP', '-t', '--', out['transcript_path']])
         pids = result.stdout.split()
@@ -316,7 +316,7 @@ def register_activity(manifest, name, via, *, env=None):
 def refresh_identity(manifest, name):
     """Hook heartbeat, bounded and throttled; does not register never-seen names."""
     import time
-    from .manifest import duration
+    from .duration import duration
     if internal_name(manifest, name):
         return
     with locked(home(manifest)/'register.lock'):

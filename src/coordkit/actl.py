@@ -1,6 +1,7 @@
 """Agentctl wrapper: selectors come exclusively from manifest pools."""
 import json
 import os
+import socket
 from .manifest import ManifestError, duration
 from .process import ToolError, call_json, is_schema, run
 
@@ -8,6 +9,12 @@ from .process import ToolError, call_json, is_schema, run
 # The agentctl envelope version this client was written against. agentctl prints
 # schema_version 1 on every success and error document.
 AGENTCTL_SCHEMA_VERSION = 1
+
+
+def subscription_key(entry):
+    """An execution may need several distinct callback filter sets."""
+    return json.dumps([entry['execution_id'], sorted(set(entry.get('kinds', ['terminal', 'attention'])))],
+                      separators=(',', ':'))
 
 
 class AgentctlClient:
@@ -67,13 +74,44 @@ class AgentctlClient:
             return None
         return key.startswith(self.manifest.agentctl.request_key_prefix + "-")
 
-    def subscribe(self, execution):
+    def subscribe(self, execution, *, kinds=('terminal', 'attention')):
         self.manifest.writable()
         path = self.manifest.paths.events
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.parent.chmod(0o700)
         return self.call("subscribe", "create", "--execution", execution, "--destination", "file",
-                         "--target", path, "--kind", "terminal", "--kind", "attention", "--ttl", "72h")
+                         "--target", path, *[arg for kind in kinds for arg in ("--kind", kind)], "--ttl", "72h")
+
+    def lane_subscriptions(self):
+        """Snapshot execution callbacks for this host-local event sink, including expired rows.
+
+        Expired subscriptions still belong in a move inventory: moving must renew their TTL.
+        A different host must list and recreate callbacks through its own agentctl authority.
+        """
+        result = self.call('subscribe', 'list')
+        rows = result.get('subscriptions') if isinstance(result, dict) else None
+        if not isinstance(rows, list) or len(rows) > 4096:
+            raise ToolError(self.binary, 6, 'invalid or oversized subscription list', 'protocol_error')
+        entries = {}
+        for row in rows:
+            destination, filters = row.get('destination', {}), row.get('filter', {})
+            if (destination.get('kind') != 'file' or destination.get('path') != str(self.manifest.paths.events)
+                    or row.get('state') == 'cancelled'):
+                continue
+            executions = filters.get('execution_ids', [])
+            if not isinstance(executions, list) or not executions:
+                raise ToolError(self.binary, 6, 'non-execution callback requires explicit migration', 'protocol_error')
+            for execution in executions:
+                item = dict(execution_id=execution, subscription_id=row.get('id'),
+                                          source_host=socket.gethostname(), authority_host=row.get('origin_host_id'),
+                                          target=destination['path'], expires_at=row.get('expires_at'),
+                                          kinds=filters.get('kinds', []), state=row.get('state'), ttl='72h')
+                key = subscription_key(item)
+                previous = entries.get(key, {})
+                if (item['state'] == 'active', item['expires_at'] or '') >= (
+                        previous.get('state') == 'active', previous.get('expires_at') or ''):
+                    entries[key] = item
+        return list(entries.values())
 
     def await_result(self, execution, timeout="30m", ignore_attention=False):
         self.manifest.writable()

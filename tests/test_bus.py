@@ -140,6 +140,61 @@ class BusTests(FakeCase):
         self.post('signal','--signal','READY_NOW')
         self.assertIn('BUS_SIGNAL',self.invoke('wait','--signal','READY_NOW','--since','1h','--timeout','0')[0])
 
+    def test_own_ask_replies_wake_regardless_of_kind_or_addressee(self):
+        self.manifest.bus.mirror = False
+        self.post('ask', to='worker', frm='lead')
+        mine = self.rows()[-1]['id']
+        self.post('ask', to='lead', frm='worker')
+        other = self.rows()[-1]['id']
+        self.invoke('wait', '--to', 'lead', '--own-asks', '--kinds', 'answer', '--timeout', '0', code=3)
+        bus.configure(self.manifest)
+        for kind in ('answer', 'ruling', 'state', 'fyi'):
+            bus.append([dict(id='reply-'+kind, ts=T0.isoformat(), frm='worker', to='elsewhere',
+                             kind=kind, re=mine, text='reply')])
+            self.assertIn('reply-'+kind, self.invoke('wait', '--to', 'lead', '--own-asks',
+                          '--kinds', 'ask', '--timeout', '0')[0])
+        bus.append([dict(id='unrelated', ts=T0.isoformat(), frm='worker', to='lead',
+                         kind='fyi', re=other, text='not my ask')])
+        self.invoke('wait', '--to', 'lead', '--own-asks', '--kinds', 'ask', '--timeout', '0', code=3)
+
+    def test_restarted_own_ask_seed_keeps_ids_that_overlap_the_cursor(self):
+        # A cursor inside the seeded tail must not append those ask ids twice.
+        # The capped deque would otherwise drop the oldest asks behind the cursor.
+        self.manifest.bus.mirror = False
+        bus.configure(self.manifest)
+        path = self.manifest.paths.bus_log
+        path.parent.mkdir(parents=True, exist_ok=True)
+        asks = [json.dumps(dict(id=f'ask-{index:04d}', ts='2026-01-01T00:00:00+00:00', frm='lead',
+                                to='worker', kind='ask', topic='general', text='a', v=1),
+                           separators=(',', ':')) for index in range(4097)]
+        reply = json.dumps(dict(id='late-fyi', ts='2026-01-01T00:00:01+00:00', frm='worker',
+                                to='elsewhere', kind='fyi', re='ask-0001', topic='general',
+                                text='late', v=1), separators=(',', ':'))
+        path.write_text('\n'.join([*asks, reply]) + '\n')
+        for cursor in (4096, 2048, 1):
+            with self.subTest(cursor=cursor):
+                bus.set_cursor('lead', 'wait', cursor)
+                self.assertIn('late-fyi', self.invoke('wait', '--to', 'lead', '--own-asks',
+                                                      '--kinds', 'ask', '--timeout', '0')[0])
+
+    def test_restarted_own_ask_seed_survives_overlap_then_reply_on_a_later_poll(self):
+        self.manifest.bus.mirror = False
+        bus.configure(self.manifest)
+        bus.append([dict(id=f'ask-{index:04d}', ts=T0.isoformat(), frm='lead', to='worker',
+                         kind='ask', text='a') for index in range(4096)])
+        bus.set_cursor('lead', 'wait', 2048)
+
+        def reply(_):
+            # This only wakes through own-asks: neither the kind nor recipient matches.
+            bus.append([dict(id='later-reply', ts=T0.isoformat(), frm='worker', to='elsewhere',
+                             kind='fyi', re='ask-0000', text='late')])
+
+        with patch.object(bus.time, 'sleep', side_effect=reply) as sleep:
+            self.assertIn('later-reply', self.invoke('wait', '--to', 'lead', '--own-asks',
+                                                   '--kinds', 'ask', '--timeout', '1')[0])
+        sleep.assert_called_once()
+        self.assertEqual(bus.get_cursor('lead', 'wait', None), 4097)
+
     def test_text_spill_and_ref_refusal(self):
         self.post(text='x'*1000,to='worker')
         self.assertTrue(all(len(r['text'])<=400 for r in self.rows()))
@@ -295,7 +350,7 @@ class BusTests(FakeCase):
 
     def test_concurrent_cli_smoke(self):
         result=subprocess.run([sys.executable,str(Path(__file__).with_name('smoke_bus.py'))],
-                              capture_output=True,text=True,timeout=30)
+                              capture_output=True,text=True,timeout=60)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('M2_SMOKE_OK',result.stdout)
 

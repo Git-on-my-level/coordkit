@@ -24,15 +24,55 @@ class Refusal(ToolError):
         super().__init__('lane', 9, detail, reason)
 
 
-def event(manifest, row):
+def event(manifest, row, *, once=False):
+    """Append a standalone, synced, verified row; optionally deduplicate its ID."""
     manifest.writable()
     path = manifest.paths.events
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as stream:
+    with path.open('a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
-        stream.write(json.dumps(dict(ts=dt.datetime.now(dt.timezone.utc).isoformat(), **row))+'\n')
+        end = stream.seek(0, os.SEEK_END)
+        if end:
+            stream.seek(-1, os.SEEK_END)
+            if stream.read(1) != b'\n':
+                # Preserve the interrupted writer's bytes, but fence them off from
+                # this receipt. Coordkit writers share this lock and repair;
+                # agentctl callbacks append independently.
+                stream.write(b'\n')
+                stream.flush()
+                print('warning: newline-terminated torn lane event tail', file=sys.stderr)
+        if once:
+            from .usage import tail_lines
+            recorded, malformed = False, 0
+            for line in tail_lines(path, 1024 * 1024):
+                try:
+                    parsed = json.loads(line)
+                except ValueError:
+                    malformed += 1
+                    continue
+                if not isinstance(parsed, dict):
+                    malformed += 1
+                    continue
+                if parsed.get('id') == row['id'] and all(parsed.get(k) == v for k, v in row.items()):
+                    recorded = True
+            if malformed:
+                print(f'warning: skipped {malformed} malformed lane event row(s)', file=sys.stderr)
+            if recorded:
+                os.fsync(stream.fileno())  # Also commit any tail repair before phase completion.
+                return
+        value = dict(ts=dt.datetime.now(dt.timezone.utc).isoformat(), **row)
+        payload = (json.dumps(value)+'\n').encode('utf-8')
+        stream.write(payload)
         stream.flush()
+        # O_APPEND sets this descriptor's position to the end of its own write.
+        # A callback on another descriptor can append before or after us without
+        # changing that position. A pre-write EOF snapshot is not our offset.
+        offset = stream.tell() - len(payload)
         os.fsync(stream.fileno())
+        stream.seek(offset)
+        appended = stream.read(len(payload))
+        if appended != payload or json.loads(appended) != value:
+            raise Refusal('event_append_unverified', str(path))
 
 
 def handoff_actor(manifest):

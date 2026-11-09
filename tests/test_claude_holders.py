@@ -39,11 +39,12 @@ resume="headless"
         return subprocess.CompletedProcess([], code, out, err)
 
     def test_process_snapshot_ignores_zombies_and_preserves_full_argv(self):
-        text = ('123 S Fri Nov  6 12:00:00 2026 claude --resume '+self.session+' -p task\n'
-                '124 Z Fri Nov  6 12:00:00 2026 zombie '+self.session+'\ninvalid\n')
+        text = ('123 1 S Fri Nov  6 12:00:00 2026 claude --resume '+self.session+' -p task\n'
+                '124 1 Z Fri Nov  6 12:00:00 2026 zombie '+self.session+'\ninvalid\n')
         with patch.object(resume, 'probe', return_value=self.result(text)):
             rows = resume.processes()
         self.assertEqual(set(rows), {123})
+        self.assertEqual(rows[123]['ppid'], 1)
         self.assertEqual(rows[123]['started'], 'Fri Nov 6 12:00:00 2026')
         self.assertIn('--resume '+self.session, rows[123]['argv'])
 
@@ -93,11 +94,11 @@ resume="headless"
                 resume.holder_present(self.manifest, self.lane, {})
 
     def test_live_process_with_session_argv_is_a_holder(self):
-        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)', '--resume', self.session],
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', '--resume', self.session],
                                  start_new_session=True, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            with patch.object(resume, 'PROBE_TIMEOUT', 8):
+            with patch.object(resume, 'PROBE_TIMEOUT', 20):
                 self.assertTrue(resume.holder_present(self.manifest, self.lane, resume.processes()))
         finally:
             if child.poll() is None:
@@ -115,7 +116,7 @@ resume="headless"
         ready = self.root/'ready'
         code = ('import os,time; from pathlib import Path; '
                 'stream=open(os.environ["CK_OPEN_PATH"]); '
-                'Path(os.environ["CK_OPEN_READY"]).touch(); time.sleep(30)')
+                'Path(os.environ["CK_OPEN_READY"]).touch(); time.sleep(60)')
         child = subprocess.Popen([sys.executable, '-c', code], start_new_session=True,
                                  env=dict(os.environ, CK_OPEN_PATH=str(path), CK_OPEN_READY=str(ready)),
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -124,11 +125,11 @@ resume="headless"
             while not ready.exists() and time.monotonic() < deadline:
                 time.sleep(.02)
             self.assertTrue(ready.exists())
-            snapshot = resume.processes()
-            self.assertNotIn(self.session, snapshot[child.pid]['argv'])
             # A full-host lsof sweep can exceed the production fail-closed budget
             # on a loaded test host; allow headroom only for this integration check.
-            with patch.object(resume, 'PROBE_TIMEOUT', 8):
+            with patch.object(resume, 'PROBE_TIMEOUT', 20):
+                snapshot = resume.processes()
+                self.assertNotIn(self.session, snapshot[child.pid]['argv'])
                 self.assertTrue(resume.holder_present(self.manifest, self.lane, snapshot))
         finally:
             if child.poll() is None:

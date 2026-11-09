@@ -51,15 +51,16 @@ def probe(argv):
 
 
 def processes():
-    result = probe(['ps', '-axww', '-o', 'pid=,stat=,lstart=,args='])
+    result = probe(['ps', '-axww', '-o', 'pid=,ppid=,stat=,lstart=,args='])
     if result.returncode:
         raise ToolError('ps', result.returncode, 'holder_probe_failed')
     rows = {}
     for line in result.stdout.splitlines():
-        fields = line.split(None, 7)
-        if len(fields) != 8 or not fields[0].isdecimal() or 'Z' in fields[1]:
+        fields = line.split(None, 8)
+        if (len(fields) != 9 or not fields[0].isdecimal() or not fields[1].isdecimal()
+                or 'Z' in fields[2]):
             continue
-        rows[int(fields[0])] = {'started': ' '.join(fields[2:7]), 'argv': fields[7]}
+        rows[int(fields[0])] = {'ppid': int(fields[1]), 'started': ' '.join(fields[3:8]), 'argv': fields[8]}
     if not rows:
         raise ToolError('ps', 6, 'holder_probe_failed')
     return rows
@@ -119,6 +120,12 @@ def lsof_binary():
 def holder_present(manifest, lane, snapshot):
     if any(lane.session_id in row['argv'] for row in snapshot.values()):
         return True
+    return bool(transcript_holders(manifest, lane))
+
+
+def transcript_holders(manifest, lane):
+    """Return exact open-file PIDs as ancestry roots, including interactive sessions without --resume."""
+    holders = set()
     lsof = lsof_binary()
     for path in transcript_paths(manifest, lane):
         if not path.exists():
@@ -132,5 +139,5 @@ def holder_present(manifest, lane, snapshot):
                 or any(not pid.isdecimal() for pid in pids)):
             raise ToolError('lsof', result.returncode, 'lsof_probe_failed')
         if pids:
-            return True
-    return False
+            holders.update(map(int, pids))
+    return holders

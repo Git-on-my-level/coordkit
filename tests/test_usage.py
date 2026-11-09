@@ -153,3 +153,37 @@ class UsageTests(FakeCase):
             f.write('\n[[lanes]]\nname="worker"\nconfig_dir="account"\ncwd="repo"\nmodel="family"\neffort="high"\n'
                     'session_id="11111111-1111-4111-8111-111111111111"\n')
         self.assertEqual(load(self.file).lanes[0].session_id, '11111111-1111-4111-8111-111111111111')
+
+    def test_usage_tail_and_file_caps_report_incompleteness(self):
+        from unittest.mock import patch
+        from coordkit import usage as module
+        lane = self.lane()
+        path = self.write_rows(lane, [self.row(id='old'), self.row(id='recent')])
+        last = path.read_bytes().splitlines(keepends=True)[-1]
+        with patch.object(module, 'TAIL_BYTES', len(last)):
+            reading = self.parse(lane)
+        self.assertEqual(reading.turns, 1)
+        self.assertTrue(reading.truncated)
+        directory = path.parent/'agents'
+        directory.mkdir()
+        for number in range(4):
+            (directory/f'{number}.jsonl').write_bytes(last)
+        status = {}
+        with patch.object(module, 'MAX_FILES', 2):
+            self.assertEqual(len(module.jsonl_paths(directory, status=status)), 2)
+        self.assertTrue(status['truncated'])
+
+    def test_own_ask_seed_reads_only_bounded_bus_tail(self):
+        from unittest.mock import patch
+        from coordkit import bus
+        from coordkit.ops import bus_parser
+        bus.configure(self.manifest)
+        bus.BUS.parent.mkdir(parents=True, exist_ok=True)
+        bus.BUS.write_text('{}\n')
+        options = bus_parser().parse_args(['wait', '--to', 'worker', '--own-asks', '--timeout', '0'])
+        with patch.object(bus, 'read', side_effect=AssertionError('full history read forbidden')), patch(
+                'coordkit.routing.register_activity'), patch.object(bus, 'get_cursor', return_value=0), patch.object(
+                bus, 'read_from', return_value=(0, [])), patch.object(bus, 'set_cursor'), patch(
+                'coordkit.usage.tail_lines', return_value=[]) as tail, self.assertRaises(SystemExit):
+            bus.dispatch(options)
+        tail.assert_called_once_with(bus.BUS, 1024 * 1024)

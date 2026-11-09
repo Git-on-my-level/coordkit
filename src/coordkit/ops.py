@@ -88,12 +88,15 @@ BUS_OPS = (
         Arg('--full', action='store_true', help='complete message bodies'),
         Arg('--to', help='lane to wait for (required unless --signal)'),
         Arg('--kinds', default=WAKE_KINDS),
+        Arg('--persistent', action='store_true', help='keep consuming after matches; --timeout 0 runs until operator exit'),
+        Arg('--own-asks', action='store_true', default=True, help='wake on any kind of reply (--re) to this lane\'s own asks (default on)'),
+        Arg('--no-own-asks', dest='own_asks', action='store_false', help='disable own-ask replies for a filtered additional waiter'),
         Arg('--signal', help='wait for a kind=signal post with this signal name (text is never matched)'),
         Arg('--from', dest='frm', help='with --signal/--subject: only from this poster'),
         Arg('--since', help='with --signal/--subject: also accept posts in this window (e.g. 30m); default from now'),
         Arg('--subject', help='wait for a kind=state post about this subject (text is never matched)'),
         Arg('--state', help='with --subject: comma-separated states to accept (default DONE,FAILED)'),
-        Arg('--timeout', type=float, default=240, help='minutes'),
+        Arg('--timeout', type=float, default=None, help='minutes; default unlimited with --persistent, 240 otherwise'),
         Arg('--poll', type=float, default=15, help='seconds'),
     ), 'ops:bus_call'),
     Operation('bus.state', 'read', (
@@ -271,12 +274,12 @@ def mcp_call(manifest, args):
 
 COMMANDS = {
     'stock': 'stock', 'accounts': 'accounts', 'relay': 'relay', 'bus': 'bus', 'sweep': 'addressed', 'mcp-serve': 'mcp_server', 'mcp-clients': 'mcp_server', 'deliver': 'deliver',
-    'lane': 'lane', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
+    'lane': 'lane', 'lane-move': 'lanemove', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
     'obligations': 'obligations', 'review': 'review', 'question': 'questions',
     'init': 'lifecycle', 'up': 'lifecycle', 'down': 'lifecycle', 'doctor': 'lifecycle', 'lead': 'lifecycle',
     'ops': 'ops', 'version': 'ops', 'retire': 'wake', 'unretire': 'wake', 'wake-scan': 'wake', 'hooks': 'hooks', 'update': 'selfupdate', 'mcp': 'mcp_install',
 }
-OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down','relay','mcp-clients') else 'read',
+OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down','relay','lane-move','mcp-clients') else 'read',
                                                 handler=module+(':clients_main' if name == 'mcp-clients' else ':main')) for name,module in COMMANDS.items() if name != 'bus')
 
 
@@ -315,6 +318,13 @@ def main(argv, manifest=None):
 # in their adapters until those entry points can be retired independently.
 CLI_ARGS = {
     'accounts': (Arg('--json', action='store_true'),),
+    'lane-move': (Arg('name'), Arg('--to-config', required=True),
+                  Arg('--plan', action='store_true', group='mode'),
+                  Arg('--apply', action='store_true', group='mode'),
+                  Arg('--no-rearm', action='store_true', help='verify recorded re-arms without starting them (operator exception)'),
+                  Arg('--timeout', type=int, default=60, help='holder/re-arm deadline in seconds (default 60)'),
+                  Arg('--idle-seconds', type=int, default=10, help='minimum transcript quiet age (default 10)')),
+
     'stock': (Arg('--full', action='store_true'),),
     'init': (Arg('project'), Arg('--profile', choices=('minimal','anx'), default='minimal'),
              Arg('--workspace',default='anx'), Arg('--board'), Arg('--git-repo')),

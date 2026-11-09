@@ -260,7 +260,7 @@ row('wake.py', 'state/wakes/scan.json|writer:scan', 'scan of rows written outsid
 row('mcp_install.py', 'mcp-service.json|mcp/stdout.log|mcp/stderr.log|writer:main', 'explicit mcp install', 'mcp uninstall or lifecycle down', 'persistent service; existing credentials only, never recreated after retirement', 'secret validation and manager failure')
 row('lifecycle.py', 'mcp-service.json', 'MCP installation receipt', 'explicit uninstall or down', 'persistent managed service', 'doctor loaded-job drift')
 row('selfupdate.py', 'mcp-service.json', 'registered managed MCP service', 'explicit uninstall', 'update only reconciles owned jobs', 'service manager failure restores active release pointer')
-row('identity.py', 'state|questions|sessions.json', 'explicit session binding lookup', 'read-only snapshot', 'bounded transcript prefix for delivery', 'unknown identity produces no delivery')
+row('identity.py', 'state|questions|sessions.json|projects', 'explicit session binding lookup', 'read-only snapshot', 'bounded transcript prefix for delivery', 'unknown identity produces no delivery')
 row('routing.py', 'state|addressed|register.json|register.lock|hooks|sessions.json|projects|.json|.jsonl|writer:store_identity', 'first local post/wait/ack, roster observation within 24h, or registered hook heartbeat', 'explicit retire or manual removal; locks release; retained local rows can be observed again after removal', 'observation writes once per missing entry; heartbeat refresh throttled by heartbeat_every; observed provenance persists without extending liveness', 'deaf sweep as for any registered name; optional metadata fails open; identity-only caches never gain observed routing')
 row('state.py', 'writer:write_json', 'atomic JSON replacement', 'rename or failed-temp cleanup', 'bounded caller operation; new files private', 'caller receives write or serialization failure')
 row('state.py', 'writer:_replace_json|writer:update_json', 'hashed settings transformation under sibling lock', 'replace and receipt finalization or one re-merge then conflict', 'two attempts; kernel releases the lock on exit', 'settings_update_conflict preserves the latest edit')
@@ -294,6 +294,39 @@ row('selfupdate.py', 'relay/service.json', 'update reconciles explicitly install
     'explicit relay uninstall or down', 'only owned services may be reinstalled',
     'manager failure triggers existing update rollback')
 
+row('lanemove.py', 'plan:before_reading|plan:manifest_input_sha256|.json|.jsonl|.lock|.manifest.bak|.resume.log|.wait|hooks|lane-moves|state|state/cursors|plan:after_reading|plan:attention|plan:copy_sha256|plan:copy_verified_at|plan:launch|plan:manifest_after_sha256|plan:manifest_backup|plan:manifest_before_sha256|plan:operator_command|plan:phase|plan:resume_requested_at|plan:waiter_was_armed|writer:atomic_bytes|writer:save',
+    'explicit lane-move plan saves intent; apply saves checksums, backup and launch intent before effects',
+    'retry same lane and destination rolls forward; done receipts and original sessions remain; kernel releases locks',
+    'holder and re-arm polls have a command deadline; ambiguous launch never repeats; no automatic retention deletion',
+    'open obligations or holders refuse; timeout posts one attention ask per cause; changed files refuse without overwrite')
+row('lanemove.py', '.log|.move-state.json|.rearm-|plan:holders|plan:move_state|plan:move_state_file|plan:rearm_outcomes|plan:resume_verified_at|state:observed_holders|state:waiters|writer:move_state|writer:final_state',
+    'freeze writes editable restart inventory and records process identities; final-state seals recipes before copy',
+    'quiesce waits for recorded descendants; re-arm records intent, process identity and verification per recipe',
+    'command timeout bounds polls; persistent waiter lifetime belongs to operator; uncertain spawn never repeats',
+    'unconfirmed or incomplete inventory refuses; surviving children block; missing re-arm evidence leaves attention receipt')
+
+row('lanemove.py', 'private-lane-moves|.local/state/coordkit/private-lane-moves|plan:subscription_outcomes|plan:version|lane-move-summaries|.verify-|id|pid|.wait.lock|.wait.owner.json|writer:private_json|writer:publish',
+    'explicit move writes private receipts outside ref roots and atomically creates one allowlisted summary per publication ID',
+    'done retains private audit and immutable summaries; replays reuse original summary content; subscription and verifier intents never repeat uncertain creation',
+    '128 receipts and 1 MiB each; command deadline polls without signalling slow children; callbacks expire after 72h',
+    'overlapping roots, duplicate cursor owners, incomplete callbacks or readiness leave move incomplete')
+row('bus.py', '.wait.owner.json|writer:_main', 'exclusive lane waiter acquires nonblocking cursor lock',
+    'kernel releases ownership on process exit; next owner replaces identity note',
+    'note is evidence only with matching PID/start time and fresh cursor; persistent timeout 0 is operator-managed',
+    'duplicate waiters refuse without consuming; stale notes never establish process liveness')
+row('bus.py', '-- end <id>', 'wait buffers body and newline-terminated completion marker together',
+    'receiver fsync precedes cursor commit; marker retained with append-only log',
+    'dedupe reads the last 1 MiB; missing or torn markers replay the delivery',
+    'receiver sync failure leaves cursor unchanged; no marker means no completion')
+row('rearmcheck.py', 'writer:main', 'readiness wrapper runs recorded argv without a killing timeout',
+    'writes PID and exit result on normal completion; caller collects on next poll',
+    'caller deadline bounds observation only; an unresolved verifier intent requires inspection',
+    'failed or absent result never verifies readiness or triggers another launch')
+
+row('lanemove.py', 'plan:waiter_restart_count', 'completed move detects a dead or reused waiter identity',
+    'receipt-first recovery replaces only the required lane waiter and re-verifies it',
+    'caller timeout bounds recovery polling; uncertain identities never respawn',
+    'ambiguous live identity or missing readiness refuses completion')
 row('stock.py', 'stock-last.json|.lock|writer:report', 'stock report compares count and stable oldest-item timestamp',
     'atomic replacement on every successful report; remove to reset the diff baseline',
     'one snapshot per local root, serialized by its sibling lock', 'read/write errors fail the report')

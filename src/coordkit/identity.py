@@ -1,6 +1,7 @@
 """Explicit session identity shared by delivery and question adapters."""
 import os
 import re
+from pathlib import Path
 from .state import read_json
 
 BUS_NAME = re.compile(r'bus name is\W{0,4}([A-Za-z0-9][A-Za-z0-9_.-]{1,63})', re.I)
@@ -35,4 +36,14 @@ def asker_for(manifest, session_id, transcript_path=None, env=None, *, transcrip
             pass
     return f'unknown-{(session_id or "nosession")[:8]}', 'unknown'
 
+
+
+
+def encoded_cwd(cwd):
+    """The harness project key replaces non-ASCII-alphanumeric path characters."""
+    return re.sub(r'[^a-zA-Z0-9]', '-', str(cwd))
+
+
+def transcript_dir(lane):
+    return Path(lane.config_dir).expanduser() / 'projects' / encoded_cwd(lane.cwd)
 

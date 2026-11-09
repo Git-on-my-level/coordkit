@@ -243,3 +243,20 @@ class RosterReviewTests(AddressedCase):
             routing.refresh_identity(self.manifest, 'lead-a')
             probe.assert_called_once()
         self.assertEqual(self.register()['lead-a']['identity']['pid'], 99)
+
+    def test_hook_identity_without_a_transcript_does_not_import_orchestration(self):
+        # Optional identity refresh must preserve the lightweight cold-hook boundary.
+        code = '''import json, sys
+from coordkit.cli import main
+main(sys.argv[1:])
+print(json.dumps(sorted(set(sys.modules) & {
+    'coordkit.manifest', 'coordkit.usage', 'coordkit.adapters.claude_resume'})), file=sys.stderr)
+'''
+        self.incumbent_row('anchor', 'sender', 'lead-a')
+        result = subprocess.run([sys.executable, '-c', code, '--manifest', str(self.file), 'deliver', '--hook'],
+                                input=json.dumps(dict(hook_event_name='PostToolUse', session_id='s1')),
+                                text=True, capture_output=True, timeout=10,
+                                env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]/'src'),
+                                         COORDKIT_AS='lead-a', CLAUDE_CODE_SESSION_ID='s1'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stderr), [])
