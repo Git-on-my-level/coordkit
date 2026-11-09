@@ -471,7 +471,7 @@ def _main(argv, *, site_local=False, origin='coordkit'):
 
 
 WAIT_RECEIVER_TAIL_BYTES = 1024 * 1024
-WAIT_RECEIVER_HEADER = re.compile(r'^(\S+) (?:\S+ \S+→\S+: |\S+ \S+→\S+ \[[^\]\n]+\] )')
+WAIT_RECEIVER_END = re.compile(r'-- end (\S+)')
 
 
 def wait_receiver_ids(fd):
@@ -494,10 +494,10 @@ def wait_receiver_ids(fd):
         rows = data.split(b'\n')[:-1]
     if not boundary:
         rows = rows[1:]
-    # Full deliveries may contain prose on subsequent lines. A word matching an
-    # ID there is not evidence that the corresponding message was delivered.
+    # Headers can survive a torn multiline write. Only a newline-terminated end
+    # marker proves completion, for both normal and --full output.
     ids = {match[1] for row in rows
-           if (match := WAIT_RECEIVER_HEADER.match(row.decode('utf-8', errors='replace')))}
+           if (match := WAIT_RECEIVER_END.fullmatch(row.decode('utf-8', errors='replace')))}
     return ids, bool(data and not data.endswith(b'\n'))
 
 
@@ -512,10 +512,11 @@ def deliver_wait_hits(hits, full):
     delivered, partial = wait_receiver_ids(fd) if regular else (set(), False)
     for row in hits:
         if row['id'] not in delivered:
-            if partial:
-                print()  # A torn prior write must not swallow the next record's ID.
-                partial = False
-            print(line(row, full=full))
+            prefix = '\n' if partial else ''
+            # Buffer the body and completion marker together before flushing;
+            # a torn write without the final marker remains eligible for replay.
+            sys.stdout.write(f"{prefix}{line(row, full=full)}\n-- end {row['id']}\n")
+            partial = False
             delivered.add(row['id'])
     sys.stdout.flush()
     if regular:

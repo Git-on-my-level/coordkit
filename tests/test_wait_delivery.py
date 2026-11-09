@@ -81,7 +81,7 @@ bus.main(['wait', '--to', 'worker', '--persistent', '--timeout', '0'], load(sys.
     def test_recovered_delivery_still_requires_receiver_sync(self):
         self.seed()
         receiver = self.root/'receiver.log'
-        receiver.write_text(bus.line(bus.read()[0])+'\n')
+        receiver.write_text(bus.line(bus.read()[0])+'\n-- end work\n')
         sync = os.fsync
         with receiver.open('a') as stream:
             def fail(fd):
@@ -94,35 +94,75 @@ bus.main(['wait', '--to', 'worker', '--persistent', '--timeout', '0'], load(sys.
         self.assertEqual(receiver.read_text().count('durable work'), 1)
         self.assertEqual(bus.get_cursor('worker', 'wait', None), 0)
 
+    def test_torn_multiline_delivery_is_replayed_once_before_cursor_commit(self):
+        self.seed()
+        row = dict(bus.read()[0], text='header body\ncomplete body\nfinal body')
+        self.manifest.paths.bus_log.write_text(json.dumps(row)+'\n')
+        record = bus.line(row, full=True)+'\n-- end work\n'
+        receiver = self.root/'receiver.log'
+        # A header alone cannot prove delivery: every cut before the marker's
+        # final newline must replay the full body, then deduplicate on restart.
+        header_end = record.index('\n') + 1
+        for cut in (header_end, header_end + 4, record.index('-- end'), len(record) - 1):
+            with self.subTest(cut=cut):
+                bus.set_cursor('worker', 'wait', 0)
+                torn = record[:cut]
+                receiver.write_text(torn)
+                expected = torn+('' if torn.endswith('\n') else '\n')+record
+                for _ in range(2):
+                    with receiver.open('a') as stream, contextlib.redirect_stdout(stream), patch.object(
+                            claude_resume, 'start_time', return_value='started'):
+                        bus.main(['wait', '--to', 'worker', '--full', '--timeout', '0'], self.manifest)
+                    self.assertEqual(receiver.read_text(), expected)
+                    self.assertEqual(bus.get_cursor('worker', 'wait', None), 1)
+                    # Simulate a crash before the cursor commit, leaving only
+                    # the receiver log as evidence on the next invocation.
+                    bus.set_cursor('worker', 'wait', 0)
+
     def test_receiver_deduplicates_exact_ids_and_preserves_append_position(self):
         self.seed()
         row = bus.read()[0]
         receiver = self.root/'receiver.log'
         for full in (False, True):
             with self.subTest(full=full):
-                receiver.write_text(bus.line(row, full=full)+'\n')
+                receiver.write_text(bus.line(row, full=full)+'\n-- end work\n')
                 with receiver.open('a') as stream, contextlib.redirect_stdout(stream):
                     bus.deliver_wait_hits([row, dict(row, id='work-next', text='next delivery')], full)
-                self.assertEqual(receiver.read_text(), bus.line(row, full=full)+'\n'+
-                                 bus.line(dict(row, id='work-next', text='next delivery'), full=full)+'\n')
+                self.assertEqual(receiver.read_text(), bus.line(row, full=full)+'\n-- end work\n'+
+                                 bus.line(dict(row, id='work-next', text='next delivery'), full=full)+
+                                 '\n-- end work-next\n')
+
+    def test_unmarked_single_line_delivery_is_replayed_once(self):
+        self.seed()
+        row = bus.read()[0]
+        receiver = self.root/'receiver.log'
+        legacy = bus.line(row)+'\n'
+        receiver.write_text(legacy)
+        # Normal output uses the same completion rule as multiline output;
+        # a pre-marker log is eligible for one replay, then stays complete.
+        for _ in range(2):
+            with receiver.open('a') as stream, contextlib.redirect_stdout(stream):
+                bus.deliver_wait_hits([row], False)
+            self.assertEqual(receiver.read_text(), legacy+legacy+'-- end work\n')
 
     def test_receiver_tail_ignores_partial_records_and_older_ids(self):
         self.seed()
         row = bus.read()[0]
-        record = bus.line(row)+'\n'
+        marker = '-- end work\n'
+        record = bus.line(row)+'\n'+marker
         receiver = self.root/'receiver.log'
         # The first case would look like a complete matching ID if the scan
         # accepted its partial prefix. An unterminated suffix is not a delivery.
-        for content in ('x'+record, record+'padding\n'*20+'work unfinished'):
+        for content in ('x'+marker, record+'padding\n'*20+'work unfinished'):
             with self.subTest(content=content):
                 receiver.write_text(content)
                 with receiver.open('a') as stream, contextlib.redirect_stdout(stream), patch.object(
-                        bus, 'WAIT_RECEIVER_TAIL_BYTES', len(record.encode('utf-8'))):
+                        bus, 'WAIT_RECEIVER_TAIL_BYTES', len(marker.encode('utf-8'))):
                     bus.deliver_wait_hits([row], False)
                 expected = content+('' if content.endswith('\n') else '\n')+record
                 self.assertEqual(receiver.read_text(), expected)
                 with receiver.open('a') as stream, contextlib.redirect_stdout(stream), patch.object(
-                        bus, 'WAIT_RECEIVER_TAIL_BYTES', len(record.encode('utf-8'))):
+                        bus, 'WAIT_RECEIVER_TAIL_BYTES', len(marker.encode('utf-8'))):
                     bus.deliver_wait_hits([row], False)
                 self.assertEqual(receiver.read_text(), expected)
 
@@ -131,7 +171,7 @@ bus.main(['wait', '--to', 'worker', '--persistent', '--timeout', '0'], load(sys.
         row = bus.read()[0]
         previous = dict(row, id='previous', text='details\nwork is still pending')
         receiver = self.root/'receiver.log'
-        receiver.write_text(bus.line(previous, full=True)+'\n')
+        receiver.write_text(bus.line(previous, full=True)+'\n-- end previous\n')
         with receiver.open('a') as stream, contextlib.redirect_stdout(stream):
             bus.deliver_wait_hits([row], True)
         self.assertEqual(receiver.read_text().count('durable work'), 1)

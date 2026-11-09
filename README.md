@@ -168,9 +168,12 @@ Apply uses this sequence:
    they die with the old session. Persistent waiters continue consuming after each
    match, flush and fsync deliveries to regular receiver logs before committing
    the cursor. Before each append, they check the last 1 MiB of the receiver log
-   for complete records with the same message ID, skipping delivered IDs and
-   advancing the cursor. This makes delivery effectively once across a crash
-   between receiver fsync and cursor commit, provided the record remains in that
+   for newline-terminated `-- end <id>` completion markers, skipping delivered
+   IDs and advancing the cursor. Both normal and `--full` deliveries append this
+   marker after the body in the same buffered write. A header without its marker
+   is replayed, with a separating newline after any unterminated fragment; legacy
+   logs without markers are replayed once. This makes delivery effectively once
+   across a crash between receiver fsync and cursor commit, provided the marker remains in that
    bounded tail. Append to the same readable receiver log across restarts; pipes and terminals
    cannot provide persistent deduplication. Waiters stay armed until explicitly
    stopped by the operator. This is a durable log receiver, not injection into Claude.

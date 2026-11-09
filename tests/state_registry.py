@@ -283,6 +283,10 @@ row('bus.py', '.wait.owner.json|writer:_main', 'exclusive lane waiter acquires n
     'kernel releases ownership on process exit; next owner replaces identity note',
     'note is evidence only with matching PID/start time and fresh cursor; persistent timeout 0 is operator-managed',
     'duplicate waiters refuse without consuming; stale notes never establish process liveness')
+row('bus.py', '-- end <id>', 'wait buffers body and newline-terminated completion marker together',
+    'receiver fsync precedes cursor commit; marker retained with append-only log',
+    'dedupe reads the last 1 MiB; missing or torn markers replay the delivery',
+    'receiver sync failure leaves cursor unchanged; no marker means no completion')
 row('rearmcheck.py', 'writer:main', 'readiness wrapper runs recorded argv without a killing timeout',
     'writes PID and exit result on normal completion; caller collects on next poll',
     'caller deadline bounds observation only; an unresolved verifier intent requires inspection',
