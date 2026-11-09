@@ -87,10 +87,10 @@ class AnxClient:
 
 
 def ask_reference(result):
-    """Normalize supported current and compatibility ask response envelopes."""
+    """Prefer a wrapped response's reference; fall back to compatibility top-level fields."""
     if not isinstance(result, dict):
         return None
-    for candidate in (result, result.get('body')):
+    for candidate in (result.get('body'), result):
         if isinstance(candidate, dict):
             ask = candidate.get('ask') if isinstance(candidate.get('ask'), dict) else {}
             ref = candidate.get('ask_id') or candidate.get('id') or ask.get('id') or candidate.get('event_ref')

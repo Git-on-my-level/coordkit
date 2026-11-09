@@ -158,11 +158,12 @@ class LoopAnswersTests(FakeCase):
         self.assertEqual(read_json(self.manifest.paths.root/'reconcile/answers.json'), [])
 
     def test_supported_ask_response_shapes_are_confirmed_without_resending(self):
-        for index, field in enumerate(('ask_id', 'id', 'event_ref', 'ask', 'body', 'mixed')):
+        for index, field in enumerate(('ask_id', 'id', 'event_ref', 'ask', 'body', 'mixed', 'wrapped')):
             ask_id = f'event:shape-{index}'
             result = {'ask': {'id': ask_id}} if field == 'ask' else (
                 {'body': {'ask': {'id': ask_id}}} if field == 'body' else (
-                    {'ask_id': ask_id, 'body': {'text': 'context'}} if field == 'mixed' else {field: ask_id}))
+                    {'ask_id': ask_id, 'body': {'text': 'context'}} if field == 'mixed' else (
+                        {'id': 'event:wrapper', 'body': {'ask_id': ask_id}} if field == 'wrapped' else {field: ask_id})))
             (self.state/'escalation.json').unlink(missing_ok=True)
             self.respond({'tool': 'anx', 'contains': ['ask'], 'json': {'ok': True, 'result': result}})
             report = self.record_failure()
