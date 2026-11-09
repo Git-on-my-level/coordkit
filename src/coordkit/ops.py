@@ -262,12 +262,12 @@ def mcp_call(manifest, args):
 
 COMMANDS = {
     'relay': 'relay', 'bus': 'bus', 'sweep': 'addressed', 'mcp-serve': 'mcp_server', 'deliver': 'deliver',
-    'lane': 'lane', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
+    'lane': 'lane', 'lane-move': 'lanemove', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
     'obligations': 'obligations', 'review': 'review', 'question': 'questions',
     'init': 'lifecycle', 'up': 'lifecycle', 'down': 'lifecycle', 'doctor': 'lifecycle', 'lead': 'lifecycle',
     'ops': 'ops', 'version': 'ops', 'retire': 'wake', 'unretire': 'wake', 'wake-scan': 'wake', 'hooks': 'hooks', 'update': 'selfupdate', 'mcp': 'mcp_install',
 }
-OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down','relay') else 'read',
+OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down','relay','lane-move') else 'read',
                                                 handler=module+':main') for name,module in COMMANDS.items() if name != 'bus')
 
 
@@ -289,6 +289,11 @@ def main(argv, manifest=None):
 # Public CLI arguments also live here. Compatibility orchestration parsers remain
 # in their adapters until those entry points can be retired independently.
 CLI_ARGS = {
+    'lane-move': (Arg('name'), Arg('--to-config', required=True),
+                  Arg('--plan', action='store_true', group='mode'),
+                  Arg('--apply', action='store_true', group='mode'),
+                  Arg('--timeout', type=int, default=60, help='holder/re-arm deadline in seconds (default 60)'),
+                  Arg('--idle-seconds', type=int, default=10, help='minimum transcript quiet age (default 10)')),
     'init': (Arg('project'), Arg('--profile', choices=('minimal','anx'), default='minimal'),
              Arg('--workspace',default='anx'), Arg('--board'), Arg('--git-repo')),
     'retire': (Arg('lane'), Arg('--to')),

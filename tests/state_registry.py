@@ -262,3 +262,9 @@ row('lifecycle.py', 'relay/service.json', 'relay installation receipt includes t
 row('selfupdate.py', 'relay/service.json', 'update reconciles explicitly installed relay service',
     'explicit relay uninstall or down', 'only owned services may be reinstalled',
     'manager failure triggers existing update rollback')
+
+row('lanemove.py', 'plan:before_reading|plan:manifest_input_sha256|.json|.jsonl|.lock|.manifest.bak|.resume.log|.wait|hooks|lane-moves|state|state/cursors|plan:after_reading|plan:attention|plan:copy_sha256|plan:copy_verified_at|plan:launch|plan:manifest_after_sha256|plan:manifest_backup|plan:manifest_before_sha256|plan:operator_command|plan:phase|plan:resume_requested_at|plan:waiter_was_armed|writer:atomic_bytes|writer:save',
+    'explicit lane-move plan saves intent; apply saves checksums, backup and launch intent before effects',
+    'retry same lane and destination rolls forward; done receipts and original sessions remain; kernel releases locks',
+    'holder and re-arm polls have a command deadline; ambiguous launch never repeats; no automatic retention deletion',
+    'open obligations or holders refuse; timeout posts one attention ask per cause; changed files refuse without overwrite')
