@@ -101,7 +101,7 @@ def clean_identity(value):
 def internal_name(manifest, name):
     import re
     return (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name)
-            or name in {'all', 'coordkit', 'lead', *cfg(manifest).internal_senders,
+            or name in {'all', 'coordkit', 'lead', manifest.mcp.identity, *cfg(manifest).internal_senders,
                         *manifest.escalation.internal_senders})
 
 
@@ -210,29 +210,30 @@ def probe_identity(record):
     return out
 
 
-def store_identity(manifest, name, via, identity, *, register=False):
+def _store_identity(manifest, name, via, identity, *, register=False):
+    """Persist an identity selected while the caller holds register.lock."""
     import time
     from .state import update_json
     at = time.time()
-    with locked(home(manifest)/'register.lock'):
-        def transform(current):
-            entry = current.setdefault(name, {})
-            if register:
-                entry.setdefault('registered_at', at)
-                entry.setdefault('registered_by', via)
-            entry['identity'] = clean_identity(dict(identity, refreshed_at=at))
-            entry['refreshed_at'] = at
-            return current
-        return update_json(home(manifest)/'register.json', transform)[name]
+    def transform(current):
+        entry = current.setdefault(name, {})
+        if register:
+            entry.setdefault('registered_at', at)
+            entry.setdefault('registered_by', via)
+        entry['identity'] = clean_identity(dict(identity, refreshed_at=at))
+        entry['refreshed_at'] = at
+        return current
+    return update_json(home(manifest)/'register.json', transform)[name]
 
 
 def write_register(manifest, name, via, identity=None):
     """First local post/ack/wait makes a name routable; manifest policy wins."""
     if internal_name(manifest, name) or name in cfg(manifest).agents:
         return
-    previous = ((read_json(home(manifest)/'register.json', {}) or {}).get(name) or {}).get('identity') or {}
-    record = identity_sources(manifest, name, stored=previous) if identity is None else clean_identity(identity)
-    return store_identity(manifest, name, via, probe_identity(record), register=True)
+    with locked(home(manifest)/'register.lock'):
+        previous = ((read_json(home(manifest)/'register.json', {}) or {}).get(name) or {}).get('identity') or {}
+        record = identity_sources(manifest, name, stored=previous) if identity is None else clean_identity(identity)
+        return _store_identity(manifest, name, via, probe_identity(record), register=True)
 
 
 def refresh_identity(manifest, name):
@@ -241,16 +242,17 @@ def refresh_identity(manifest, name):
     from .manifest import duration
     if internal_name(manifest, name):
         return
-    entry = (read_json(home(manifest)/'register.json', {}) or {}).get(name)
-    if entry is None and name not in cfg(manifest).agents:
-        return
-    previous = clean_identity((entry or {}).get('identity') or {})
-    record = identity_sources(manifest, name, stored=previous)
-    comparable = {k: v for k, v in previous.items() if k not in {'pid', 'pid_started', 'refreshed_at'}}
-    changed = {k: v for k, v in record.items() if k not in {'pid', 'pid_started'}} != comparable
-    if not changed or 0 <= time.time() - previous.get('refreshed_at', 0) < duration(cfg(manifest).heartbeat_every):
-        return
-    return store_identity(manifest, name, 'hook', probe_identity(record))
+    with locked(home(manifest)/'register.lock'):
+        entry = (read_json(home(manifest)/'register.json', {}) or {}).get(name)
+        if entry is None and name not in cfg(manifest).agents:
+            return
+        previous = clean_identity((entry or {}).get('identity') or {})
+        record = identity_sources(manifest, name, stored=previous)
+        comparable = {k: v for k, v in previous.items() if k not in {'pid', 'pid_started', 'refreshed_at'}}
+        changed = {k: v for k, v in record.items() if k not in {'pid', 'pid_started'}} != comparable
+        if not changed or 0 <= time.time() - previous.get('refreshed_at', 0) < duration(cfg(manifest).heartbeat_every):
+            return
+        return _store_identity(manifest, name, 'hook', probe_identity(record))
 
 
 def roster_identity(manifest, name):

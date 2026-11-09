@@ -551,7 +551,12 @@ def agent_rows(manifest, rows, args, at):
     registry, roles = addressed.registry(manifest), addressed.roles(manifest)
     # Legacy [[agents]] labels remain valid roster names too.
     for agent in manifest.agents:
-        registry.setdefault(agent.label, {'label': agent.label, 'description': agent.actor, 'source': 'manifest'})
+        spec = registry.setdefault(agent.label, {})
+        if spec.get('source') == 'manifest':
+            spec.setdefault('label', agent.label)
+            spec.setdefault('description', agent.actor)
+        else:
+            spec.update(label=agent.label, description=agent.actor, source='manifest')
     for lane in manifest.lanes:
         registry.setdefault(lane.name, {'source': 'lane'})
     activity = {}

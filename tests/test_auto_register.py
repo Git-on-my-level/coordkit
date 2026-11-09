@@ -47,6 +47,68 @@ class AutoRegisterTests(AddressedCase):
             routing.write_register(self.manifest, name, 'post')
         self.assertEqual(self.register(), {})
 
+    def test_mcp_sender_activity_is_not_listening_evidence(self):
+        # Include an old registration: service posts must not revive it either.
+        for name in (self.manifest.mcp.identity, 'custom-mcp'):
+            with self.subTest(name=name):
+                self.manifest.mcp.identity = name
+                write_json(routing.home(self.manifest)/'register.json', {name: {}})
+                self.invoke('post', '--from', name, '--to', 'all', 'service update')
+                self.assertFalse(addressed.listening(self.manifest, name)[0])
+                self.assertFalse(self.roster()[name]['listening'])
+
+    def test_legacy_manifest_metadata_survives_registration(self):
+        self.invoke('post', '--from', 'worker', '--to', 'all', 'hello')
+        entry = self.register()['worker']
+        # Even an old runtime label cannot override permanent manifest metadata.
+        write_json(routing.home(self.manifest)/'register.json', {
+            'worker': dict(entry, label='runtime label', description='runtime description', registered_at=1)})
+        row = self.roster()['worker']
+        self.assertEqual((row['label'], row['description']), ('worker', 'ck-sample-worker'))
+        self.assertEqual(row['label_source'], 'manifest')
+        self.assertFalse(row['label_expired'])
+
+    def delayed_identity_write(self, writer):
+        """A writer delayed at lock entry must select the current session inside it."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        routing.write_register(self.manifest, 'fresh', 'post', {'session_id': 'initial'})
+        entries = self.register()
+        entries['fresh']['identity']['refreshed_at'] = 1
+        write_json(routing.home(self.manifest)/'register.json', entries)
+        note = deliver.note_path(self.manifest, 'fresh')
+        write_json(note, {'name': 'fresh', 'session_id': 'old'})
+        waiting, resume = threading.Event(), threading.Event()
+        main_thread = threading.get_ident()
+        original_lock = routing.locked
+
+        @contextlib.contextmanager
+        def delayed_lock(path, *args, **kwargs):
+            if path == routing.home(self.manifest)/'register.lock' and threading.get_ident() != main_thread:
+                waiting.set()
+                if not resume.wait(5):
+                    raise TimeoutError('test did not release delayed identity writer')
+            with original_lock(path, *args, **kwargs) as stream:
+                yield stream
+
+        with patch.object(routing, 'locked', delayed_lock), ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(writer, self.manifest, 'fresh')
+            try:
+                self.assertTrue(waiting.wait(5), 'identity writer did not reach the lock')
+                write_json(note, {'name': 'fresh', 'session_id': 'new'})
+                routing.write_register(self.manifest, 'fresh', 'post')
+                self.assertEqual(self.register()['fresh']['identity']['session_id'], 'new')
+            finally:
+                resume.set()
+            future.result(timeout=5)
+        self.assertEqual(self.register()['fresh']['identity']['session_id'], 'new')
+
+    def test_delayed_registration_cannot_replace_newer_identity(self):
+        self.delayed_identity_write(lambda manifest, name: routing.write_register(manifest, name, 'post'))
+
+    def test_delayed_hook_refresh_cannot_replace_newer_identity(self):
+        self.delayed_identity_write(routing.refresh_identity)
+
     def test_refresh_preserves_registration_policy_and_filters_identity(self):
         routing.write_register(self.manifest, 'fresh', 'post', {'session_id': 's1', 'TOKEN': 'secret'})
         original = self.register()['fresh']

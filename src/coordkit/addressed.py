@@ -176,7 +176,8 @@ def listening(manifest, name, at=None, probe=None, rows=None, *, waiter_only=Fal
             continue
         if 0 <= at - posted <= seconds(cfg(manifest).activity_ttl):
             latest = max(latest or posted, posted)
-    if latest is not None:
+    # MCP service posts carry no evidence that an agent session can hear us.
+    if latest is not None and name != manifest.mcp.identity:
         return True, f'posted {int(at - latest)}s ago'
     if lease and open_ids:
         return False, f'delivery_unconfirmed {",".join(open_ids[:3])}'

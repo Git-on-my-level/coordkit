@@ -214,6 +214,21 @@ class McpToolTests(McpCase):
                     {'to': 'lead-a', 'kind': 'ask', 'text': 'x' * 2001}, {'to': 'lead-a', 'kind': 'ask', 'text': ' '}):
             self.assertTrue(self.tool('post', **bad)[0], bad)
 
+    def test_service_post_does_not_register_inherited_harness_identity(self):
+        from coordkit import routing
+        from coordkit.state import read_json
+        self.enable_writes()
+        self.lease('lead-a')
+        for name in (self.manifest.mcp.identity, 'custom-mcp'):
+            with self.subTest(name=name):
+                self.manifest.mcp.identity = name
+                with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.root/'server-account'),
+                                             'CLAUDE_CODE_SESSION_ID': 'server-session'}):
+                    error, text = self.tool('post', to='lead-a', kind='ask', text='Service request')
+                self.assertFalse(error, text)
+                self.assertEqual(self.rows()[-1]['frm'], name)
+                self.assertNotIn(name, read_json(routing.home(self.manifest)/'register.json', {}))
+
     def test_post_as_only_an_allowlisted_lane(self):
         self.enable_writes()
         self.lease('lead-a')
