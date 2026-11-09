@@ -38,6 +38,8 @@ if name == 'anx':
         ('ask',): (1, {'--subject-ref', '--situation', '--impact', '--recommend', '--why', '--if-no-answer'},
                    {'--alternative', '--details', '--evidence', '--by', '--supersedes'}, {'--again'}),
         ('inbox', 'list'): (0, set(), {'--status', '--limit', '--cursor'}, {'--unread'}),
+        ('inbox', 'read'): (1, set(), set(), {'--force'}),
+        ('api',): (1, {'--method', '--path', '--from-file'}, set(), set()),
         **{('bridge', verb): (0, set(), set(), set()) for verb in ('status', 'install', 'add')},
     }
     if path in contracts:
@@ -102,6 +104,11 @@ if name == 'anx' and 'ask' in args and any('check=loop_failure' in arg for arg i
 elif name == 'anx' and 'inbox' in args and 'list' in args and os.environ.get('FAKE_ANX_ASK_STATE'):
     target = Path(os.environ['FAKE_ANX_ASK_STATE'])
     result = {'items': [item for item in json.loads(target.read_text()).values() if item['status'] != 'superseded']}
+elif name == 'anx' and 'inbox' in args and 'list' in args:
+    result = {'items': []}
+elif name == 'anx' and 'api' in args and '/agent-inbox/answers/read' in args:
+    body = json.loads(Path(args[args.index('--from-file')+1]).read_text())
+    result = {'answer': {'read': True, 'answer_event_id': body['answer_event_id']}}
 elif name == "anx" and "get" in args:
     result = {"card": {"id": "card-id", "handle": args[-1].removeprefix("card:")}}
     if args[-1] == 'card:loop-audit':

@@ -146,3 +146,47 @@ supported, server-enforced idempotent note path before replaying those rows;
 do not invent an unsupported `anx note --request-key` flag. Restoring a local
 backup does not undo remote ANX writes. Keep the forward cursor and disposition
 any remote side effects explicitly.
+
+## Unread operator answers
+
+Each live reconciliation first reads the configured ANX actor's own unread
+answers, before unrelated liveness probes. It snapshots at most ten pages and
+2,000 answers before acknowledging anything, so removing unread entries cannot
+skip later pages. Workspace, actor and server scope separate the private
+`reconcile/unread-answers/` receipts.
+
+The full reply is retained before routing. Exact question correlation targets
+its original asker, a uniquely title-matched blocker targets its poster, and card-level answers
+otherwise go to `escalation.internal_to` or `obligations.coordinator`. Replies
+become typed `decision` bus rows with the card and reply edge; they never execute
+commands, grant a skip, pause a loop or change STOP files. Closed questions are
+not reopened. Missing routing information leaves a pending receipt and unread
+answer. `doctor` reports pending deliveries and polling failures as
+`unread_answers` warnings.
+
+A successful, fsynced bus delivery precedes acknowledgement of the exact
+`response_event_id` through ANX's answer-read endpoint. A reply arriving after
+the snapshot stays unread. Failed delivery or acknowledgement retries from its
+private receipt, using stable publication IDs. Separate responses to one ask
+keep separate receipts and decision rows. Shared answer-stream consumers skip
+responses already delivered through this path. Keep these receipts with their
+corresponding ask and bus history.
+
+## Per-loop model selection
+
+Loops retain the configured `plan` capacity pool by default. An explicit model
+family ruling can select one loop without changing the shared pool:
+
+```toml
+[loop.loops.audit.selector]
+family = "glm-flash"
+```
+
+Agentctl resolves the family using its current reviewed routing configuration;
+coordkit does not translate it into a native model slug. Optional `harness`,
+`version` and `host` constraints require a family; an exclusive `pool` selector
+is also accepted. Caller-supplied access settings are refused. Plan and launch
+use the identical selector and retain read-only access and permission checks.
+This field requires a build containing selector support; v0.4.1 rejects it.
+Verify a scheduled execution's resolved model and harness through agentctl
+status. Manifest intent alone does not prove the model that ran.

@@ -121,13 +121,17 @@ class AgentctlClient:
             raise ToolError(self.binary, result.returncode, result.stderr + result.stdout)
         return result.stdout
 
-    def delegate(self, prompt, run_dir, *, key, pool="plan", label=None, plan=False, detach=False, access="read_only", timeout=None, card=None, owns=(), wakeable=False):
+    def delegate(self, prompt, run_dir, *, key, pool="plan", label=None, plan=False, detach=False, access="read_only", timeout=None, card=None, owns=(), wakeable=False, selector=None):
         self.manifest.writable()
-        selector = self.manifest.agentctl.pools.get(pool)
-        if not selector:
-            raise ManifestError(f"missing_key: agentctl.pools.{pool}")
-        request = {"schema_version": 1, "request_key": key,
-                   "selector": {"pool": selector.removeprefix("pool:"), "settings": {"access": access}}}
+        if selector:
+            selected = dict(selector)
+        else:
+            pool_name = self.manifest.agentctl.pools.get(pool)
+            if not pool_name:
+                raise ManifestError(f"missing_key: agentctl.pools.{pool}")
+            selected = {"pool": pool_name.removeprefix("pool:")}
+        selected['settings'] = {'access': access}
+        request = {"schema_version": 1, "request_key": key, "selector": selected}
         request_path = run_dir / "request.json"
         request_path.write_text(json.dumps(request) + "\n")
         argv = [self.binary, "delegate", "--request-file", str(request_path), "--prompt-stdin",

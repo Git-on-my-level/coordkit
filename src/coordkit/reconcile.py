@@ -170,6 +170,8 @@ def reconcile(manifest, dry_run=False, at=None):
             recommend=recommend,why='The reconciler cannot safely decide acceptance or ownership on behalf of the lead.'),ask=True)
     bus.configure(manifest)
     if not dry_run:
+        from .answers import consume
+        consume(manifest)
         loop_answers.drain(manifest)
     rows=bus.read()
     active=actl.recent(nonterminal=True)
@@ -392,7 +394,8 @@ def reconcile(manifest, dry_run=False, at=None):
         for received_path, _ in deferred:
             received_path.unlink(missing_ok=True)  # only after answers.json is durable
         for item in list(pending):
-            if any(row.get('id') == 'answer-'+item['ask_id'] for row in bus.read()):
+            from .answers import already_delivered
+            if already_delivered(manifest, item) or any(row.get('id') == 'answer-'+item['ask_id'] for row in bus.read()):
                 pending.remove(item)
                 write_json(pending_path,pending)
                 continue
