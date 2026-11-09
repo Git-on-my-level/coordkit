@@ -89,9 +89,10 @@ class UsageLane:
     cwd: str
     model: str
     effort: str
-    session_id: str = ""   # optional: pins the lane's current Claude Code session
+    session_id: str = ""   # optional: pins the lane's current session (Claude or OpenCode)
     pane: str = ""
     resume: str = ""      # only "headless" permits Claude Code resume
+    harness: str = ""     # "" / "claude" read Claude transcripts; "opencode" reads its local store
     stop_requires_waiter: bool | None = None  # absent inherits [deliver]
 
 
@@ -100,6 +101,30 @@ class Agentctl:
     timeout: str = ""
     request_key_prefix: str = ""
     pools: dict[str, str] = field(default_factory=dict)
+
+
+# A manifest pool value names either a capacity pool or an agentctl selector.
+# Coordkit passes selectors through unchanged: the fleet may route a family to a
+# harness (for example family:kimi or family:deepseek to OpenCode/Morph).
+SELECTOR_KEYS = ('pool', 'harness', 'family', 'version', 'model', 'host')
+
+
+def parse_selector(value):
+    """Parse `pool:name` or `family:kimi` (or `harness:opencode+model:provider/id`)."""
+    if not isinstance(value, str) or not value or len(value) > 512:
+        raise ManifestError('invalid_value: agentctl selector must be a short string')
+    selector = {}
+    for part in value.split('+'):
+        key, separator, item = part.partition(':')
+        if (not separator or key not in SELECTOR_KEYS or not item or item != item.strip()
+                or len(item) > 256 or any(ord(ch) < 32 for ch in item)):
+            raise ManifestError(f'invalid_value: agentctl selector {value!r}')
+        if key in selector:
+            raise ManifestError(f'invalid_value: agentctl selector repeats {key}')
+        selector[key] = item
+    if 'pool' in selector and len(selector) > 1:
+        raise ManifestError('invalid_value: agentctl pool selectors cannot combine with other keys')
+    return selector
 
 
 @dataclass
@@ -485,8 +510,8 @@ def load(path: str | Path | None = None) -> Manifest:
     actl = config["agentctl"]
     if "agentctl" in raw and not actl.pools.get("implement"):
         raise ManifestError("missing_key: agentctl.pools.implement")
-    if not all(re.fullmatch(r"pool:[a-zA-Z0-9_.-]+", v) for v in actl.pools.values()):
-        raise ManifestError("invalid_value: agentctl.pools selectors must be pool:<name>")
+    for value in actl.pools.values():
+        parse_selector(value)
     actl.request_key_prefix = actl.request_key_prefix or f"ck-{project.name}"
     launchd = config["launchd"]
     launchd.label_prefix = launchd.label_prefix or f"com.coordkit.{project.name}"
@@ -599,6 +624,8 @@ def load(path: str | Path | None = None) -> Manifest:
             raise ManifestError("invalid_value: lanes.pane must be nonempty without whitespace")
         if lane.resume not in ("", "headless"):
             raise ManifestError("invalid_value: lanes.resume must be headless or absent")
+        if lane.harness not in ("", "claude", "claude-code", "opencode"):
+            raise ManifestError("invalid_value: lanes.harness must be claude or opencode")
         lane.config_dir = str((file.parent / Path(lane.config_dir).expanduser()).resolve())
         lane.cwd = str((file.parent / Path(lane.cwd).expanduser()).resolve())
         if lane.session_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", lane.session_id):

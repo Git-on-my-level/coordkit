@@ -3,6 +3,7 @@ import argparse
 import datetime as dt
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -117,8 +118,11 @@ def lease(manifest, plan, verb):
 def launch_run(manifest, plan, suffix='', pool=None, prompt=None):
     directory = manifest.paths.out_dir/'req'/(plan['label']+suffix)
     directory.mkdir(parents=True, exist_ok=True)
+    # A different capacity-fallback pool replaces a pinned selector. Relaunching
+    # the plan's own pool keeps the selector the run was launched with.
+    selector = plan.get('selector') if pool in (None, plan.get('pool')) else None
     raw = AgentctlClient(manifest).delegate(prompt or plan['prompt'], directory,
-            key=plan['key']+suffix, pool=pool or plan['pool'], label=plan['label'], detach=True,
+            key=plan['key']+suffix, pool=pool or plan['pool'], selector=selector, label=plan['label'], detach=True,
             card=plan.get('card'), owns=plan['owns'], access=plan['access'], timeout='20m', wakeable=True)
     doc = json.loads(raw)
     if doc.get('ok') is not True:
@@ -129,6 +133,7 @@ def launch_run(manifest, plan, suffix='', pool=None, prompt=None):
         raise ToolError('agentctl',6,'missing execution id','protocol_error')
     plan['execution_id'] = execution
     plan['phase'] = 'running'
+    plan.pop('rate_limit', None)
     write_json(Path(plan['plan_file']),plan)
     event(manifest, {'kind':'launched','execution_id':execution,'label':plan['label'], 'card':plan.get('card'), 'owns':plan['owns']})
     AgentctlClient(manifest).subscribe(execution)
@@ -169,6 +174,162 @@ def expired(manifest, plan):
 
 
 HUNG_LIVENESS = {'unreachable', 'lost', 'exited', 'orphaned'}
+
+# Provider throttling is not a hung process. agentctl does not publish a stable
+# rate-limit field yet (another change is adding retry events under `status`), so
+# read every shape we know tolerantly, but only structured 429/rate-limit markers
+# and only while the evidence is fresh enough to still explain the silence.
+RATE_LIMIT_STATES = {'rate_limited', 'rate-limited', 'paused_rate_limit', 'paused_provider_rate_limit'}
+RATE_LIMIT_CODES = {'provider_rate_limit', 'provider_rate_limited', 'rate_limited',
+                    'rate-limit', 'provider.rate-limit', 'provider.rate_limit',
+                    'quota_exceeded'}
+RATE_LIMIT_EVENT_TYPES = {'retry', 'rate_limit', 'rate-limit'}
+RATE_LIMIT_EVIDENCE_BOUND = 5 * 60.0
+RATE_LIMIT_CLOCK_SKEW = 120  # seconds a status timestamp may lead this host's clock
+# A malformed or hostile retry delay must not keep a lane alive forever.
+MAX_RETRY_AFTER_MS = 60 * 60 * 1000
+MAX_RESET_WINDOW = 60 * 60.0
+
+
+def _finite(value):
+    """True for an int/float that fits a float; huge JSON integers are not trusted."""
+    try:
+        return math.isfinite(value)
+    except (OverflowError, TypeError):
+        return False
+
+
+def _epoch(value):
+    """Best-effort epoch seconds from a numeric tick or an ISO timestamp.
+
+    Non-finite and negative inputs are discarded rather than trusted: infinity
+    would otherwise make freshness checks pass forever.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if not _finite(value) or value < 0:
+            return None
+        return value / 1000 if value >= 10 ** 11 else value
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            number = float(text)
+        except ValueError:
+            try:
+                return parse_ts(text).timestamp()
+            except (AttributeError, TypeError, ValueError):
+                return None
+        if not _finite(number) or number < 0:
+            return None
+        return number / 1000 if number >= 10 ** 11 else number
+    return None
+
+
+def _evidence_time(value):
+    if not isinstance(value, dict):
+        return None
+    for key in ('observed_at', 'updated_at', 'occurred_at', 'timestamp', 'created_at', 'time_created', 'at', 'ts'):
+        at = _epoch(value.get(key))
+        if at is not None:
+            return at
+    return None
+
+
+def _rate_limit_marker(value):
+    if not isinstance(value, dict):
+        return False
+    return (value.get('status') == 429 or value.get('status_code') == 429
+            or value.get('code') in RATE_LIMIT_CODES or value.get('type') in RATE_LIMIT_CODES
+            or value.get('category') in RATE_LIMIT_CODES)
+
+
+def rate_limit(status, now=None):
+    """Return fresh retry evidence when a nonterminal run is waiting on provider 429s."""
+    if not isinstance(status, dict):
+        return None
+    now = time.time() if now is None else now
+    status_at = _evidence_time(status)
+    candidates = []
+
+    def add(fields, at=None):
+        at = status_at if at is None else at
+        candidates.append((now if at is None else at, fields))
+
+    state = status.get('state')
+    if state in RATE_LIMIT_STATES:
+        add(dict(retry_after_ms=status.get('retry_after_ms'),
+                 reset_at=status.get('reset_at'), model=status.get('model'), status=429))
+    for key in ('rate_limit', 'rateLimit'):
+        container = status.get(key)
+        if isinstance(container, dict):
+            add(container, _evidence_time(container))
+    # A bare `retry` object is not proof of throttling: require a 429/rate-limit marker.
+    retry = status.get('retry')
+    if _rate_limit_marker(retry):
+        add(retry, _evidence_time(retry))
+    for key in ('failure', 'error'):
+        failure = status.get(key)
+        if _rate_limit_marker(failure):
+            add(failure, _evidence_time(failure))
+    if _rate_limit_marker(status):
+        add(status, status_at)
+    events = status.get('events')
+    if isinstance(events, list):
+        for row in reversed(events[-64:]):
+            if not isinstance(row, dict) or row.get('type') not in RATE_LIMIT_EVENT_TYPES:
+                continue
+            error = row.get('error') if isinstance(row.get('error'), dict) else row
+            if not _rate_limit_marker(error):
+                continue
+            add(error, _evidence_time(row) or _evidence_time(error))
+            break
+    if not candidates:
+        return None
+    at, found = max(candidates, key=lambda item: item[0])
+    found = dict(found)
+    retry = found.get('retry_after_ms')
+    if retry is None:
+        retry = found.get('retryAfterMs')
+    retry = retry if type(retry) in (int, float) and _finite(retry) and retry >= 0 else None
+    if retry is not None:
+        retry = min(retry, MAX_RETRY_AFTER_MS)
+    # A provider retry window makes its own evidence relevant for twice that long,
+    # but a small 429 window must not pin a lane forever on a retained old event.
+    # A future reset deadline (when the provider omits retry_after_ms) is also
+    # bounded evidence, so a long provider window is honoured only up to the cap.
+    window = RATE_LIMIT_EVIDENCE_BOUND
+    if retry is not None:
+        window = max(window, 2 * retry / 1000)
+    reset = _epoch(found.get('reset_at') or found.get('resets_at'))
+    if reset is not None and at is not None and reset > at:
+        window = max(window, min(reset - at, MAX_RESET_WINDOW))
+    # Evidence from the future is not evidence: a far-future timestamp would
+    # stay fresh forever and mask a real hang. Allow only small clock skew.
+    if at is None or at < now - window or at > now + RATE_LIMIT_CLOCK_SKEW:
+        return None
+    return {'retry_after_ms': retry,
+            'reset_at': found.get('reset_at') or found.get('resets_at'),
+            'model': found.get('model') or found.get('model_id'),
+            'status': found.get('status') or 429}
+
+
+def note_rate_limit(manifest, plan, evidence):
+    """Persist retry evidence and emit one event per distinct retry window."""
+    record = dict(evidence, observed_at=time.time())
+    previous = plan.get('rate_limit') or {}
+    record['since'] = previous.get('since') or record['observed_at']
+    changed = {k: v for k, v in previous.items() if k != 'observed_at'} != {
+        k: v for k, v in record.items() if k != 'observed_at'}
+    plan['rate_limit'] = record
+    write_json(Path(plan['plan_file']), plan)
+    if changed:
+        event(manifest, {'kind': 'rate_limited', 'execution_id': plan.get('execution_id'),
+                         'label': plan['label'], 'retry_after_ms': record['retry_after_ms'],
+                         'reset_at': record['reset_at'], 'model': record['model']})
+        retry = record['retry_after_ms']
+        print(f'LANE_RATE_LIMITED {plan["label"]} retry_after_ms={retry if retry is not None else "unknown"}', flush=True)
+
 
 
 def hung(manifest, status, now=None):
@@ -227,6 +388,13 @@ def _watch(manifest, plan):
                 if not status.get('state'):
                     alarm(manifest, plan, 'execution_state_unknown', execution)
                     raise Refusal('execution_state_unknown', execution)
+                # A run waiting on provider 429 retries is throttled, not hung: keep its
+                # lease and let agentctl's backoff finish instead of cancelling work.
+                evidence = rate_limit(status)
+                if evidence and status.get('state') not in TERMINAL:
+                    note_rate_limit(manifest, plan, evidence)
+                    lease(manifest,plan,'renew')
+                    continue
                 # Re-read before cancelling: a run that answered again is not hung.
                 if hung(manifest, status) and hung(manifest, client.status(execution)):
                     return expire(manifest, plan, 'execution_hung')
@@ -247,10 +415,18 @@ def _watch(manifest, plan):
                         raise Refusal('parked_execution_not_cancelled',execution)
                 attempts += 1
                 chain = manifest.lane.capacity_fallback or [plan['pool']]
+                next_pool = chain[min(attempts-1,len(chain)-1)]
+                # The fallback is now the active route. Adopt it so a later
+                # autocontinue does not revert to the capacity-limited pool (and
+                # its pinned selector) that just refused work. Staying on the
+                # plan's own pool keeps the selector the run was launched with.
+                if next_pool != plan['pool']:
+                    plan['pool'] = next_pool
+                    plan.pop('selector', None)
                 plan['relaunches'] = attempts
                 previous = execution
                 recovery = f'Reconcile effects from prior execution {previous} before continuing. Never repeat a completed side effect.\n\n'+plan['prompt']
-                execution = launch_run(manifest,plan,f'-r{attempts}',chain[min(attempts-1,len(chain)-1)],prompt=recovery)
+                execution = launch_run(manifest,plan,f'-r{attempts}',next_pool,prompt=recovery)
                 event(manifest,{'kind':'relaunched','execution_id':execution,'previous_execution_id':previous,'label':label})
                 print(f'LANE_RELAUNCHED {label} exec={execution} attempt={attempts}',flush=True)
                 continue
@@ -265,6 +441,10 @@ def _watch(manifest, plan):
             code, state = exc.exit_code, status['state']
         if code == 0 and can_continue(manifest,plan):
             plan['autocontinued'] = True
+            # A continuation is a fresh run on the active route; it gets its own
+            # capacity budget instead of inheriting exhausted fallback attempts.
+            plan['relaunches'] = 0
+            attempts = 0
             prompt = plan['prompt']+'\nAddress these unread obligations:\n'+json.dumps(unread(manifest,plan))
             previous = execution
             execution = launch_run(manifest,plan,'-ac',prompt=prompt)
@@ -391,9 +571,14 @@ def _recover(manifest,plan,dry_run=False):
         if status.get('state') not in TERMINAL:
             if not status.get('state'):
                 raise Refusal('execution_state_unknown',plan['execution_id'])
-            if hung(manifest, status) and hung(manifest, client.status(plan['execution_id'])):
+            evidence = rate_limit(status)
+            if evidence:
+                note_rate_limit(manifest, plan, evidence)
+            elif hung(manifest, status) and hung(manifest, client.status(plan['execution_id'])):
                 expire(manifest, plan, 'execution_hung')
                 return True
+            # The watcher is gone, so a throttled run's lease may have lapsed too.
+            # Renew, or reacquire when ANX says this lane still owns it (exit 2/13).
             try:
                 lease(manifest,plan,'renew')
             except ToolError as exc:
@@ -403,6 +588,10 @@ def _recover(manifest,plan,dry_run=False):
                 if current.get('owner','').removeprefix('actor:') not in ('',plan['label']):
                     raise Refusal('lease_owner_changed',current['owner']) from exc
                 lease(manifest,plan,'acquire')
+            if evidence:
+                detach_watcher(manifest,plan)
+                print(f'RECONCILE watcher restored {plan["label"]} (rate limited)')
+                return True
         else:
             # Terminal recovery runs synchronously before the zombie-lease sweep.
             return _watch(manifest,plan) == 0

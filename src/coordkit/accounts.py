@@ -76,7 +76,7 @@ def snapshot(manifest, at=None):
             if id in ids:
                 raise ValueError('duplicate account')
             ids.add(id)
-            windows = account['windows']
+            windows = account.get('windows', [])
             if not isinstance(windows, list) or len(windows) > MAX_WINDOWS:
                 raise ValueError('invalid windows')
             reading, names = [], set()
@@ -86,13 +86,22 @@ def snapshot(manifest, at=None):
                     raise ValueError('duplicate window')
                 names.add(name)
                 ratio = window['used_ratio']
-                if type(ratio) not in (int, float) or not math.isfinite(ratio) or not 0 <= ratio <= 1:
+                # agentctl's facts contract allows overage (>1) on plans that run past
+                # their allowance; a throughput window is not "exhausted" just because
+                # its last sample crossed the nominal limit.
+                if type(ratio) not in (int, float) or not math.isfinite(ratio) or ratio < 0:
                     raise ValueError('invalid ratio')
-                observed = _time(window['observed_at'])
-                resets = window['resets_at']
+                if 'observed_at' in window:
+                    if window['observed_at'] is None:
+                        raise ValueError('invalid observed_at')
+                    observed = _time(window['observed_at'])
+                else:
+                    observed = None
+                resets = window.get('resets_at')
                 reading.append(dict(name=name, used_pct=round(ratio * 100, 2),
                                     resets_at=_utc(_time(resets)) if resets is not None else None,
-                                    observed_at=_utc(observed), stale=stale(generated) or stale(observed)))
+                                    observed_at=_utc(observed or generated),
+                                    stale=stale(generated) or (observed is not None and stale(observed))))
             rows.append(dict(id=id, windows=reading))
         return dict(available=True, status='ok', generated_at=_utc(generated), accounts=sorted(rows, key=lambda row: row['id']))
     except (OSError, ValueError, TypeError, KeyError, OverflowError, RuntimeError):
