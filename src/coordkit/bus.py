@@ -197,10 +197,11 @@ class ReplayIndex:
                 self.seen.add(key)
 
 
-def append(recs, project=True, replay_index=None):
+def append(recs, project=True, replay_index=None, on_commit=None):
     """Append rows durably, then (unless project=False) run the ANX projection, which may exit 1.
     Callers that must act after the append whatever ANX does (addressed escalation) pass
-    project=False and call project() last."""
+    project=False and call project() last. on_commit records an in-memory receipt
+    after fsync, before any fallible post-append sinks or projection."""
     CONFIG.writable()
     BUS.parent.mkdir(parents=True, exist_ok=True)
     from .wake import refuse_retired, state_path
@@ -240,6 +241,8 @@ def append(recs, project=True, replay_index=None):
             if replay_index is not None:
                 replay_index.seen.update(key for rec in recs
                                          if (key := replay_index.key(rec)) is not None)
+    if on_commit is not None:
+        on_commit()
     # Named extension seam: committed rows only, never under the append lock.
     from .adapters import notify
     notify(CONFIG, recs)
@@ -700,10 +703,19 @@ def dispatch(o):
             if o.kind == 'ruling': recs[-1]['kind'] = 'fyi'  # orig_kind still wakes `bus wait --to lead`
         # Addressed escalation runs before the ANX projection: a mirror failure (exit 1) must never
         # stop a deaf/vacant alert from reaching the fallback, relay file or pager.
-        append(recs, project=not target)
-        register_activity(CONFIG, o.frm, 'post', env={} if rec['origin'] == 'mcp' else None)
         global LAST_POST
-        LAST_POST = (rec, addressed.after_post(CONFIG, rec, role) if target else None)
+        def committed():
+            global LAST_POST
+            LAST_POST = (rec, None)
+        append(recs, project=not target, on_commit=committed)
+        outcome = None
+        try:
+            register_activity(CONFIG, o.frm, 'post', env={} if rec['origin'] == 'mcp' else None)
+            outcome = addressed.after_post(CONFIG, rec, role) if target else None
+        finally:
+            # Escalation may itself post. Preserve the caller's durable receipt,
+            # including when delivery exits before returning an outcome.
+            LAST_POST = (rec, outcome)
         if target:
             project_pending()
         print('posted', rec['ts'], 'id=' + rec['id'] + (f' (recipient {o.to} idle; lead copied)' if len(recs) > 1 else '')

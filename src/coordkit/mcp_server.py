@@ -518,6 +518,8 @@ def topic_rows(manifest, rows, by_re, args, at):
 
 def agent_rows(manifest, rows, args, at):
     from . import addressed, routing
+    from .accounts import snapshot, account_windows
+    capacity = snapshot(manifest, at)
     from .relay import participants, remote_only
     routing.observe_senders(manifest, rows, at)
     sources = participants(manifest, rows)
@@ -599,6 +601,7 @@ def agent_rows(manifest, rows, args, at):
                                model=clip(model, 200) or None, model_observed_at=utc(model_at) if model_at else None,
                                model_launch=clip(lane.model, 200) if lane else None,
                                model_drift=not usage.model_matches(lane.model, model) if lane and model else None)
+        identity_fields['account_windows'] = account_windows(capacity, identity_fields['account'])
         state_text, cut = body_view(last_state.get('text') if last_state else '')
         sites = sources.get(name, set()) | ({manifest.relay.site} if manifest.relay and name not in remote else set())
         return dict(name=name, sites=sorted(sites), role=clip(spec.get('role'), FIELD), fallback=clip(spec.get('fallback'), FIELD),
@@ -808,6 +811,12 @@ def trace_rows(manifest, rows, by_re, args, at, reader, receipts):
 
 def read_call(manifest, tool, args):
     from . import addressed, bus
+    if tool == 'accounts':
+        from .accounts import snapshot
+        data = snapshot(manifest)
+        result = page(data.pop('accounts'), 'id', args, **data)
+        result['accounts'] = result.pop('rows')
+        return result
     if tool == 'lanes':
         return lane_rows(manifest, args)
     manifest = replace(manifest, bus=replace(manifest.bus, aliases=bus_aliases(manifest)))
@@ -906,10 +915,29 @@ def write_call(manifest, tool, args):
         sender = name_arg(args, 'as', required=False) or manifest.mcp.identity
         if sender != manifest.mcp.identity and sender not in manifest.mcp.post_as:
             raise ValueError(f'as must be one of {manifest.mcp.post_as or "(none configured)"}')
-        rc, lines = quiet(addressed.send, manifest, sender, to, text, kind=kind, re_id=re_id, origin='mcp')
+        bus.LAST_POST = None
+        try:
+            rc, lines = quiet(addressed.send, manifest, sender, to, text, kind=kind, re_id=re_id, origin='mcp')
+        except Exception as exc:
+            if bus.LAST_POST is None:
+                raise
+            rc, lines = 1, ['post-append processing failed: ' + type(exc).__name__]
         posted = bus.LAST_POST[0] if bus.LAST_POST else None
-        return {'ok': rc in (0, None, addressed.EXIT_DEAF) and posted is not None, 'rc': rc,
-                'id': posted and posted.get('id'), 'outcome': [clip(l, 160) for l in lines][-5:]}
+        wake = {'status': 'not_attempted'}
+        if posted:
+            from .wake import wake_record
+            try:
+                record = wake_record(manifest, posted['to'])
+                if posted['id'] in record.get('ids', []):
+                    wake = {'status': clip(record.get('status'), FIELD),
+                            'attempts': [{k: clip(a.get(k), FIELD) for k in ('adapter', 'status')}
+                                         for a in record.get('attempts', [])][-5:]}
+            except (OSError, ValueError, TypeError):
+                wake = {'status': 'unavailable'}
+        return {'ok': posted is not None, 'rc': 0 if posted else rc, 'write_sent': posted is not None,
+                'phase': 'posted' if posted else 'preflight', 'id': posted and posted.get('id'),
+                'delivery': bus.LAST_POST[1] if posted else None, 'wake': wake,
+                'post_processing': {'rc': rc}, 'outcome': [clip(l, 160) for l in lines][-5:]}
     if tool == 'ack':
         msg_id, state = name_arg(args, 'id'), args.get('state') or 'received'
         if state not in addressed.ACK_STATES:

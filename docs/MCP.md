@@ -29,7 +29,8 @@ Malformed cursors or cursors for a different ordering are refused. Cursors cap a
 | `inbox` | Messages addressed to required roster `name`, newest first, including old unresolved work. Default omits done/replied rows; `all=true` includes them with replies and refs. `sent_by=name` selects that sender's outbox, including messages addressed elsewhere. Supports all filters below, `brief`, `stale_minutes`, `limit`, `cursor`. |
 | `bus_history` | All rows for optional `topic`, newest first, regardless of acknowledgement state. Optional `name` selects a reader's addressed messages. Same filters and text/stale options as inbox. `before_id` accepts an existing bus id or an opaque `next_cursor`; supply only one of `before_id` and `cursor`. A raw id must still exist in the bus, while opaque cursors survive removal. |
 | `topics` | Topic, count, latest sender (`last_frm`) and UTC timestamp (`last_ts`), recorded `owner`/`lane`, `state_slot`, and owner `lease` evidence. An explicit owner or kind=state lane/subject supplies ownership; absent evidence gives `owner: null`. Lease heartbeat/end values are Unix seconds; they describe evidence, not an inferred owner. `limit`, `cursor`. |
-| `agents_status` | Manifest lanes, registered names and roles plus all senders from the last 24 hours. Lanes are display-only until registered. Each has `status`, reason (`why`), `last_post_at`, `last_reply_at`, own latest `last_state` text/time, label/description/source, `label_age_minutes` and `label_stale` (older than 720 minutes). Non-manifest labels expire after `[addressed].label_ttl` (default `24h`): `label=null`, `label_expired=true`; last state text/time remain visible. Manifest labels never expire and have no age. Status is `listening`, `idle`, `retired`, `relay/human`, or `unregistered`. Retirement requires a conservative self-report at the start of the latest state text; a historical mention alone is insufficient. Any later post by that agent or current listening evidence (including a live lease) overrides the old stopped/retired report. Roles include `members`, `human`, and current live member (`live`), on the page containing the role name. `limit`, `cursor`. |
+| `accounts` | Fleet capacity facts, one row per account: `id`, `windows` (`name`, `used_pct`, `resets_at`, `observed_at`, `stale`). `available`, `status` (`ok`, `disabled`, `unavailable`), and `generated_at` describe the source. `limit`, `cursor`. |
+| `agents_status` | Manifest lanes, registered names and roles plus all senders from the last 24 hours. Lanes are display-only until registered. Each has `status`, reason (`why`), `last_post_at`, `last_reply_at`, own latest `last_state` text/time, label/description/source, `label_age_minutes` and `label_stale` (older than 720 minutes). Non-manifest labels expire after `[addressed].label_ttl` (default `24h`): `label=null`, `label_expired=true`; last state text/time remain visible. Manifest labels never expire and have no age. Status is `listening`, `idle`, `retired`, `relay/human`, or `unregistered`. Retirement requires a conservative self-report at the start of the latest state text; a historical mention alone is insufficient. Any later post by that agent or current listening evidence (including a live lease) overrides the old stopped/retired report. Each row also has compact `account_windows` (`name`, `used_pct`, `resets_at`, `stale`) joined from optional capacity facts; absent facts or unmatched accounts yield `[]`. Roles include `members`, `human`, and current live member (`live`), on the page containing the role name. `limit`, `cursor`. |
 | `open_questions` | Store records reconciled against real bus answers without writing the store or triggering delivery. `needs_decision` identifies tier-2 human decisions. Default only open/escalated questions; `all=true` includes answered/closed, `answered_by`, `answered_at`, answer text and answer row id. Receipts are not answers. `brief`, `stale_minutes`, `limit`, `cursor`. |
 | `ref_read` | Required bus row `id` selects its ref; no path input. Allows files under `[mcp].ref_roots` (default `<root>/state/refs`), with resolved containment checks (including symlinks). `offset` is bytes (default 0), `limit` is bytes (default/max 32768). Follow `next_offset`; `bytes_read` counts source bytes. File text is decoded as UTF-8; invalid bytes are replaced. |
 | `trace` | Required root row `id`; whole connected `re` thread (ancestors and descendants), plus later rows mentioning the exact id or sharing a root PR (`#NNNNN`) or train (matched by `[mcp].train_pattern`), including a train introduced by a PR-linked deploy reply. Links inspect text, topic, subject and structured PR fields. Each row has `linked_by: re / mention / pr / train`, reply UTC timestamps, full bodies and refs. Oldest first. Optional roster `name` supplies broadcast-reader context; `brief`, `stale_minutes`, `limit`, `cursor`. |
@@ -137,3 +138,42 @@ post delivery, acknowledgement or waiting.
 spill when a row also has an attachment. Older rows with a structured `ref` remain
 readable; text-only legacy markers are no longer readable as refs, and older rows
 with both an attachment and only a text spill marker expose the attachment.
+
+## Capacity facts
+
+The optional accounts view mirrors agentctl: it reads the existing fleet-published
+facts file, with no API probes, credential reads, refresh jobs, or bus publication.
+It is disabled when `facts_file` is unset. Paths resolve relative to the manifest
+with `~` expansion; `max_age` is a positive duration, default `2h` (7200 seconds).
+
+```toml
+[accounts]
+facts_file = "~/.local/state/capacity/facts.json"
+max_age = "2h"
+```
+
+Use `coordkit accounts` or `coordkit accounts --json` for the same file-only view.
+The file schema is `{schema_version: 1, generated_at, accounts: [{id, windows:
+[{name, used_ratio, resets_at, observed_at}]}]}`. Ratios must be finite in `[0, 1]`;
+percentages multiply them by 100. Timestamps require timezones and are returned in
+UTC; `resets_at` may be null. A window is stale if either `observed_at` or
+`generated_at` exceeds `max_age`, or is in the future. Republishing cannot refresh
+an old observation. Stale readings remain visible.
+
+Reads accept regular files only, at most 1 MiB, 256 accounts, and 32 windows per
+account. Invalid, missing, oversized, or unreadable facts report `unavailable`;
+`agents_status` continues with empty account windows. No readings are persisted.
+Roster account basenames such as `.claude-1` join to `claude-1` or
+`undeclared:claude_statusline:~/.claude-1`. A declared id takes precedence;
+ambiguous discovered ids are left unmatched.
+
+## Post receipts
+
+`post` reports the durable append independently of later delivery and mirror work.
+A committed row returns `ok: true`, `rc: 0`, `write_sent: true`, `phase: "posted"`,
+and its `id`, even if post-append processing fails. `post_processing.rc` retains
+that processing result, `delivery` gives the addressed outcome when completed, and
+`wake` reports the matching wake attempt's status and adapter statuses (or
+`not_attempted` / `unavailable`). `outcome` retains bounded diagnostic lines.
+A CLI preflight refusal returns `write_sent: false`, `phase: "preflight"`, and no
+id. A delivery failure is not a reason to repost a committed message.
