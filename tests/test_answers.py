@@ -198,6 +198,69 @@ class AnswerConsumptionTests(FakeCase):
         self.assertNotIn('re', row)
         self.assertEqual(len(bus.open_blockers(self.rows())), 1)
 
+    def question(self):
+        from coordkit import questions
+        from coordkit.state import write_json
+        self.manifest.escalation.card = 'card:loop-audit'
+        record = {'qid': 'q-123abc', 'state': 'escalated', 'created_at': time.time(),
+                  'anx_ask_id': self.item['ask_id'], 'asker': 'worker', 'capture': 'modal',
+                  'tier': 2, 'guarded': False, 'default': 'Skip the gate', 'cycles': 99,
+                  'deadline_at': 0, 'question': 'Need a decision'}
+        write_json(questions.home(self.manifest)/'questions.json', {'q-123abc': record})
+        return record
+
+    def test_two_identical_response_texts_publish_distinct_decisions(self):
+        self.respond(self.listing())
+        self.consume()
+        self.item['answer'] = {'text': 'Repair it now', 'response_event_id': 'another-response'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(len({r['id'] for r in self.rows()}), 2)
+        self.assertEqual(len(self.reads()), 2)
+
+    def test_question_lifecycle_settles_before_ack_even_without_inbox_fallback(self):
+        from coordkit import questions
+        self.question()
+        self.respond(self.listing())
+        original = answers.AnxClient.call
+        def check(client, *args, **kwargs):
+            if args[:2] == ('api', 'call'):
+                record = questions.load_all(self.manifest)['q-123abc']
+                self.assertIn(record['state'], ('answered', 'closed'))
+                self.assertEqual(record['answer'], 'Repair it now')
+            return original(client, *args, **kwargs)
+        with patch.object(answers.AnxClient, 'call', check):
+            self.consume()
+        with patch.object(questions, 'deliver', return_value='waiter'):
+            questions.ladder(self.manifest, anx_answers={}, anx_known=None)
+        self.assertEqual(questions.load_all(self.manifest)['q-123abc']['state'], 'closed')
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_question_sweep_and_unread_consumer_share_one_publication(self):
+        from coordkit import questions
+        record = self.question()
+        self.respond(self.listing())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            questions.relay_anx_answer(self.manifest, record, self.item['answer'])
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIn(questions.load_all(self.manifest)['q-123abc']['state'], ('answered', 'closed'))
+
+    def test_pending_legacy_loop_delivery_clears_after_unread_delivery(self):
+        from coordkit import loop_answers
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        with patch.object(loop_answers.bus, 'main', side_effect=SystemExit(1)), contextlib.redirect_stderr(io.StringIO()):
+            loop_answers.receive(self.manifest, self.item)
+        pending = loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json')
+        self.assertTrue(pending.exists())
+        self.respond(self.listing())
+        self.consume()
+        loop_answers.drain(self.manifest)
+        self.assertFalse(pending.exists())
+        self.assertEqual(len(self.rows()), 1)
+
     def test_shadow_pass_does_not_poll_or_ack(self):
         self.manifest.mode = 'shadow'
         with self.assertRaises(ManifestError):

@@ -376,7 +376,7 @@ row('mcp_server.py', 'clients.json|clients.json.lock|writer:clients_main',
     'opened-file validation per request; atomic edits; bounded metadata-keyed parsed cache',
     'malformed/insecure file refuses admission; absent file permits legacy fallback')
 
-row('answers.py', 'reconcile/unread-answers|consume.lock|*.json|.json|status.json|refs|.read-body|writer:consume',
+row('answers.py', 'reconcile/unread-answers|consume.lock|*.json|.json|status.json|refs|.read-body|writer:consume|writer:stage|writer:process',
     'reconciler polls only its configured actor unread answers, retaining payloads before delivery',
     'bus fsync then per-answer read acknowledgement; pending receipts retry after failure',
     'snapshot bounded to ten pages and 2000 items; scope includes workspace actor and server; receipts retained',

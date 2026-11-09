@@ -59,19 +59,19 @@ def route(manifest, item):
     # if an agent already closed it before the human answered.
     for record in load_all(manifest).values():
         if record.get('anx_ask_id') and reference(record['anx_ask_id']) == ask_id:
-            return subject, record['asker'], record['qid']
+            return subject, record['asker'], record['qid'], record
     rows = bus.read()
     from .briefs import blocker_title
     blockers = [r for r in bus.open_blockers(rows) if r.get('subject') == subject
                 and item.get('title') in (blocker_title(r), ('Coordkit: ' + r['text'])[:99].rstrip('.?') + '?')]
     if len(blockers) == 1:
-        return subject, blockers[0]['frm'], blockers[0]['id']
+        return subject, blockers[0]['frm'], blockers[0]['id'], None
     # A card-level answer is still work for the configured coordinator. Never
     # infer permission to execute its text or choose one of ambiguous blockers.
     owner = manifest.escalation.internal_to or manifest.obligations.coordinator
     if not owner:
         raise ValueError('answer has no configured coordinating lane')
-    return subject, owner, None
+    return subject, owner, None, None
 
 
 def answer_id(item):
@@ -117,6 +117,71 @@ def delivered(row, subject, owner, text):
     return True
 
 
+def stage(manifest, item):
+    item = dict(item, ask_id=reference(item['ask_id']))
+    path = receipt_path(manifest, item)
+    existing = read_json(path, {})
+    if existing.get('phase') == 'read' or existing.get('item', {}).get('answer') != item['answer']:
+        write_json(path, {'item': item, 'phase': 'pending'})
+    return path
+
+
+def queued(manifest, item):
+    return receipt_path(manifest, item).is_file()
+
+
+def process(manifest, path, client):
+    record = read_json(path)
+    if record.get('phase') == 'read':
+        return True
+    item = record['item']
+    ask_id = item['ask_id']
+    try:
+        response_id = answer_id(item)
+        subject, owner, re_id, question = route(manifest, item)
+        answer = item['answer']
+        text = str(answer.get('text') or answer.get('outcome') or '')
+        if not text or len(text.encode()) > 1024 * 1024:
+            raise ValueError('answer text missing or too large')
+        # A repeated response text is still a distinct operator event. Bind the
+        # publication identity to the event, never merely the ask or its text.
+        row_id = 'answer-' + ask_id + '-' + hashlib.sha256(response_id.encode()).hexdigest()[:16]
+        row = next((r for r in bus.read() if r.get('id') == row_id), None)
+        if row is None:
+            args = ['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
+                    '--subject', subject, '--topic', 'anx-answer', '--id', row_id,
+                    '--rollback', 'Revise the answer on its original ANX ask.', '--force', '--no-mirror']
+            if re_id:
+                args += ['--re', re_id]
+            with contextlib.redirect_stdout(sys.stderr):
+                bus.main([*args, text], manifest)
+            row = next((r for r in bus.read() if r.get('id') == row_id), None)
+        if not row or not delivered(row, subject, owner, text):
+            raise ValueError('answer delivery missing or conflicts with a prior response')
+        if question is not None and question['state'] in ('open', 'escalated'):
+            from .questions import close
+            # Retire the question's default/escalation ladder before suppression
+            # or acknowledgement, even when the full inbox cannot be listed.
+            close(manifest, question, manifest.questions.human_actor, text, row_id)
+        record.update(phase='delivered', bus_id=row_id)
+        write_json(path, record)
+        # Acknowledge the exact response, not the latest reply to this ask.
+        body = path.with_suffix('.read-body')
+        write_json(body, {'answer_event_id': response_id})
+        result = client.call('api', 'call', '--method', 'POST', '--path', '/agent-inbox/answers/read',
+                             '--from-file', str(body), write=True, timeout=30)
+        ack = result.get('body', result).get('answer', {})
+        if ack.get('read') is not True or ack.get('answer_event_id') != response_id:
+            raise ValueError('answer read acknowledgement was not confirmed')
+        record.update(phase='read', read_at=time.time())
+        write_json(path, record)
+        return True
+    except (ToolError, OSError, ValueError, SystemExit, KeyError, TypeError, AttributeError) as exc:
+        record['error'] = getattr(exc, 'category', type(exc).__name__)
+        write_json(path, record)
+        return False
+
+
 def consume(manifest):
     manifest.writable()
     if not manifest.anx.workspace:
@@ -129,72 +194,38 @@ def consume(manifest):
         except BlockingIOError:
             return
         client = AnxClient(manifest)
-        status = {'at': time.time(), 'pending': [], 'poll_error': None}
+        status = {'at': time.time(), 'poll_error': None}
         try:
-            items = unread(client)
-            for item in items:
-                ask_id = reference(item.get('ask_id'))
-                if not isinstance(item.get('answer'), dict) or item.get('answer_unread') is False:
-                    continue
-                item = dict(item, ask_id=ask_id)
-                path = receipt_path(manifest, item)
-                existing = read_json(path, {})
-                if existing.get('phase') == 'read' or existing.get('item', {}).get('answer') != item['answer']:
-                    write_json(path, {'item': dict(item, ask_id=ask_id), 'phase': 'pending'})
+            for item in unread(client):
+                if isinstance(item.get('answer'), dict) and item.get('answer_unread') is not False:
+                    stage(manifest, item)
         except (ToolError, ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
             status['poll_error'] = getattr(exc, 'category', type(exc).__name__)
-        # Retained payloads also retry if the remote answer listing is unavailable.
         bus.configure(manifest)
         for path in sorted(directory.glob('*.json')):
-            if path.name == 'status.json':
-                continue
-            record = read_json(path)
-            if record.get('phase') == 'read':
-                continue
-            item = record['item']
-            ask_id = item['ask_id']
-            try:
-                response_id = answer_id(item)
-                subject, owner, re_id = route(manifest, item)
-                answer = item['answer']
-                text = str(answer.get('text') or answer.get('outcome') or '')
-                if not text or len(text.encode()) > 1024 * 1024:
-                    raise ValueError('answer text missing or too large')
-                row_id = 'answer-' + ask_id
-                row = next((r for r in bus.read() if r.get('id') == row_id), None)
-                if row and not delivered(row, subject, owner, text):
-                    row_id += '-' + hashlib.sha256(response_id.encode()).hexdigest()[:16]
-                    row = next((r for r in bus.read() if r.get('id') == row_id), None)
-                if row is None:
-                    args = ['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
-                            '--subject', subject, '--topic', 'anx-answer', '--id', row_id,
-                            '--rollback', 'Revise the answer on its original ANX ask.', '--force', '--no-mirror']
-                    if re_id:
-                        args += ['--re', re_id]
-                    with contextlib.redirect_stdout(sys.stderr):
-                        bus.main([*args, text], manifest)
-                    row = next((r for r in bus.read() if r.get('id') == row_id), None)
-                if not row or not delivered(row, subject, owner, text):
-                    raise ValueError('answer delivery missing or conflicts with a prior response')
-                record.update(phase='delivered', bus_id=row_id)
-                write_json(path, record)
-                # Use the exact response event from the requester-scoped snapshot.
-                # `inbox read ASK` re-resolves the latest response and could hide
-                # a newer answer that arrived after our snapshot/delivery.
-                body = path.with_suffix('.read-body')
-                write_json(body, {'answer_event_id': response_id})
-                result = client.call('api', 'call', '--method', 'POST', '--path', '/agent-inbox/answers/read',
-                            '--from-file', str(body), write=True, timeout=30)
-                ack = result.get('body', result).get('answer', {})
-                if ack.get('read') is not True or ack.get('answer_event_id') != response_id:
-                    raise ValueError('answer read acknowledgement was not confirmed')
-                record.update(phase='read', read_at=time.time())
-                write_json(path, record)
-            except (ToolError, OSError, ValueError, SystemExit, KeyError, TypeError, AttributeError) as exc:
-                record['error'] = getattr(exc, 'category', type(exc).__name__)
-                write_json(path, record)
-                status['pending'].append(ask_id)
+            if path.name != 'status.json':
+                process(manifest, path, client)
         write_json(directory/'status.json', status)
+
+
+def question_answer(manifest, record, answer):
+    """Share the same publication and lock when the question sweep wins first."""
+    manifest.writable()
+    directory = home(manifest)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory/'consume.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False  # owning consumer will settle it; the question remains pending
+        item = {'ask_id': reference(record['anx_ask_id']), 'subject_ref': manifest.escalation.card,
+                'answer': answer}
+        existing = read_json(receipt_path(manifest, item), {})
+        if existing.get('item'):
+            item = existing['item']
+        path = stage(manifest, item)
+        bus.configure(manifest)
+        return process(manifest, path, AnxClient(manifest))
 
 
 def health(manifest):

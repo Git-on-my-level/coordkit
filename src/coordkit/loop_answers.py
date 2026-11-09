@@ -48,6 +48,9 @@ def receive(manifest, item):
     ask_id = item.get('ask_id') or item.get('event_ref') or item.get('id')
     if not isinstance(ask_id, str) or not ask_id:
         return False
+    from .answers import queued
+    if queued(manifest, item):
+        return True  # full reply already retained by the requester-scoped consumer
     target = path(manifest, ask_id)
     record = read_json(target)
     if not record:
@@ -111,6 +114,12 @@ def deliver(manifest, pending):
     record = read_json(pending)
     if not record:
         return
+    from .answers import already_delivered, queued
+    if already_delivered(manifest, record):
+        pending.unlink(missing_ok=True)
+        return
+    if queued(manifest, record):
+        return  # requester-scoped receipt owns the retry; do not race its publication
     answer = record['answer']
     text = answer_text(answer)
     owner = manifest.escalation.internal_to or manifest.obligations.coordinator or 'lead'

@@ -949,8 +949,9 @@ def ladder(manifest, at=None, rows=None, anx_answers=None, anx_known=None):
         if record.get('anx_ask_id') and anx_answers:
             got = anx_answers.get(record['anx_ask_id'])
             if got is not None:
-                relay_anx_answer(manifest, record, got)
-                out.append(f'QUESTION_ANSWERED {record["qid"]} by {cfg(manifest).human_actor} (anx)')
+                handled = relay_anx_answer(manifest, record, got)
+                state = 'QUESTION_ANSWER_PENDING' if handled is False else 'QUESTION_ANSWERED'
+                out.append(f'{state} {record["qid"]} by {cfg(manifest).human_actor} (anx)')
                 continue
         if record.get('anx_ask_id') and anx_known is not None and record['anx_ask_id'] not in anx_known \
                 and at - record.get('escalated_at', at) >= WITHDRAWN_AFTER:
@@ -1062,6 +1063,9 @@ def withdraw_anx(manifest, record, by):
 
 
 def relay_anx_answer(manifest, record, answer):
+    if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')):
+        from .answers import question_answer
+        return question_answer(manifest, record, answer)
     text = str((answer or {}).get('text') or (answer or {}).get('outcome') or answer)
     post(manifest, 'coordkit', record['asker'], 'decision', f'{cfg(manifest).human_actor} answered {record["qid"]}: {text[:300]}',
          record, re_id=record['qid'])
