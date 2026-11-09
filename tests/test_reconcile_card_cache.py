@@ -1,8 +1,10 @@
 """An obligation receipt must prevent repeat I/O, including missing-card I/O."""
 import contextlib
 import dataclasses
+import fcntl
 import io
 import json
+from pathlib import Path
 import time
 from unittest.mock import patch
 
@@ -88,22 +90,171 @@ class ReconcileCardCacheTests(FakeCase):
         self.run_pass(at=10900)
         self.assertEqual(len(self.lookups()), 3)
 
-    def test_miss_ttl_retries_and_success_clears_unresolved_card(self):
-        self.rows()
+    def test_repaired_card_hourly_recheck_includes_handled_rows(self):
+        self.rows(3)
         self.missing()
         self.run_pass()
-        self.assertEqual(self.state()['missing_cards']['card:missing-0']['expires_at'], 31600)
-        self.rows(prefix='new')
-        self.run_pass(at=31599)
+        cache_key = reconcile.missing_card_key(self.manifest, 'card:missing-0')
+        self.assertEqual(self.state()['missing_cards'][cache_key]['expires_at'], 31600)
+        receipts = self.state()['fired']
+        self.respond()  # card now exists, without closing or replacing any row
+        self.run_pass(at=13599)
         self.assertEqual(len(self.lookups()), 1)
-        self.respond()  # card now exists
-        self.run_pass(at=31600, dry=True)  # handled rows do not force resolution
-        # New unfired row at the exact expiry boundary must be retried.
-        self.rows(prefix='recovered')
-        self.run_pass(at=31600)
+        self.run_pass(at=13600)
         self.assertEqual(len(self.lookups()), 2)
         self.assertEqual(self.state()['missing_cards'], {})
         self.assertEqual(self.state()['unresolved_obligations'], {})
+        self.assertEqual(self.state()['fired'], receipts)  # never send the asks again
+        self.run_pass(at=17200)
+        self.assertEqual(len(self.lookups()), 2)
+
+    def test_repeated_misses_reverify_once_per_hour_per_ref(self):
+        self.rows(6, 2)
+        self.missing()
+        self.run_pass()
+        self.run_pass(at=13599)
+        self.assertEqual(len(self.lookups()), 2)
+        self.run_pass(at=13600)
+        self.assertEqual(len(self.lookups()), 4)
+        self.rows(6, 2, prefix='fresh')
+        self.run_pass(at=13601)
+        self.assertEqual(len(self.lookups()), 4)
+        self.run_pass(at=17200)
+        self.assertEqual(len(self.lookups()), 6)
+
+    def test_workspace_identity_switch_invalidates_cache_and_recovers_handled_row(self):
+        self.rows()
+        self.missing()
+        self.run_pass()
+        initial = self.state()
+        original = self.manifest.anx
+        for field, value in [('workspace', 'different'), ('lead_actor', 'other-actor'),
+                             ('base_url', 'https://other.example')]:
+            with self.subTest(field=field):
+                write_json(self.manifest.paths.root/'reconcile/state.json', initial)
+                self.manifest.anx = dataclasses.replace(original, **{field: value})
+                self.respond()  # same card exists in the new identity
+                before = len(self.lookups())
+                self.run_pass(at=10300)  # before the hourly recheck
+                self.assertEqual(len(self.lookups()), before+1)
+                self.assertEqual(self.state()['missing_cards'], {})
+                self.assertEqual(self.state()['unresolved_obligations'], {})
+                self.assertEqual(self.state()['fired'], initial['fired'])
+
+    def test_negative_cache_cap_evicts_oldest_on_load_and_insert(self):
+        scope = reconcile.card_cache_scope(self.manifest)
+        entries = {reconcile.missing_card_key(self.manifest, f'card:old-{i}'):
+                   dict(scope=scope, ref=f'card:old-{i}', created_at=i,
+                        checked_at=9000, expires_at=50000) for i in range(2001)}
+        self.rows(0)
+        path = self.manifest.paths.root/'reconcile/state.json'
+        write_json(path, dict(fired={}, dead={}, loops={}, missing_cards=entries))
+        self.run_pass()
+        self.assertEqual(len(self.state()['missing_cards']), 2000)
+        self.assertNotIn(reconcile.missing_card_key(self.manifest, 'card:old-0'), self.state()['missing_cards'])
+        self.rows()
+        self.missing()
+        self.run_pass(at=10300)
+        current = self.state()['missing_cards']
+        self.assertEqual(len(current), 2000)
+        self.assertNotIn(reconcile.missing_card_key(self.manifest, 'card:old-1'), current)
+        self.assertIn(reconcile.missing_card_key(self.manifest, 'card:missing-0'), current)
+
+    def test_expired_and_legacy_unscoped_misses_are_dropped(self):
+        self.rows()
+        scope = reconcile.card_cache_scope(self.manifest)
+        missing = {'card:missing-0': dict(expires_at=50000),
+                   reconcile.missing_card_key(self.manifest, 'card:expired'):
+                   dict(scope=scope, ref='card:expired', created_at=0, checked_at=0, expires_at=10000)}
+        write_json(self.manifest.paths.root/'reconcile/state.json',
+                   dict(fired={}, dead={}, loops={}, missing_cards=missing))
+        self.run_pass()
+        self.assertEqual(len(self.lookups()), 1)
+        self.assertEqual(self.state()['missing_cards'], {})
+
+    def test_forget_one_and_all_recheck_handled_rows_without_network_or_reasking(self):
+        self.rows(2, 2)
+        self.missing()
+        self.run_pass()
+        fired = self.state()['fired']
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(reconcile.main(['forget-missing', 'card:missing-0'], self.manifest), 0)
+        self.assertEqual(len(self.lookups()), 2)  # operator command is entirely local
+        self.assertEqual(len(self.state()['missing_cards']), 1)
+        self.respond()
+        self.run_pass(at=10300)
+        self.assertEqual(len(self.lookups()), 3)
+        self.assertEqual(set(self.state()['unresolved_obligations']), {'ob-1'})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(reconcile.main(['forget-missing', '--all'], self.manifest), 0)
+        self.assertEqual(self.state()['missing_cards'], {})
+        self.run_pass(at=10600)
+        self.assertEqual(len(self.lookups()), 4)
+        self.assertEqual(self.state()['unresolved_obligations'], {})
+        self.assertEqual(self.state()['fired'], fired)
+
+    def test_forget_requires_one_selector_and_respects_reconcile_lock(self):
+        self.rows()
+        self.missing()
+        self.run_pass()
+        path = self.manifest.paths.root/'reconcile/state.json'
+        before = path.read_bytes()
+        for args in [[], ['--all', 'card:x'], ['--all', '--dry-run']]:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    result = reconcile.main(['forget-missing', *args], self.manifest)
+                except SystemExit as exc:
+                    result = exc.code
+                self.assertIn(result, (2, 6))
+            self.assertEqual(path.read_bytes(), before)
+        with (path.parent/'run.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(reconcile.main(['forget-missing', '--all'], self.manifest), 6)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_failed_wake_does_not_increment_blocker_counter_or_ask_early(self):
+        self.rows(2, 2, kind='blocker')
+        self.missing()
+        self.manifest.loop.fail_report_after = 2
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(reconcile.escalation, 'ask'), \
+                patch.object(bus, 'main', side_effect=ToolError('bus', 6, 'wake failed')), \
+                self.assertRaises(ToolError):
+            reconcile.reconcile(self.manifest, at=10000)
+        self.assertNotIn('ob-1', self.state()['blockers'])
+        self.assertNotIn('wake:blocker:ob-1', self.state()['fired'])
+        self.run_pass(at=10300)
+        self.assertEqual(self.state()['blockers']['ob-1'], 1)
+        self.assertIn('wake:blocker:ob-1', self.state()['fired'])
+        self.assertNotIn('blocker:ob-1', self.state()['fired'])
+        self.run_pass(at=10600)
+        self.assertEqual(self.state()['blockers']['ob-1'], 2)
+        self.assertIn('blocker:ob-1', self.state()['fired'])
+
+    def test_bad_handle_warning_does_not_block_apply_but_outage_still_red(self):
+        self.rows()
+        with patch.object(reconcile, 'card_for', side_effect=reconcile.CardUnresolved('bad handle', 'invalid handle')):
+            self.run_pass()
+        self.manifest.launchd.path = [str(Path.home()/'.local/bin'), str(self.root/'fakes'), '/usr/bin', '/bin']
+        self.respond({'tool':'anx','contains':['orient'],'json':{'ok':True,'result':{'principal':{'id':'lead'}}}},
+                     {'tool':'anx','contains':['boards','get'],'json':{'ok':True,'result':{'board':{'id':'board'}}}},
+                     {'tool':'agentctl','contains':['config','doctor'],'json':{'ok':True,'result':{'valid':True}}})
+        # No job installation: exercise the real apply health gate with an empty
+        # synthetic job plan and mocked registration, without a service mutation.
+        with patch.object(lifecycle, 'templates', return_value=[]), \
+                patch('coordkit.selfupdate.register'), patch.object(lifecycle.time, 'time', return_value=10001), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            try:
+                result = lifecycle.up(self.manifest, apply=True)
+            except lifecycle.ManifestError:
+                self.fail(out.getvalue())
+            self.assertEqual(result, 0)
+        self.assertIn('DOCTOR unresolved_obligations warn', out.getvalue())
+        self.respond({'tool':'anx','contains':['orient'],'exit':6,
+                      'json':{'ok':False,'error':{'code':'unavailable'}}})
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(lifecycle.doctor(self.manifest), 1)
+        self.assertIn('DOCTOR anx red', out.getvalue())
 
     def test_transient_and_auth_failures_never_get_durable_negative_cache(self):
         for code, exit_code in [('unavailable', 6), ('forbidden', 3)]:
@@ -187,6 +338,31 @@ class ReconcileCardCacheTests(FakeCase):
         self.run_pass(at=10300)
         self.assertEqual(len(self.lookups()), 1)
 
+    def test_renewed_miss_survives_failed_ask_and_later_stage_failure(self):
+        self.rows()
+        self.missing()
+        error = ToolError('bus', 6, 'ask unavailable')
+        self.run_pass(ask_error=error)
+        with patch.object(reconcile, 'report', side_effect=RuntimeError('later failure')), \
+                self.assertRaises(RuntimeError):
+            self.run_pass(at=13600, ask_error=error)
+        key = reconcile.missing_card_key(self.manifest, 'card:missing-0')
+        self.assertEqual(self.state()['missing_cards'][key]['checked_at'], 13600)
+        self.assertEqual(self.state()['missing_cards'][key]['expires_at'], 35200)
+        self.run_pass(at=13601, ask_error=error)
+        self.assertEqual(len(self.lookups()), 2)
+
+    def test_due_reverification_dry_run_preserves_cache_and_unresolved_receipts(self):
+        self.rows()
+        self.missing()
+        self.run_pass()
+        path = self.manifest.paths.root/'reconcile/state.json'
+        before = path.read_bytes()
+        self.respond()
+        self.run_pass(at=13600, dry=True)
+        self.assertEqual(len(self.lookups()), 2)
+        self.assertEqual(path.read_bytes(), before)
+
     def test_completion_uses_end_clock_and_failed_pass_keeps_previous_completion(self):
         clock = [0]
         real_report = reconcile.report
@@ -244,7 +420,7 @@ class ReconcileCardCacheTests(FakeCase):
         self.assertIn('ambiguous', record['detail'])
         self.assertIn('ruling:map-1', self.state()['fired'])
         self.assertEqual(len(asks), 1)
-        self.assertIn(' red ', self._doctor_line())
+        self.assertIn(' warn ', self._doctor_line())
         self.respond(linked('alpha'))
         before = len(self.lookups())
         with patch.object(reconcile, 'report', side_effect=RuntimeError('later failure')), self.assertRaises(RuntimeError):

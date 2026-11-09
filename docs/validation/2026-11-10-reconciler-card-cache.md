@@ -5,36 +5,61 @@ Validated with synthetic obligations and fake ANX responses on 2026-11-10
 
 ## Contracts
 
-- A delivered ruling ask skips card resolution. A blocker whose owner wake and
-  lead ask have both fired also skips resolution. Between those two steps, polls
+- A delivered ruling ask skips repeated action resolution. A blocker whose owner wake and
+  lead ask have both fired also skips action resolution. Between those two steps, polls
   advance the existing threshold without resolving a card until an ask is due.
+  The counter increments only after wake delivery succeeds (or a receipt proves
+  it was already delivered); failed delivery cannot advance the ask threshold.
   Closed/acknowledged obligations remain filtered by the existing bus rules.
 - Within a pass, successes and failures share one cache by actual card reference,
   including obligations with different owners. Owner/subject mappings also share
   a pass cache, preserving execution-card linkage and ambiguity checks.
 - Only a confirmed `not_found` response creates a durable six-hour negative entry
-  in `reconcile/state.json` under `missing_cards`. Auth, transport, timeout,
+  in `reconcile/state.json` under `missing_cards`. Keys include ANX workspace,
+  lead actor, endpoint and card reference. Other-identity and legacy unscoped
+  entries are dropped on load. Auth, transport, timeout,
   ambiguous linkage and malformed-response failures do not establish absence.
   Existing bounded transport retries still apply to transient failures.
-- Expired negative entries are removed at pass start. A new/unfired obligation
-  retries after expiry; fired receipts continue to suppress handled actions
+- Expired negative entries are removed at pass start, and oldest-first eviction
+  caps the cache at 2,000 entries on both load and insertion. Confirmed misses
+  re-verify at most once per hour per cached reference. Still-open handled rows
+  participate in this check, so repaired cards recover without closing/reposting
+  obligations. Fired receipts continue to suppress handled actions
   according to the existing `reconciler.state_max_age` retention policy.
   Misses and unresolved records are durable before subsequent pass work, so a
   later failure cannot discard the negative cache. Dry runs do not write them.
 - Unresolved open ruling/blocker IDs are retained under `unresolved_obligations`.
-  Doctor emits one red summary with counts, sample IDs and the state-file path;
+  Doctor emits one warning with counts, sample IDs and the state-file path;
   reconcile no longer emits one unresolved-card line per row per pass. Closing
   an obligation removes its record on the next pass. A successful later lookup
   of the card clears its unresolved records, including handled obligations.
   Both cleanups persist before later fallible stages; shadow doctor ignores
   retained live reconciler receipts because it schedules no clearing pass.
-  Repairing a card alone does not force a handled obligation to be looked up.
+  Mapping failures that never determine a reference (`card=None`) retry mapping
+  without resending handled asks. Repairing a card clears its handled rows at
+  the next hourly re-verification. Existing ANX/dependency, escalation-path and
+  reconciler-age checks still report real outages as red, so data quirks need
+  not block upgrades through `up --apply`.
 - `started_at` and legacy `last_run` record pass start before probes. A successful
   pass sets `last_completed` at the end, using elapsed monotonic time added to
   the start wall clock. Failed passes preserve the prior completed receipt.
   Doctor ages completion against twice `reconciler.interval_seconds`, falling
   back to start/legacy time only when there is no completion receipt. Its output
   includes age, configured interval and deadline.
+
+## Operator invalidation
+
+```sh
+coordkit --manifest <manifest> reconcile forget-missing card:repaired
+coordkit --manifest <manifest> reconcile forget-missing --all
+```
+
+These commands only update local state under the reconciler's exclusive run
+lock; they refuse while a pass holds the lock and make no external calls. They
+remove the selected negative entries and re-arm unresolved records for the next
+pass, including rows whose wake/ask receipts already fired. They preserve those
+receipts and retain the warning until successful verification. Shadow mode
+refuses the writer, and exactly one reference or `--all` is required.
 
 ## Reproduce the measurement
 

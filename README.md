@@ -77,7 +77,7 @@ manager. See the [v0.2 contracts and operations guide](docs/V02.md) and
 - **[Portable handoffs](docs/HANDOFFS.md):** committed repo paths and SHA-256, per-writer filenames, and consumer-side pickup checks that return unreadable work to its poster.
 - **Questions:** captured decisions climb from a live agent to a human; `[human-only]` forces the human tier.
 - **Loops:** recurring work with cadence, receipts, and repeated failure asks in ANX Decide. See [recovery and mirror replay](docs/LOOP-RECOVERY.md).
-- **Reconciliation:** handled ruling/blocker receipts skip card resolution. Card lookups share a pass cache; confirmed missing cards are cached for six hours. `doctor` summarizes unresolved obligation cards from `reconcile/state.json` and checks the last completed pass against two configured reconciler intervals. See [validation and cache lifecycle](docs/validation/2026-11-10-reconciler-card-cache.md).
+- **Reconciliation:** handled ruling/blocker receipts skip repeated actions. Card lookups share a pass cache; missing cards re-verify hourly, including handled rows. The negative cache expires after six hours, uses workspace/actor/endpoint identity, and holds at most 2,000 entries. Use `coordkit reconcile forget-missing <ref>` or `--all` to force recovery checks next pass. `doctor` warns about unresolved obligation cards and checks the last completed pass against two configured reconciler intervals. See [validation and cache lifecycle](docs/validation/2026-11-10-reconciler-card-cache.md).
 - **Shadow mode:** compares read-only protocol views before cutover; local observation state and relay output remain writable.
 
 Coordination safeguards apply by default. Unchanged asks reuse one durable question;

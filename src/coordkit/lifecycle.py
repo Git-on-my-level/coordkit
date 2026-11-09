@@ -348,8 +348,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
         if unresolved:
             cards = {row.get('card') for row in unresolved.values() if row.get('card')}
             sample = ','.join(sorted(unresolved)[:5])
-            raise ManifestError(f'unresolved obligations={len(unresolved)} cards={len(cards)} '
-                                f'sample={sample}; details={path}')
+            return (f'WARN unresolved obligations={len(unresolved)} cards={len(cards)} '
+                    f'sample={sample}; details={path}')
         return 'no unresolved obligation cards'
     def deadletters():
         if not manifest.agentctl.pools:

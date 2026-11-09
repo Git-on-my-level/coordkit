@@ -19,6 +19,26 @@ from .state import read_json, write_json
 
 
 MISSING_CARD_TTL = 6 * 3600
+MISSING_CARD_REVERIFY = 3600
+MISSING_CARD_LIMIT = 2000
+
+
+def card_cache_scope(manifest):
+    return [manifest.anx.workspace, manifest.anx.lead_actor, manifest.anx.base_url]
+
+
+def missing_card_key(manifest, ref):
+    return json.dumps([*card_cache_scope(manifest), ref], separators=(',', ':'))
+
+
+def prune_missing_cards(missing, scope, at):
+    # Legacy ref-only entries have no trustworthy workspace identity: discard.
+    for key, entry in list(missing.items()):
+        if entry.get('scope') != scope or entry['expires_at'] <= at:
+            del missing[key]
+    oldest = sorted(missing, key=lambda key: (missing[key]['created_at'], key))
+    for key in oldest[:max(0, len(missing)-MISSING_CARD_LIMIT)]:
+        del missing[key]
 
 
 def card_ref(card):
@@ -44,9 +64,8 @@ def reconcile(manifest, dry_run=False, at=None):
     state.setdefault('blockers', {})
     state.setdefault('holds', {})
     missing = state.setdefault('missing_cards', {})
-    for ref in list(missing):
-        if missing[ref]['expires_at'] <= at:
-            del missing[ref]
+    cache_scope = card_cache_scope(manifest)
+    prune_missing_cards(missing, cache_scope, at)
     unresolved = state.setdefault('unresolved_obligations', {})
     if not dry_run:
         write_json(state_path, state)
@@ -80,10 +99,16 @@ def reconcile(manifest, dry_run=False, at=None):
 
     lookups, resolutions = {}, {}
     def resolve_card(ref):
+        cache_key = missing_card_key(manifest, ref)
+        had_missing = cache_key in missing
         if ref not in lookups:
-            if ref in missing:
+            cached = missing.get(cache_key)
+            if cached and at-cached['checked_at'] < MISSING_CARD_REVERIFY:
                 lookups[ref] = CardUnresolved(ref, 'not_found (cached)')
             else:
+                # A failed retry must not turn a transport/auth error into a new
+                # proof of absence. Only a fresh not_found repopulates the cache.
+                missing.pop(cache_key, None)
                 try:
                     lookups[ref] = client.resolve_card(ref)
                 except ToolError as exc:
@@ -93,7 +118,12 @@ def reconcile(manifest, dry_run=False, at=None):
                     cause = exc
                     while cause is not None:
                         if isinstance(cause, ToolError) and cause.category == 'not_found':
-                            missing[ref] = {'expires_at': at + MISSING_CARD_TTL}
+                            missing[cache_key] = {'scope': cache_scope, 'ref': ref,
+                                'created_at': cached['created_at'] if cached else at,
+                                'checked_at': at, 'expires_at': at + MISSING_CARD_TTL}
+                            prune_missing_cards(missing, cache_scope, at)
+                            if not dry_run:
+                                write_json(state_path, state)
                             break
                         cause = cause.__cause__
         result = lookups[ref]
@@ -104,7 +134,7 @@ def reconcile(manifest, dry_run=False, at=None):
             if unresolved[key]['card'] == ref:
                 del unresolved[key]
                 cleared = True
-        if cleared and not dry_run:
+        if (cleared or had_missing) and not dry_run:
             write_json(state_path, state)
         return result
 
@@ -125,7 +155,9 @@ def reconcile(manifest, dry_run=False, at=None):
             return resolutions[key]
         except ToolError as exc:
             ref = next((ref for ref, result in lookups.items() if result is exc), None)
-            record = {'card': ref, 'owner': row['owner'], 'detail': str(exc)}
+            cached = missing.get(missing_card_key(manifest, ref)) if ref else None
+            record = {'card': ref, 'owner': row['owner'], 'detail': str(exc), 'scope': cache_scope,
+                      'checked_at': cached['checked_at'] if cached else at}
             if unresolved.get(row['id']) != record:
                 unresolved[row['id']] = record
                 if not dry_run:
@@ -259,12 +291,14 @@ def reconcile(manifest, dry_run=False, at=None):
             closed = True
     if closed and not dry_run:
         write_json(state_path, state)
-    # Ambiguous linkage and agentctl errors raise before resolve_card, leaving
-    # card=None. A later lookup cannot match that, so retry the mapping. A fired
-    # ask receipt still suppresses the ask.
+    # Recheck missing cards hourly even when their action receipts have fired.
+    # Mapping failures (card=None) retry mapping; action receipts still suppress
+    # repeated asks/wakes. Per-pass lookups dedupe shared refs across all rows.
     open_rows = {row['id']: row for row in rulings + blockers}
     for key, record in list(unresolved.items()):
-        if record.get('card') is None and key in open_rows:
+        due = (record.get('scope') != cache_scope or record.get('card') is None
+               or 'checked_at' not in record or at-record['checked_at'] >= MISSING_CARD_REVERIFY)
+        if key in unresolved and key in open_rows and due:
             obligation_card(open_rows[key])
     for row in rulings:
         if not since_adoption(row):
@@ -285,13 +319,15 @@ def reconcile(manifest, dry_run=False, at=None):
         key = row['id']; open_ids.add(key)
         if 'wake:blocker:'+key in fired and 'blocker:'+key in fired:
             continue
-        state['blockers'][key] = state['blockers'].get(key, 0)+1
+        passes = state['blockers'].get(key, 0)+1
         # A delivered wake needs no card lookup while waiting for the ask threshold.
-        if 'wake:blocker:'+key in fired and state['blockers'][key] < manifest.loop.fail_report_after:
+        if 'wake:blocker:'+key in fired and passes < manifest.loop.fail_report_after:
+            state['blockers'][key] = passes
             continue
         card = obligation_card(row)
         recommendation = f'Answer or disposition blocker {key} with a decision --re {key} and a reason.'
         wake_obligation('blockers', 'blocker:'+key, row, card, recommendation)
+        state['blockers'][key] = passes
         if state['blockers'][key] >= manifest.loop.fail_report_after:
             ask('blockers', 'blocker:'+key, card, f'Blocker {key} remains open past its maximum age.', recommendation)
     state['blockers'] = {key:value for key,value in state['blockers'].items() if key in open_ids}
@@ -462,11 +498,38 @@ def reconcile(manifest, dry_run=False, at=None):
 def main(argv,manifest):
     parser=argparse.ArgumentParser(prog='coordkit reconcile')
     parser.add_argument('--dry-run',action='store_true')
-    parser.add_argument('command', nargs='?', choices=['run','abandon-answer'], default='run')
+    parser.add_argument('command', nargs='?', choices=['run','abandon-answer','forget-missing'], default='run')
     parser.add_argument('answer_id', nargs='?')
+    parser.add_argument('--all', action='store_true', dest='all_missing')
     parser.add_argument('--reason')
     args=parser.parse_args(argv)
     try:
+        if args.command == 'forget-missing':
+            manifest.writable()
+            if bool(args.answer_id) == args.all_missing or args.dry_run or args.reason:
+                parser.error('forget-missing requires exactly one card ref or --all; no --dry-run/--reason')
+            ref = 'card:'+args.answer_id.removeprefix('card:') if args.answer_id else None
+            directory=manifest.paths.root/'reconcile'; directory.mkdir(parents=True,exist_ok=True)
+            with (directory/'run.lock').open('a') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+                state_path=directory/'state.json'
+                state=read_json(state_path, {'fired':{}, 'dead':{}, 'loops':{}})
+                missing = state.setdefault('missing_cards', {})
+                removed = 0
+                for key, entry in list(missing.items()):
+                    if args.all_missing or entry.get('ref', key) == ref:
+                        del missing[key]
+                        removed += 1
+                # Retain the diagnostic until a real successful lookup, but force
+                # even handled rows to retry on the next pass, without re-asking.
+                for record in state.get('unresolved_obligations', {}).values():
+                    if args.all_missing or record.get('card') == ref:
+                        record.pop('checked_at', None)
+                write_json(state_path, state)
+            print(f'RECONCILE forget_missing removed={removed}')
+            return 0
+        if args.all_missing:
+            parser.error('--all is only supported by forget-missing')
         if args.command == 'abandon-answer':
             manifest.writable()
             if not args.answer_id or not args.reason or args.dry_run:
