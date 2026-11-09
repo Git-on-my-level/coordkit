@@ -1,5 +1,6 @@
 """Lane relocation contracts use synthetic accounts, fake holders and no live harness."""
 import contextlib
+import fcntl
 from dataclasses import asdict
 from datetime import datetime, timezone
 import io
@@ -13,7 +14,7 @@ import time
 import tomllib
 from unittest.mock import Mock, patch
 
-from coordkit import addressed, bus, cli, lanemove, routing, usage
+from coordkit import addressed, bus, cli, lane, lanemove, routing, usage
 from coordkit.adapters import claude_resume
 from coordkit.manifest import load
 from coordkit.state import read_json, write_json
@@ -832,9 +833,11 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
         events = self.manifest.paths.events
         events.parent.mkdir(parents=True, exist_ok=True)
         events.write_text('{"id":"other"}\n{not json\n[]\n')
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as warnings:
             lanemove.phase(self.manifest, plan, 'freeze')
             lanemove.phase(self.manifest, self.plan(), 'freeze')
+        self.assertIn('skipped 2 malformed lane event row(s)', warnings.getvalue())
+        self.assertNotIn('{not json', warnings.getvalue())
         seen = []
         for line in events.read_text().splitlines():
             try:
@@ -844,6 +847,130 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
             if isinstance(row, dict):
                 seen.append(row.get('id'))
         self.assertEqual(seen.count(plan['id'] + '-freeze'), 1)
+
+    def test_phase_repairs_torn_tail_before_saving_and_replays_once(self):
+        self.invoke('--plan')
+        initial = self.plan()
+        events = self.manifest.paths.events
+        events.parent.mkdir(parents=True, exist_ok=True)
+        # Include a torn UTF-8 character as well as the reported malformed JSON.
+        for tail in (b'{not json', b'{"text":"\xe2\x82'):
+            with self.subTest(tail=tail):
+                lanemove.save(initial)
+                events.write_bytes(b'{"id":"earlier"}\n' + tail)
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as warnings:
+                    # Simulate a crash after the event commits but before saving the plan.
+                    with patch.object(lanemove, 'save', side_effect=RuntimeError('before phase save')):
+                        with self.assertRaisesRegex(RuntimeError, 'before phase save'):
+                            lanemove.phase(self.manifest, self.plan(), 'freeze')
+                    self.assertEqual(self.plan()['completed'], [])
+                    lanemove.phase(self.manifest, self.plan(), 'freeze')
+                    lanemove.phase(self.manifest, self.plan(), 'freeze')
+                self.assertIn('newline-terminated torn lane event tail', warnings.getvalue())
+                self.assertTrue(events.read_bytes().startswith(b'{"id":"earlier"}\n' + tail + b'\n'))
+                rows = usage.tail_lines(events, 1024 * 1024)
+                receipt = json.loads(rows[-1])
+                self.assertEqual(receipt['id'], initial['id'] + '-freeze')
+                self.assertEqual(len(rows), 3)
+                self.assertEqual(self.plan()['completed'], ['freeze'])
+
+    def test_phase_repairs_valid_unterminated_receipt_without_duplicating_it(self):
+        self.invoke('--plan')
+        plan = self.plan()
+        row = dict(id=plan['id']+'-freeze', kind='lane-move', label='worker',
+                   phase='freeze', move_id=plan['id'])
+        events = self.manifest.paths.events
+        events.parent.mkdir(parents=True, exist_ok=True)
+        original = json.dumps(row).encode()
+        events.write_bytes(original)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            lanemove.phase(self.manifest, plan, 'freeze')
+        self.assertEqual(events.read_bytes(), original+b'\n')
+        self.assertEqual(self.plan()['completed'], ['freeze'])
+
+    def test_phase_never_saves_completion_after_event_sync_failure(self):
+        self.invoke('--plan')
+        plan = self.plan()
+        events = self.manifest.paths.events
+        real_fsync = os.fsync
+
+        def sync(fd):
+            if events.exists() and os.fstat(fd).st_ino == events.stat().st_ino:
+                raise OSError('event sync failed')
+            real_fsync(fd)
+
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(lane.os, 'fsync', side_effect=sync):
+            with self.assertRaisesRegex(OSError, 'event sync failed'):
+                lanemove.phase(self.manifest, plan, 'freeze')
+        self.assertEqual(plan['completed'], [])
+        self.assertEqual(self.plan()['completed'], [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            lanemove.phase(self.manifest, self.plan(), 'freeze')
+        self.assertEqual(len(usage.tail_lines(events, 1024 * 1024)), 1)
+
+    def test_phase_never_saves_completion_when_event_readback_fails(self):
+        self.invoke('--plan')
+        plan = self.plan()
+        events = self.manifest.paths.events
+        real_fsync = os.fsync
+
+        def corrupt(fd):
+            real_fsync(fd)
+            if events.exists() and os.fstat(fd).st_ino == events.stat().st_ino:
+                with events.open('r+b') as stream:
+                    stream.write(b'!')
+
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(lane.os, 'fsync', side_effect=corrupt):
+            with self.assertRaisesRegex(lane.Refusal, 'event_append_unverified'):
+                lanemove.phase(self.manifest, plan, 'freeze')
+        self.assertEqual(plan['completed'], [])
+        self.assertEqual(self.plan()['completed'], [])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            lanemove.phase(self.manifest, self.plan(), 'freeze')
+        self.assertEqual(json.loads(usage.tail_lines(events, 1024 * 1024)[-1])['id'], plan['id']+'-freeze')
+
+    def test_regular_lane_event_also_fences_off_torn_tail(self):
+        events = self.manifest.paths.events
+        events.parent.mkdir(parents=True, exist_ok=True)
+        events.write_bytes(b'{not json')
+        with contextlib.redirect_stderr(io.StringIO()):
+            lane.event(self.manifest, dict(kind='launched', label='worker'))
+        rows = usage.tail_lines(events, 1024 * 1024)
+        self.assertEqual(rows[0], '{not json')
+        self.assertEqual(json.loads(rows[1])['kind'], 'launched')
+
+    def test_event_repair_and_deduplication_wait_for_the_writer_lock(self):
+        events = self.manifest.paths.events
+        events.parent.mkdir(parents=True, exist_ok=True)
+        code = '''import sys
+from coordkit import lane
+from coordkit.manifest import load
+print('ready', flush=True)
+lane.event(load(sys.argv[1]), dict(id='same-receipt', kind='lane-move'), once=True)
+'''
+        children = []
+        with events.open('a+b') as writer:
+            fcntl.flock(writer, fcntl.LOCK_EX)
+            try:
+                for _ in range(2):
+                    child = subprocess.Popen([sys.executable, '-c', code, str(self.file)],
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    children.append(child)
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    self.assertIsNone(child.poll())
+                # The tail changes after both writers started. Repair must inspect
+                # it after acquiring the lock, and dedupe must use that same lock.
+                writer.write(b'{not json')
+                writer.flush()
+            finally:
+                fcntl.flock(writer, fcntl.LOCK_UN)
+        for child in children:
+            _, errors = child.communicate(timeout=10)
+            self.assertEqual(child.returncode, 0, errors)
+        rows = usage.tail_lines(events, 1024 * 1024)
+        self.assertEqual(rows[0], '{not json')
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(json.loads(rows[1])['id'], 'same-receipt')
 
     def test_resume_verification_does_not_consume_the_rearm_budget(self):
         self.frozen()
@@ -871,6 +998,24 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
         self.assertGreaterEqual(clock['now'], 70)
         self.assertLess(clock['now'], 110)
         self.assertIn('done', self.plan()['completed'])
+
+    def test_rearm_still_times_out_at_its_own_deadline_after_slow_resume(self):
+        self.frozen()
+        with self.assertRaisesRegex(lanemove.Refusal, 'rearm_timeout'):
+            self.invoke('--apply')
+        clock = {'now': 0.0}
+
+        def sleep(seconds):
+            clock['now'] += seconds
+
+        with patch('coordkit.lanemove.time.monotonic', side_effect=lambda: clock['now']), patch(
+                'coordkit.lanemove.time.sleep', side_effect=sleep), patch.object(
+                lanemove, 'rearmed', side_effect=lambda *args: clock['now'] >= 50), patch.object(
+                lanemove, 'rearm_all', return_value=False):
+            with self.assertRaisesRegex(lanemove.Refusal, 'rearm_entries_timeout'):
+                lanemove.apply(load(self.file), self.plan(), 60, 0)
+        self.assertEqual(clock['now'], 110)
+        self.assertNotIn('done', self.plan()['completed'])
 
     def test_publication_refs_preserve_phase_attention_and_handoff_evidence(self):
         # Later phases and replays must not change the evidence of an older row.

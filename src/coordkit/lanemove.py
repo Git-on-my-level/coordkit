@@ -137,19 +137,10 @@ def phase(manifest, plan, name):
     # Projection first: a crash before saving retries exactly the same bus/event IDs.
     publish(manifest, plan, name, 'fyi', f"Lane {plan['name']} move {name}; receipt {plan['id']}.")
     eid = plan['id'] + '-' + name
-    rows = usage.tail_lines(manifest.paths.events, 1024 * 1024) if manifest.paths.events.exists() else []
-    recorded = False
-    for row in rows:
-        try:
-            parsed = json.loads(row)
-        except ValueError:
-            continue
-        if isinstance(parsed, dict) and parsed.get('id') == eid:
-            recorded = True
-            break
-    if not recorded:
-        lane.event(manifest, dict(id=eid, kind='lane-move', label=plan['name'], phase=name,
-                                  move_id=plan['id']))
+    # The event writer repairs torn tails, scans and appends under one lock, and
+    # reads the durable row back before allowing phase completion to be saved.
+    lane.event(manifest, dict(id=eid, kind='lane-move', label=plan['name'], phase=name,
+                              move_id=plan['id']), once=True)
     if name not in plan['completed']:
         plan['completed'].append(name)
     plan['phase'] = name

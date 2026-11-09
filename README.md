@@ -132,7 +132,8 @@ Apply uses this sequence:
    background-shell child blocks quiescence even after its parent exits and the
    child is reparented. Coordkit **never kills or signals** a process, and there is no
    `--stop-command`. A holder timeout posts an attention ask and leaves the plan
-   resumable. `--timeout` bounds each holder/re-arm wait in seconds (default 60).
+   resumable. `--timeout` bounds each holder wait, destination resume verification,
+   and re-arm polling separately in seconds (default 60 for each stage).
 3. Finalize the move-state file and snapshot it in the receipt. It contains `goal`,
    `open_prs`, `lanes_in_flight` (including execution IDs), `waiters` (each name and
    flags), `bus_name`, `next_steps`, session/transcript paths, `background_shells`,
@@ -203,7 +204,11 @@ Apply uses this sequence:
 
 Phase bus publications use stable `lane-move-NAME-TIMESTAMP-PHASE` IDs; the final
 handoff uses `lane-move-NAME-TIMESTAMP`. Each successful phase also has a
-`lane.event` row. Bus refs and handoff evidence contain an allowlisted redacted
+`lane.event` row. The event writer newline-terminates an interrupted tail under
+its lock, preserves the original bytes, and warns when malformed complete rows
+are skipped. Phase completion follows event fsync and read-back verification;
+retries deduplicate the receipt under the same lock.
+Bus refs and handoff evidence contain an allowlisted redacted
 summary only: move ID, lane, phase, completed phases and attention code. Private
 paths, raw commands, environment values and process/session identities are excluded.
 Paused version-1 receipts discard the old resume verification and require an

@@ -171,9 +171,29 @@ class BusTests(FakeCase):
                                 to='elsewhere', kind='fyi', re='ask-0001', topic='general',
                                 text='late', v=1), separators=(',', ':'))
         path.write_text('\n'.join([*asks, reply]) + '\n')
-        bus.set_cursor('lead', 'wait', 4096)
-        self.assertIn('late-fyi', self.invoke('wait', '--to', 'lead', '--own-asks',
-                                              '--kinds', 'ask', '--timeout', '0')[0])
+        for cursor in (4096, 2048, 1):
+            with self.subTest(cursor=cursor):
+                bus.set_cursor('lead', 'wait', cursor)
+                self.assertIn('late-fyi', self.invoke('wait', '--to', 'lead', '--own-asks',
+                                                      '--kinds', 'ask', '--timeout', '0')[0])
+
+    def test_restarted_own_ask_seed_survives_overlap_then_reply_on_a_later_poll(self):
+        self.manifest.bus.mirror = False
+        bus.configure(self.manifest)
+        bus.append([dict(id=f'ask-{index:04d}', ts=T0.isoformat(), frm='lead', to='worker',
+                         kind='ask', text='a') for index in range(4096)])
+        bus.set_cursor('lead', 'wait', 2048)
+
+        def reply(_):
+            # This only wakes through own-asks: neither the kind nor recipient matches.
+            bus.append([dict(id='later-reply', ts=T0.isoformat(), frm='worker', to='elsewhere',
+                             kind='fyi', re='ask-0000', text='late')])
+
+        with patch.object(bus.time, 'sleep', side_effect=reply) as sleep:
+            self.assertIn('later-reply', self.invoke('wait', '--to', 'lead', '--own-asks',
+                                                   '--kinds', 'ask', '--timeout', '1')[0])
+        sleep.assert_called_once()
+        self.assertEqual(bus.get_cursor('lead', 'wait', None), 4097)
 
     def test_text_spill_and_ref_refusal(self):
         self.post(text='x'*1000,to='worker')
