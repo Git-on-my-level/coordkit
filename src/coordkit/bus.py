@@ -197,11 +197,13 @@ class ReplayIndex:
                 self.seen.add(key)
 
 
-def append(recs, project=True, replay_index=None, on_commit=None):
+def append(recs, project=True, replay_index=None, on_commit=None, before_append=None, max_scan_bytes=None):
     """Append rows durably, then (unless project=False) run the ANX projection, which may exit 1.
     Callers that must act after the append whatever ANX does (addressed escalation) pass
     project=False and call project() last. on_commit records an in-memory receipt
-    after fsync, before any fallible post-append sinks or projection."""
+    after fsync, before any fallible post-append sinks or projection. before_append
+    may veto a write under the bus flock; it must not acquire the question lock.
+    max_scan_bytes bounds checkpoint recovery; exceeding it also vetoes the append."""
     CONFIG.writable()
     BUS.parent.mkdir(parents=True, exist_ok=True)
     from .wake import refuse_retired, state_path
@@ -212,8 +214,13 @@ def append(recs, project=True, replay_index=None, on_commit=None):
                 refuse_retired(CONFIG, resolve(rec.get('to', '')))
         with open(BUS, 'a+b') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
-            from .tail import TailReader
-            total, _ = TailReader(BUS, STATE / 'append.offset.json').read(10 ** 18)
+            if before_append is not None and not before_append(f):
+                return False
+            from .tail import TailReader, TailLimit
+            try:
+                total, _ = TailReader(BUS, STATE / 'append.offset.json').read(10 ** 18, max_bytes=max_scan_bytes)
+            except TailLimit:
+                return False
             f.seek(0, os.SEEK_END)
             if f.tell():
                 f.seek(-1, os.SEEK_END)
@@ -248,6 +255,7 @@ def append(recs, project=True, replay_index=None, on_commit=None):
     notify(CONFIG, recs)
     if project:
         project_pending()
+    return True
 
 
 def project_pending():
@@ -638,7 +646,8 @@ def dispatch(o):
         if o.kind == 'ask' and o.topic != 'coordkit-digest':
             from . import questions
             candidate = dict(frm=o.frm, to=role or o.to, topic=o.topic, text=o.text,
-                             key=o.key, default=o.default, no_auto_default=o.no_auto_default, owner=o.owner)
+                             key=o.key, default=o.default, no_auto_default=o.no_auto_default, owner=o.owner,
+                             ask_ref=questions.ref_identity(o.ref), priority=o.priority or 'normal')
             duplicate = questions.repeat_bus_ask(CONFIG, candidate, rows, now().timestamp())
             if duplicate:
                 global LAST_POST
@@ -726,6 +735,7 @@ def dispatch(o):
         if o.kind == 'ask':
             from .questions import normalized_hash
             rec['normalized_text_hash'] = normalized_hash(o.text)
+            rec['ask_ref'] = candidate.get('ask_ref') if o.topic != 'coordkit-digest' else None
         from .approvals import requires_owner
         if requires_owner(rec) and not o.owner:
             rec['owner_missing'] = True

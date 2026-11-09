@@ -22,13 +22,21 @@ is bounded at 5s (`perl alarm`).
 `bus post --kind ask` and machine escalations share the durable question projection.
 Use `--key KEY` for a stable explicit key; otherwise the key hashes normalized
 sender, recipient (the declared role before member selection), topic and text.
-Case, whitespace, clock times, q-ids and bare counts do not create a question.
+Case, whitespace, timestamps, q-ids, marked retry/attempt counters and marked
+ages (`age=35m`, `35m old`) do not create a question. Other numbers remain
+meaningful: `30s` and `60s` timeouts are distinct.
 PR numbers (`#123`) and UPPER_SNAKE flag keys remain distinct. Captured harness
 questions also include session, options, recommendation and default in their
 fingerprint. Identical repeats increment
 `reasks` on the original and return its receipt without appending another ask or
 waking again, including with `--force`. Publication `--id` retries remain idempotent
-and do not count as re-asks. Changed text or default under an explicit key supersedes
+and do not count as re-asks. Ref identity (resolved path, file identity, size and
+nanosecond modification/change times) and effective priority are part of the
+comparison. Updating ref contents, changing its path or raising priority posts
+and wakes again. Automatic text spill files are transport, not authored refs.
+Older projections without captured ref/priority metadata renew once on repeat
+because their payload identity cannot be verified.
+Changed text, default, ref identity or priority under an explicit key supersedes
 the old open question. A transcript sweep observing the same tool call is not a
 new authored re-ask.
 
@@ -45,7 +53,9 @@ cycle. The one-hour age fallback applies to bus asks only. Both answer forms
 reference the original ask, preserve full text in a ref when needed and carry a
 rollback directing a correcting answer or a new ask with changed information.
 `QUESTION_DEFAULTED` and `QUESTIONS ... defaulted=N` expose applied ladder defaults.
-A real bus answer takes precedence. No default is inferred from a recommendation. Without an explicit
+A real bus answer takes precedence: default publication rechecks the committed
+bus tail while holding the same file lock as bus appends. Answer callbacks may
+be waiting for the question lock; their already-committed rows still veto a default. No default is inferred from a recommendation. Without an explicit
 default the question stays open and appears once as
 "unanswered, no default" in the hourly digest after its cycle/age limit. Bus pickup
 reminders then stop; harness questions keep their escalation path. Every hourly
@@ -64,13 +74,29 @@ auto_default_after = "1h"
 
 Both limits must be positive. `auto_default_reasks` is the shared threshold for
 authored re-asks and missed ladder windows; there is no second cycle knob.
-Defaults apply without a global enable switch; `--no-auto-default` (or
+Defaults apply without an enable switch. `COORDKIT_QUESTION_GUARD=off` pauses
+capture hooks, question sweeps and settlement of already-open questions; clearing
+it resumes the existing policy. `--no-auto-default` (or
 `create(..., no_auto_default=True)`) opts out per item. MCP `post` accepts optional
 `key`, `default` and
 `no_auto_default`; `open_questions` exposes default, re-ask count and resolution
 metadata. Bus asks stay on the bus/digest path rather than entering the harness
 ANX ladder. Closed records retain their dedupe evidence for seven days. Capture
-fallbacks read at most 256 KiB of recent bus data; sweeps reuse their loaded rows.
+fallbacks and question sweeps read at most 256 KiB / 10,000 complete recent bus
+rows; sweeps reuse that snapshot. Partial physical lines are discarded within
+the byte limit, including a giant unterminated row. If the locked tail no longer
+covers the original ask and no real answer/default receipt is visible, the default
+is deferred rather than guessing that unseen history contains no answer. The
+question remains open; `question list` and MCP expose `default_deferred`.
+Default appends also bound sequence-checkpoint catch-up to 256 KiB; a missing or
+stale checkpoint requiring more history defers publication until normal bus
+activity recovers it. A real
+answer can still settle it through its post-append projection.
+
+The question store has an 8 MiB / 10,000-record cap on both reads and writes.
+Exceeding either raises `question_store_limit` and preserves the existing file;
+no truncated subset is saved. Preserve and archive resolved records before retrying.
+The seven-day closed-record retention still applies inside the cap.
 
 ## Ladder
 

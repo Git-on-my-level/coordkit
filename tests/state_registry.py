@@ -164,6 +164,11 @@ row('questions.py', 'coordination defaults', 'committed ask or repeated capture'
     'real answer or receipt-first auto-default closes; superseded asks close; closed retention seven days',
     'questions.auto_default_reasks (authored re-asks or actual ladder windows) and bus-only auto_default_after',
     'unanswered_no_default appears once after publication; no_default_digested survives hourly queue drains')
+row('questions.py', 'question store caps and default coverage',
+    'question capture stores authored ref stat identity and priority; a default checks the locked bounded bus tail',
+    'changed payload supersedes; answer/default clears pending work; coverage deferral clears on proof or real answer',
+    '8 MiB and 10000 records fail closed without overwriting; 256 KiB and 10000 bus rows per read',
+    'question_store_limit requests archiving; question list and MCP expose default_deferred; guard off freezes settlement')
 row('questions.py', 'refs|.txt|coord-|id|writer:spill_row', 'generated escalation or default answer exceeds the bus text cap',
     'structured ref retains complete text; append-only evidence is kept', 'bus.text_cap; archive has no latch',
     'question receipt and normal CLI/MCP ref readers')

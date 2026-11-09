@@ -1,0 +1,285 @@
+"""Question publication must serialize against real answers and preserve new information."""
+import fcntl
+import io
+import json
+import os
+import threading
+from unittest.mock import patch
+
+from coordkit import bus, mcp_server, questions
+from coordkit.manifest import ManifestError
+from coordkit.tail import read_tail
+from tests.test_addressed import AddressedCase, ts
+
+
+class QuestionContractTests(AddressedCase):
+    def setUp(self):
+        super().setUp()
+        self.manifest.bus.mirror = False
+        self.lease('lead-a')
+
+    def post(self, text='Use the cached result?', *flags):
+        self.quiet(bus.main, ['post', '--from', 'worker-ui', '--to', 'lead-a',
+                             '--kind', 'ask', '--topic', 'result', *flags, text], self.manifest)
+        return bus.LAST_POST[0]
+
+    def answer_race(self, harness, recovery=False):
+        if harness:
+            with patch.object(questions, 'route'):
+                record, _ = questions.create(self.manifest, 'worker-ui', 'Use cache?', default='Use cache')
+            questions.mark(self.manifest, record['qid'], reasks=2)
+            qid = record['qid']
+        else:
+            qid = self.post('Use cache?', '--default', 'Use cache')['id']
+        if recovery:
+            with patch.object(questions, 'close', side_effect=OSError('interrupted completion')):
+                with self.assertRaises(OSError):
+                    questions.apply_default(self.manifest, questions.load_all(self.manifest)[qid], self.now + 1)
+            self.assertTrue(questions.load_all(self.manifest)[qid]['auto_default_applied'])
+        stale = self.rows()
+        real = dict(id='real-answer', ts=ts(self.now), frm='lead-a', to='worker-ui',
+                    kind='answer', text='Fetch fresh data', re=qid)
+        appended, errors, writers = threading.Event(), [], []
+        append, recent = bus.append, questions.recent_rows
+        locked_checks = []
+
+        def writer():
+            try:
+                def committed():
+                    appended.set()  # fsynced; its projection now waits for the sweep's question lock
+                    questions.track_bus_reply(self.manifest, real)
+                append([real], project=False, on_commit=committed)
+            except BaseException as exc:
+                errors.append(exc)
+                appended.set()
+
+        def interleave(rows, **kwargs):
+            if any(r.get('auto_default') for r in rows):
+                thread = threading.Thread(target=writer, daemon=True)
+                writers.append(thread)
+                thread.start()
+                self.assertTrue(appended.wait(10), 'answer writer did not commit')
+            return append(rows, **kwargs)
+
+        def inspect_lock(manifest, **kwargs):
+            if kwargs.get('coverage'):
+                # Rechecking immediately before append is insufficient unless writers are excluded.
+                with manifest.paths.bus_log.open('rb') as other:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked_checks.append(True)
+            return recent(manifest, **kwargs)
+
+        try:
+            with patch.object(bus, 'append', side_effect=interleave), \
+                    patch.object(questions, 'recent_rows', side_effect=inspect_lock), \
+                    patch.object(questions, 'deliver', return_value='waiter'):
+                if harness:
+                    questions.apply_default(self.manifest, questions.load_all(self.manifest)[qid],
+                                            self.now + 3601, stale)
+                else:
+                    questions.reconcile_defaults(self.manifest, stale, self.now + 3601)
+        finally:
+            for thread in writers:
+                thread.join(10)
+        self.assertTrue(writers)
+        self.assertTrue(all(not t.is_alive() for t in writers))
+        self.assertEqual(errors, [])
+        self.assertTrue(locked_checks)
+        self.assertEqual(sum(bool(r.get('auto_default')) for r in self.rows()), int(recovery))
+        stored = questions.load_all(self.manifest)[qid]
+        self.assertFalse(stored.get('auto_default_applied'))
+        self.assertEqual((stored['state'], stored['answered_by'], stored['answer']),
+                         ('closed', 'lead-a', 'Fetch fresh data'))
+
+    def test_real_bus_answer_wins_while_its_projection_waits_for_the_question_lock(self):
+        self.answer_race(False)
+
+    def test_real_ladder_answer_wins_and_uses_normal_delivery(self):
+        self.answer_race(True)
+
+    def test_real_answer_wins_while_recovering_an_existing_default_receipt(self):
+        self.answer_race(True, recovery=True)
+
+    def test_ref_change_reposts_and_wakes_instead_of_returning_the_old_receipt(self):
+        ref = self.root/'brief.txt'
+        ref.write_text('Initial evidence')
+        with patch('coordkit.adapters.notify') as wake:
+            first = self.post('Use cache?', '--ref', str(ref), '--key', 'cache', '--default', 'Use cache')
+            self.assertEqual(self.post('Use cache?', '--ref', str(ref), '--key', 'cache',
+                                       '--default', 'Use cache')['id'], first['id'])
+            ref.write_text('New evidence: the cached result is stale')
+            second = self.post('Use cache?', '--ref', str(ref), '--key', 'cache', '--default', 'Use cache')
+            other = self.root/'other-brief.txt'
+            other.write_text(ref.read_text())
+            third = self.post('Use cache?', '--ref', str(other), '--key', 'cache', '--default', 'Use cache')
+            fourth = self.post('Use cache?', '--key', 'cache', '--default', 'Use cache')
+        self.assertEqual(wake.call_count, 4)
+        self.assertEqual(len({r['id'] for r in (first, second, third, fourth)}), 4)
+        self.assertNotEqual(first['ask_ref'], second['ask_ref'])
+        records = questions.load_all(self.manifest)
+        self.assertEqual([r['qid'] for r in records.values() if r['state'] == 'open'], [fourth['id']])
+        # An older projection did not capture ref/priority evidence; renew it once conservatively.
+        questions.update(self.manifest, lambda records: records[fourth['id']].pop('ask_ref'))
+        fifth = self.post('Use cache?', '--key', 'cache', '--default', 'Use cache')
+        self.assertNotEqual(fifth['id'], fourth['id'])
+        self.assertEqual(self.post('Use cache?', '--key', 'cache', '--default', 'Use cache')['id'], fifth['id'])
+
+    def test_priority_promotion_is_new_information_with_or_without_an_explicit_key(self):
+        for text, key in [('Use cached result?', []), ('Use fresh result?', ['--key', 'fresh'])]:
+            with self.subTest(key=key), patch('coordkit.adapters.notify') as wake:
+                first = self.post(text, *key)
+                self.assertEqual(self.post(text, *key, '--priority', 'normal')['id'], first['id'])
+                second = self.post(text, *key, '--priority', 'urgent')
+                self.assertNotEqual(first['id'], second['id'])
+                self.assertEqual(self.post(text, *key, '--priority', 'urgent')['id'], second['id'])
+                self.assertEqual(wake.call_count, 2)
+                self.assertEqual(questions.load_all(self.manifest)[first['id']]['closed_by'], 'superseded')
+
+    def test_numeric_decisions_stay_distinct_while_marked_metadata_normalizes(self):
+        for a, b in [('Use a 30s timeout?', 'Use a 60s timeout?'),
+                     ('Use a 30-second timeout?', 'Use a 60-second timeout?'),
+                     ('Use a 30m timeout?', 'Use a 60m timeout?'),
+                     ('Set the limit to 30?', 'Set the limit to 60?')]:
+            with self.subTest(text=a):
+                self.assertNotEqual(questions.fingerprint('worker', a), questions.fingerprint('worker', b))
+                self.assertNotEqual(self.post(a)['id'], self.post(b)['id'])
+        a = 'Retry #123 FEATURE_GATE_V1 at 2026-11-09T12:30:01Z q-abcdef attempt 1 age=35m?'
+        b = 'RETRY #123 FEATURE_GATE_V1 at 2026-11-10T13:45:59Z q-123abc attempt 22 age=90m?'
+        self.assertEqual(questions.normalize(a), questions.normalize(b))
+        self.assertEqual(questions.normalize(a.replace('attempt 1', 'attempt=1')),
+                         questions.normalize(b.replace('attempt 22', 'attempt:22')))
+        self.assertNotEqual(questions.normalize(a), questions.normalize(a.replace('#123', '#124')))
+        self.assertNotEqual(questions.normalize(a), questions.normalize(a.replace('GATE_V1', 'GATE_V2')))
+
+    def test_kill_switch_freezes_pending_bus_and_ladder_settlement_then_resumes(self):
+        qid = self.post('Use cache?', '--default', 'Use cache')['id']
+        with patch.object(questions, 'route'):
+            harness, _ = questions.create(self.manifest, 'worker-ui', 'Use fresh data?', default='Fetch fresh')
+        questions.mark(self.manifest, harness['qid'], reasks=2)
+        before = questions.load_all(self.manifest)
+        with patch.dict(os.environ, COORDKIT_QUESTION_GUARD='off'):
+            questions.reconcile_defaults(self.manifest, self.rows(), self.now + 7200)
+            self.assertFalse(questions.apply_default(self.manifest, before[harness['qid']], self.now + 7200))
+            self.assertEqual(questions.ladder(self.manifest, self.now + 7200), [])
+            self.assertEqual(questions.sweep(self.manifest, self.now + 7200, out=lambda _: None), [])
+            self.assertEqual(questions.load_all(self.manifest), before)
+        questions.reconcile_defaults(self.manifest, self.rows(), self.now + 7200)
+        self.assertTrue(questions.load_all(self.manifest)[qid]['auto_default_applied'])
+
+    def test_kill_switch_is_checked_again_under_the_bus_append_lock(self):
+        qid = self.post('Use cache?', '--default', 'Use cache')['id']
+        append = bus.append
+        def stop(rows, **kwargs):
+            with patch.dict(os.environ, COORDKIT_QUESTION_GUARD='off'):
+                return append(rows, **kwargs)
+        with patch.object(bus, 'append', side_effect=stop):
+            questions.reconcile_defaults(self.manifest, self.rows(), self.now + 7200)
+        self.assertEqual(questions.load_all(self.manifest)[qid]['state'], 'open')
+        self.assertFalse(any(r.get('auto_default') for r in self.rows()))
+
+    def test_fallback_never_uses_an_unbounded_read_or_readline_on_a_giant_row(self):
+        class Bounded(io.BytesIO):
+            read_bytes = 0
+            def read(self, size=-1):
+                self.assert_size(size)
+                data = super().read(size)
+                self.read_bytes += len(data)
+                return data
+            def assert_size(self, size):
+                if not 0 <= size <= 128:
+                    raise AssertionError('unbounded read')
+            def readline(self, *args):
+                raise AssertionError('readline may scan an entire giant row')
+        stream = Bounded(b'x' * 4096)
+        self.assertEqual(read_tail(stream, 128), (4096, b''))
+        self.assertLessEqual(stream.read_bytes, 129)
+        row = dict(id='tail', ts=ts(self.now), frm='worker-ui', to='lead-a', kind='ask', text='Fresh?')
+        stream = Bounded(b'x' * 4096 + b'\n' + json.dumps(row).encode() + b'\n{"partial":')
+        with patch.object(questions, 'MAX_BUS_BYTES', 128):
+            # A complete row larger than the window is also omitted, never partially decoded.
+            self.assertEqual(questions.recent_rows(self.manifest, stream=stream), [])
+        self.assertLessEqual(stream.read_bytes, 129)
+        small = json.dumps(dict(id='tail', kind='fyi')).encode()
+        stream = Bounded(b'x' * 4096 + b'\n' + small + b'\n{"partial":')
+        with patch.object(questions, 'MAX_BUS_BYTES', 128):
+            rows = questions.recent_rows(self.manifest, stream=stream)
+        self.assertEqual([row['id'] for row in rows], ['tail'])
+        self.assertLessEqual(stream.read_bytes, 129)
+        self.assertEqual(read_tail(io.BytesIO(b'first\nsecond\n'), 7), (6, b'second\n'))
+
+    def test_sweep_uses_one_bounded_tail_instead_of_reading_the_whole_bus(self):
+        self.post()
+        with self.manifest.paths.bus_log.open('ab') as stream:
+            stream.write(b'x' * (questions.MAX_BUS_BYTES * 2))
+        with patch.object(bus, 'read', side_effect=AssertionError('unbounded bus read')), \
+                patch.object(questions, 'scan_transcripts', return_value=[]), \
+                patch.object(questions, 'scan_notifications', return_value=[]), \
+                patch.object(questions, 'recent_rows', wraps=questions.recent_rows) as recent:
+            questions.sweep(self.manifest, self.now + 1, out=lambda _: None)
+        # The path wrapper plus its open-stream call make up one physical read.
+        self.assertEqual(recent.call_count, 2)
+
+    def test_default_defers_when_bounded_tail_cannot_prove_the_old_ask_is_unanswered(self):
+        qid = self.post('Use cache?', '--default', 'Use cache')['id']
+        stale = self.rows()
+        self.incumbent_row('real-answer', 'lead-a', 'worker-ui', 'answer', 'Use fresh data', ago=0, re=qid)
+        with self.manifest.paths.bus_log.open('ab') as stream:
+            stream.write(json.dumps(dict(kind='fyi', text='x' * questions.MAX_BUS_BYTES)).encode() + b'\n')
+        questions.reconcile_defaults(self.manifest, stale, self.now + 7200)
+        stored = questions.load_all(self.manifest)[qid]
+        self.assertEqual(stored['state'], 'open')
+        self.assertIn('default deferred', questions.summary(stored))
+        projected = mcp_server.question_rows(self.manifest, {}, {}, self.now + 7200)
+        self.assertEqual(projected['questions'][0]['default_deferred'], stored['default_deferred'])
+        self.assertFalse(any(r.get('auto_default') for r in self.rows()))
+
+    def test_oversized_store_fails_closed_and_preserves_its_bytes(self):
+        self.post()
+        path = questions.home(self.manifest)/'questions.json'
+        raw = b' ' * 1025
+        path.write_bytes(raw)
+        with patch.object(questions, 'MAX_STORE_BYTES', 1024):
+            with self.assertRaisesRegex(ManifestError, 'question_store_limit'):
+                questions.load_all(self.manifest)
+            with self.assertRaisesRegex(ManifestError, 'question_store_limit'):
+                questions.update(self.manifest, lambda records: records.clear())
+        self.assertEqual(path.read_bytes(), raw)
+
+    def test_record_and_write_caps_never_drop_existing_questions(self):
+        self.post()
+        path = questions.home(self.manifest)/'questions.json'
+        original = path.read_bytes()
+        def add(records):
+            old = next(iter(records.values()))
+            records['another'] = dict(old, qid='another')
+        with patch.object(questions, 'MAX_RECORDS', 1):
+            with self.assertRaisesRegex(ManifestError, 'question_store_limit'):
+                questions.update(self.manifest, add)
+        self.assertEqual(path.read_bytes(), original)
+        with patch.object(questions, 'MAX_STORE_BYTES', len(original) + 100):
+            with self.assertRaisesRegex(ManifestError, 'question_store_limit'):
+                questions.update(self.manifest, lambda records: next(iter(records.values())).update(default='x' * 4096))
+        self.assertEqual(path.read_bytes(), original)
+        records = questions.load_all(self.manifest)
+        add(records)
+        path.write_text(json.dumps(records))
+        oversized = path.read_bytes()
+        with patch.object(questions, 'MAX_RECORDS', 1):
+            with self.assertRaisesRegex(ManifestError, 'question_store_limit'):
+                questions.load_all(self.manifest)
+        self.assertEqual(path.read_bytes(), oversized)
+
+
+    def test_default_cannot_turn_checkpoint_recovery_into_an_unbounded_bus_scan(self):
+        path = self.manifest.paths.bus_log
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(json.dumps(dict(kind='fyi', text='x' * questions.MAX_BUS_BYTES)).encode() + b'\n')
+        qid = self.post('Use cache?', '--default', 'Use cache')['id']
+        (path.parent/'state'/'append.offset.json').unlink()
+        before = path.read_bytes()
+        questions.reconcile_defaults(self.manifest, questions.recent_rows(self.manifest), self.now + 7200)
+        self.assertEqual(path.read_bytes(), before)
+        stored = questions.load_all(self.manifest)[qid]
+        self.assertEqual(stored['state'], 'open')
+        self.assertIn('sequence recovery', stored['default_deferred'])

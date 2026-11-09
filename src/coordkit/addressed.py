@@ -321,13 +321,10 @@ def to_lead_digest(manifest, event, text, row=None, at=None):
 
 def digest_items(stream):
     """Bounded queue tail; one malformed finding never blocks the hourly batch."""
-    stream.seek(0, os.SEEK_END)
-    start = max(0, stream.tell() - 262144)
-    stream.seek(start)
-    if start:
-        stream.readline()
+    from .tail import read_tail
+    _, data = read_tail(stream, 262144)
     items = []
-    for line in stream.read(262144).splitlines():
+    for line in data.splitlines():
         try:
             item = json.loads(line)
             if isinstance(item, dict) and isinstance(item.get('text'), str):

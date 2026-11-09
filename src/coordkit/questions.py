@@ -23,6 +23,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import time
@@ -32,6 +33,10 @@ from . import addressed
 from .manifest import ManifestError, duration
 from .process import parse_ts
 from .state import read_json, write_json
+
+MAX_STORE_BYTES = 8 * 1024 * 1024
+MAX_RECORDS = 10000
+MAX_BUS_BYTES = 256 * 1024
 
 STATES = ('open', 'escalated', 'answered', 'closed')
 BUS_NAME = re.compile(r'bus name is\W{0,4}([A-Za-z0-9][A-Za-z0-9_.-]{1,63})', re.I)
@@ -59,11 +64,21 @@ def iso(at):
 
 def load_all(manifest):
     try:
-        records = read_json(home(manifest)/'questions.json', {}) or {}
-    except (ValueError, UnicodeError):
+        fd = os.open(home(manifest)/'questions.json', os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_STORE_BYTES:
+                raise ManifestError('question_store_limit: preserve and archive the question store before retrying')
+            raw = stream.read(MAX_STORE_BYTES + 1)
+        if len(raw) > MAX_STORE_BYTES:
+            raise ManifestError('question_store_limit: question store grew beyond byte cap')
+        records = json.loads(raw) or {}
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeError):
         return {}
     if not isinstance(records, dict):
         return {}
+    if len(records) > MAX_RECORDS:
+        raise ManifestError('question_store_limit: too many question records; preserve and archive before retrying')
     return {qid: r for qid, r in records.items() if isinstance(r, dict)
             and r.get('qid') == qid and r.get('state') in STATES
             and type(r.get('created_at')) in (int, float) and math.isfinite(r['created_at'])
@@ -80,6 +95,8 @@ def save_all(manifest, records):
     cutoff = now() - CLOSED_RETENTION
     for qid in [q for q, r in records.items() if r.get('state') == 'closed' and r.get('closed_at', 0) < cutoff]:
         del records[qid]
+    if len(records) > MAX_RECORDS or len(json.dumps(records).encode()) + 1 > MAX_STORE_BYTES:
+        raise ManifestError('question_store_limit: update would exceed the question store cap')
     write_json(home(manifest)/'questions.json', records)
 
 
@@ -92,13 +109,32 @@ def update(manifest, fn):
         return result
 
 
+TRANSIENT = re.compile(
+    r'(?P<protected>\#\d+|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b)'
+    r'|(?P<counter>\b(?P<counter_name>(?i:retry|attempt))'
+    r'(?:\s+(?:(?i:count|number)\s*)?[:=]?\s*|[:=]\s*)\d+\b)'
+    r'|(?P<age>\b(?i:age|aged|oldest)\s*[:=]?\s*\d+(?:\.\d+)?[smhd]\b|\b\d+[mhd]\s+(?i:old)\b)'
+    r'|(?P<qid>\b[qQ]-[0-9a-fA-F]{6}\b)'
+    r'|(?P<clock>\b(?:\d{4}-\d{2}-\d{2}[Tt ])?\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:\d{2})?\b)')
+
+
 def normalize(text):
-    """Remove transient clocks/ids/counts, preserving PR numbers and flag identities."""
-    tokens = re.findall(r'#\d+|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b|\b[qQ]-[0-9a-fA-F]{6}\b|'
-                        r'\b\d{1,2}:\d{2}(?:[Zz])?\b|\b\d+\b|\s+|.', text)
-    kept = [token for token in tokens if not re.fullmatch(
-        r'[qQ]-[0-9a-fA-F]{6}|\d{1,2}:\d{2}(?:[Zz])?|\d+', token)]
-    return ' '.join(''.join(kept).lower().split())
+    """Strip marked transient metadata, retaining numeric decisions and PR/flag identities."""
+    def replace(match):
+        if match.group('protected'):
+            return match.group()
+        return match.group('counter_name') or ''
+    return ' '.join(TRANSIENT.sub(replace, text).casefold().split())
+
+
+def ref_identity(path):
+    """Authored ref identity, captured at publication; never confuse it with an automatic spill."""
+    if not path:
+        return None
+    path = Path(path).resolve()
+    info = path.stat()
+    return dict(path=str(path), device=info.st_dev, inode=info.st_ino,
+                size=info.st_size, mtime_ns=info.st_mtime_ns, ctime_ns=info.st_ctime_ns)
 
 
 def fingerprint(session, text, options=(), recommendation='', default=''):
@@ -122,28 +158,31 @@ def normalized_hash(text):
     return hashlib.sha256(normalize(str(text or '')).encode()).hexdigest()
 
 
-def recent_rows(manifest):
-    """Bounded fallback for capture callers without a bus snapshot (256 KiB)."""
+def recent_rows(manifest, *, stream=None, coverage=False):
+    """One shared bounded snapshot for sweeps, capture fallback and the locked default guard."""
     from . import bus
-    try:
-        with manifest.paths.bus_log.open('rb') as stream:
-            stream.seek(0, os.SEEK_END)
-            start = max(0, stream.tell() - 262144)
-            stream.seek(start)
-            if start:
-                stream.readline()  # discard the first partial physical line
-            data = stream.read(262144)
-    except FileNotFoundError:
-        return []
-    data = data[:data.rfind(b'\n') + 1]
-    return [row for _, row in bus.parse_lines(data.decode('utf-8', errors='replace').split('\n')[:-1])]
+    from .tail import read_tail
+    if stream is None:
+        try:
+            with manifest.paths.bus_log.open('rb') as source:
+                return recent_rows(manifest, stream=source, coverage=coverage)
+        except FileNotFoundError:
+            return (0, []) if coverage else []
+    start, data = read_tail(stream, MAX_BUS_BYTES)
+    lines = data.split(b'\n')[:-1]
+    if len(lines) > MAX_RECORDS:
+        start += sum(len(line) + 1 for line in lines[:-MAX_RECORDS])
+        lines = lines[-MAX_RECORDS:]
+    rows = [row for _, row in bus.parse_lines([line.decode('utf-8', errors='replace') for line in lines])]
+    return (start, rows) if coverage else rows
 
 
 def bus_record(row, at):
     return dict(qid=row['id'], state='open', tier=0, capture='bus', asker=row['frm'],
                 target=row['to'], topic=row.get('topic', 'general'), question=row.get('text', ''),
                 created_at=at, fingerprint=ask_key(row), reasks=0, default=row.get('default'),
-                owner=row.get('owner'),
+                owner=row.get('owner'), priority=row.get('priority') or 'normal',
+                ask_ref=row.get('ask_ref', {'path': row['ref'], 'unverified': True} if row.get('ref') and row.get('ref') != row.get('spill_ref') else None),
                 no_auto_default=row.get('no_auto_default', False),
                 info_hash=row.get('normalized_text_hash') or normalized_hash(row.get('text')))
 
@@ -186,7 +225,7 @@ def track_bus_reply(manifest, row):
 def default_due(manifest, record, at):
     """One policy: authored re-asks or real ladder windows, plus the bus age limit."""
     cycles = max(record.get('reasks', 0), record.get('cycles', 0))
-    return (not record.get('no_auto_default') and
+    return (os.environ.get('COORDKIT_QUESTION_GUARD') != 'off' and not record.get('no_auto_default') and
             (cycles >= cfg(manifest).auto_default_reasks or
              (record.get('capture') == 'bus' and
               at - record['created_at'] >= duration(cfg(manifest).auto_default_after))))
@@ -194,13 +233,15 @@ def default_due(manifest, record, at):
 
 def settle(manifest, record, rows, at):
     """Under the question lock: one receipt-first default publisher for bus and ladder."""
-    if record['state'] not in ('open', 'escalated'):
+    if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off' or record['state'] not in ('open', 'escalated'):
         return
     is_bus = record.get('capture') == 'bus'
     answer_id = ('auto-' if is_bus else 'qd-') + record['qid']
     # An actual answer always wins, including at the default deadline.
     answer = replies(manifest, rows, record) if is_bus else None
     if answer:
+        record.pop('default_deferred', None)
+        record.pop('auto_default_applied', None)
         record.update(state='closed', closed_at=at, answered_at=at, answered_by=answer.get('frm'),
                       answer=answer.get('text', ''), answer_id=answer.get('id'))
         return
@@ -216,12 +257,43 @@ def settle(manifest, record, rows, at):
         bus.configure(manifest)
     text = (f'auto-default applied after {record.get("reasks", 0)} unanswered re-asks: {record["default"]}'
             if is_bus else record['default'])
-    if not any(r.get('id') == answer_id for r in rows if isinstance(r, dict)):
-        row = dict(ts=iso(at), id=answer_id, frm='coordkit', to=record['asker'],
-                   topic=record.get('topic', 'question'), kind='answer' if is_bus else 'decision',
-                   re=record.get('bus_id') or record['qid'], text=text, rollback=DEFAULT_ROLLBACK,
-                   auto_default=True)
-        bus.append([spill_row(manifest, row)], project=False)
+    row = dict(ts=iso(at), id=answer_id, frm='coordkit', to=record['asker'],
+               topic=record.get('topic', 'question'), kind='answer' if is_bus else 'decision',
+               re=record.get('bus_id') or record['qid'], text=text, rollback=DEFAULT_ROLLBACK,
+               auto_default=True)
+    receipted = False
+    def unanswered(stream):
+        nonlocal receipted
+        # Q lock -> wake lock -> bus flock, the same order as normal publication.
+        # Answer callbacks run after releasing the bus flock, so they may be waiting
+        # on our Q lock even though their real answer is already durable.
+        if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
+            return False
+        start, fresh = recent_rows(manifest, stream=stream, coverage=True)
+        answer = replies(manifest, [*rows, *fresh], record)
+        if answer:
+            record.pop('default_deferred', None)
+            record.pop('auto_default_applied', None)
+            record.update(state='closed' if is_bus else 'answered', closed_at=at, answered_at=at,
+                          answered_by=answer.get('frm'), answer=answer.get('text', ''), answer_id=answer.get('id'))
+            return False
+        if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
+            return False
+        receipted = any(r.get('id') == answer_id for r in [*rows, *fresh] if isinstance(r, dict))
+        if receipted:
+            return False
+        # If an old original lies outside the bounded view, defer instead of
+        # assuming that an unseen answer does not exist. Never trade safety for a cap.
+        if start and not any(r.get('id') in (record['qid'], record.get('bus_id')) for r in fresh):
+            record['default_deferred'] = 'answer history outside bounded bus tail'
+            return False
+        record.pop('default_deferred', None)
+        spill_row(manifest, row)
+        return True
+    if not bus.append([row], project=False, before_append=unanswered, max_scan_bytes=MAX_BUS_BYTES) and not receipted:
+        if record['state'] in ('open', 'escalated') and os.environ.get('COORDKIT_QUESTION_GUARD') != 'off':
+            record.setdefault('default_deferred', 'bus sequence recovery exceeds bounded scan')
+        return
     record.update(answer_id=answer_id, auto_default_applied=True)
     if is_bus:
         record.update(state='closed', closed_at=at, answered_at=at, answered_by='coordkit', answer=text)
@@ -252,8 +324,12 @@ def repeat_bus_ask(manifest, row, rows, at=None, *, records=None):
         if not matches:
             return None
         record = max(reversed(matches), key=lambda r: r['created_at'])
+        if 'ask_ref' not in record or 'priority' not in record:
+            return None  # legacy projections cannot prove the authored payload is unchanged
         if (record.get('info_hash') != info or record.get('default') != row.get('default')
                 or record.get('owner') != row.get('owner')
+                or record.get('ask_ref') != row.get('ask_ref')
+                or (record.get('priority') or 'normal') != (row.get('priority') or 'normal')
                 or bool(record.get('no_auto_default')) != bool(row.get('no_auto_default'))):
             return None  # an explicit key may carry genuinely new information
         settle(manifest, record, rows, at)
@@ -267,7 +343,9 @@ def repeat_bus_ask(manifest, row, rows, at=None, *, records=None):
 
 
 def reconcile_defaults(manifest, rows, at=None):
-    """One pass over the question projection; no bus rereads or external calls."""
+    """One projection pass; due defaults recheck the bounded tail under the append lock."""
+    if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
+        return
     at = now() if at is None else at
     by_re = {}
     for row in rows[-10000:]:
@@ -401,6 +479,7 @@ def create(manifest, asker, question, *, options=(), recommendation='', session_
                                    record.get('options', ()), record.get('recommendation', ''), record.get('default') or '')
             if ((record.get('fingerprint') == fp or (not key and existing == info))
                     and record.get('info_hash', existing) == info
+                    and bool(record.get('urgent')) == urgent
                     and record.get('default') == default and bool(record.get('no_auto_default')) == no_auto_default
                     and (record['state'] in ('open', 'escalated', 'answered') or record.get('auto_default_applied'))):
                 record.update(fingerprint=fp, info_hash=info, last_seen=at)
@@ -457,7 +536,8 @@ def summary(record):
     opts = f' options: {" / ".join(record["options"][:4])}' if record.get('options') else ''
     default = f' default: {record["default"]}' if record.get('default') else ''
     reasked = f' re-asked {record["reasks"]}x' if record.get('reasks') else ''
-    return f'Q {record["qid"]} from {record["asker"]}: {record["question"][:220]}{rec}{opts}{default}{reasked}'
+    deferred = f' default deferred: {record["default_deferred"]}' if record.get('default_deferred') else ''
+    return f'Q {record["qid"]} from {record["asker"]}: {record["question"][:220]}{rec}{opts}{default}{reasked}{deferred}'
 
 
 def route(manifest, record, at=None):
@@ -666,7 +746,9 @@ def missed_cycle(manifest, record, at):
 def apply_default(manifest, record, at, rows=None):
     """Use the shared publisher, then the ladder's normal answer delivery/ANX withdrawal."""
     from . import bus
-    rows = bus.read() if rows is None else rows
+    if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
+        return False
+    rows = recent_rows(manifest) if rows is None else rows
     answer = replies(manifest, rows, record)
     if answer:
         close(manifest, record, answer.get('frm'), answer.get('text', ''), answer.get('id'))
@@ -680,6 +762,9 @@ def apply_default(manifest, record, at, rows=None):
         settle(manifest, current, rows, at)
         return dict(current)
     current = update(manifest, publish)
+    if current.get('state') == 'answered' and not current.get('auto_default_applied'):
+        close(manifest, current, current['answered_by'], current['answer'], current['answer_id'])
+        return False
     if current.get('auto_default_applied'):
         close(manifest, current, 'default', current['default'], current['answer_id'])
         return True
@@ -689,6 +774,8 @@ def apply_default(manifest, record, at, rows=None):
 
 def capture_bus_asks(manifest, rows, at):
     """Backfill the single bus projection; internal ladder hops never become fresh asks."""
+    if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
+        return []
     seen = set(load_all(manifest))
     closed = {r.get('re') for r in rows if isinstance(r, dict)
               and isinstance(r.get('re'), str) and r.get('kind') in ('answer', 'decision', 'ruling', 'approval')}
@@ -707,8 +794,10 @@ def ladder(manifest, at=None, rows=None, anx_answers=None, anx_known=None):
     """Advance every open question one due step. Returns lines describing what happened."""
     from . import bus
     at = now() if at is None else at
+    if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
+        return []
     bus.configure(manifest)
-    rows = bus.read() if rows is None else rows
+    rows = recent_rows(manifest) if rows is None else rows
     out = []
     for record in list(load_all(manifest).values()):
         if record.get('capture') == 'bus':
@@ -1158,8 +1247,11 @@ def status_line(manifest, at=None):
 
 def sweep(manifest, at=None, out=print):
     from . import bus
+    if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
+        out(status_line(manifest, at))
+        return []
     bus.configure(manifest)
-    rows = bus.read()
+    rows = recent_rows(manifest)
     lines = capture_bus_asks(manifest, rows, now() if at is None else at)
     lines += scan_transcripts(manifest, at) + scan_notifications(manifest, at)
     answers, known = {}, None

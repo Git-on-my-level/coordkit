@@ -467,6 +467,8 @@ def question_rows(manifest, by_re, args, at):
     for record in sorted(shown, key=lambda r: r['created_at'], reverse=True):
         item = {k: record.get(k) for k in ('qid', 'state', 'tier', 'reasks', 'no_auto_default', 'auto_default_applied',
                                          'unanswered_no_default')}
+        if record.get('default_deferred') and record['state'] in ('open', 'escalated'):
+            item['default_deferred'] = clip(record['default_deferred'], FIELD)
         item['default'] = clip(record.get('default'), 2000) if record.get('default') is not None else None
         for key in ('asker', 'target', 'answered_by', 'answer_id'):
             item[key] = clip(record.get(key), FIELD) if record.get(key) is not None else None
