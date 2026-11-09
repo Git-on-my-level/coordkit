@@ -118,19 +118,25 @@ def local_activity(row):
             and row.get('origin') != 'mcp' and not str(row.get('origin', '')).startswith('relay:'))
 
 
+OBSERVATION_ROW_LIMIT = 1000
+OBSERVATION_BATCH_LIMIT = 50
+
+
 def observe_senders(manifest, rows, at):
-    """Persist first sightings in the roster's 24h window; no reader env or PID probe.
+    """Observe a bounded recent tail of the roster's already-loaded rows once.
 
     Existing entries throttle writes permanently, including identity-only caches:
     observing a removed manifest name must never promote its cached identity.
+    Busy writers take priority; observation skips rather than waiting on their lock.
     """
     import logging
+    from itertools import islice
     from .process import parse_ts
     try:
         path = home(manifest)/'register.json'
         existing = read_json(path, {}) or {}
-        names = set()
-        for row in rows:
+        names = {}
+        for row in islice(reversed(rows), OBSERVATION_ROW_LIMIT):
             name = row.get('frm')
             if internal_name(manifest, name) or name in existing or not local_activity(row):
                 continue
@@ -139,14 +145,20 @@ def observe_senders(manifest, rows, at):
             except (ValueError, TypeError, KeyError, OverflowError):
                 continue
             if recent:
-                names.add(name)
+                names[name] = None
+                if len(names) >= OBSERVATION_BATCH_LIMIT:
+                    break
         if not names:
             return
-        with locked(home(manifest)/'register.lock'):
-            # A concurrent post/hook/observer may have written while we waited.
+        # Explicit bindings only, without PID probes or the roster reader's env.
+        # Identity collection can read files; keep it outside the writer lock.
+        records = {name: identity_sources(manifest, name, env={}) for name in names}
+        with locked(home(manifest)/'register.lock', blocking=False) as lock:
+            if lock is None:
+                return
+            # A concurrent post/hook/observer may have written during collection.
             existing = read_json(path, {}) or {}
-            records = {name: identity_sources(manifest, name, env={})
-                       for name in sorted(names - existing.keys())}
+            records = {name: identity for name, identity in records.items() if name not in existing}
             if records:
                 _store_identities(manifest, 'observed', records,
                                   register=records.keys() - cfg(manifest).agents.keys())

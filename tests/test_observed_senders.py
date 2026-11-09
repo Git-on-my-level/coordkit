@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from coordkit import addressed, mcp_server, routing
+from coordkit import addressed, bus, mcp_server, routing
 from coordkit.manifest import UsageLane
 from coordkit.state import name_key, read_json, write_json
 from tests.test_addressed import AddressedCase
@@ -112,6 +112,86 @@ class ObservedSenderTests(AddressedCase):
             update.assert_called_once()
         self.assertEqual(len(self.register()), 20)
 
+    def test_busy_registration_lock_does_not_block_roster_read(self):
+        self.incumbent_row('foreign', 'external-worker', 'all', 'msg', ago=10)
+        # Hold the actual writer lock until the read returns. A blocking observer
+        # would stall here until the timeout releases the lock, failing the test.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with routing.locked(routing.home(self.manifest)/'register.lock'):
+                rows = pool.submit(self.roster).result(timeout=2)
+                self.assertIn('external-worker', rows)
+                self.assertEqual(self.register(), {})
+        self.assertEqual(self.roster()['external-worker']['status'], 'listening')
+
+    def test_observed_identity_is_collected_outside_writer_lock_without_probes(self):
+        self.manifest.lanes.append(UsageLane('lane-worker', str(self.root/'account'),
+                                            '/lane-cwd', 'opus', 'high', session_id='lane-session'))
+        self.incumbent_row('foreign', 'lane-worker', 'all', 'msg', ago=10)
+        available = []
+        original = routing.identity_sources
+        def collect(*args, **kwargs):
+            with routing.locked(routing.home(self.manifest)/'register.lock', blocking=False) as lock:
+                available.append(lock is not None)
+            return original(*args, **kwargs)
+        with patch.object(routing, 'identity_sources', side_effect=collect), \
+                patch.object(routing, 'probe_identity') as probe:
+            routing.observe_senders(self.manifest, self.rows(), self.now)
+        self.assertEqual(available, [True], 'identity file reads must not hold the writer lock')
+        probe.assert_not_called()
+        self.assertEqual(self.register()['lane-worker']['identity']['session_id'], 'lane-session')
+
+    def test_high_cardinality_roster_bounds_first_sightings_and_reuses_loaded_rows(self):
+        template = self.incumbent_row('template', 'external', 'all', 'msg', ago=10)
+        rows = [dict(template, id=str(i), frm=f'a-external-{i:05}') for i in range(5000)]
+        with patch.object(bus, 'read_path', return_value=rows) as read, \
+                patch.object(routing, 'identity_sources', wraps=routing.identity_sources) as identity, \
+                patch.object(routing, '_store_identities', wraps=routing._store_identities) as store, \
+                patch.object(routing, 'probe_identity') as probe:
+            mcp_server.read_call(self.manifest, 'agents_status', {'limit': 1})
+        read.assert_called_once()
+        store.assert_called_once()
+        probe.assert_not_called()
+        # First sightings have bounded identity work even when the roster page
+        # is tiny; the extra lookup projects the requested roster entry.
+        self.assertLessEqual(identity.call_count, routing.OBSERVATION_BATCH_LIMIT + 1)
+        expected = {f'a-external-{i:05}' for i in range(4950, 5000)}
+        self.assertEqual(set(self.register()), expected)
+        routing.observe_senders(self.manifest, rows, self.now)
+        self.assertEqual(len(self.register()), 100, 'later reads can register another bounded batch')
+
+    def test_observation_scan_stops_at_tail_bound_even_without_new_names(self):
+        visits = []
+        class MeasuredRow(dict):
+            def get(self, key, default=None):
+                if key == 'frm':
+                    visits.append(self['id'])
+                return super().get(key, default)
+        template = self.incumbent_row('template', 'external', 'all', 'msg', ago=10)
+        # Every tail row is ineligible: the candidate cap alone cannot stop a
+        # full-log scan, and the eligible row just outside the tail must be ignored.
+        rows = [MeasuredRow(template, id='outside-tail')]
+        rows.extend(MeasuredRow(template, id=str(i), origin='mcp')
+                    for i in range(routing.OBSERVATION_ROW_LIMIT))
+        for _ in range(2):
+            visits.clear()
+            routing.observe_senders(self.manifest, rows, self.now)
+            self.assertEqual(len(visits), routing.OBSERVATION_ROW_LIMIT)
+            self.assertNotIn('outside-tail', visits)
+            self.assertEqual(self.register(), {})
+
+    def test_explicit_registration_during_identity_collection_is_preserved(self):
+        self.incumbent_row('foreign', 'external-worker', 'all', 'msg', ago=10)
+        def collect(*args, **kwargs):
+            routing.write_register(self.manifest, 'external-worker', 'wait', {'session_id': 'explicit'})
+            return {'session_id': 'observed'}
+        with patch.object(routing, 'identity_sources', side_effect=collect), \
+                patch.object(routing, '_store_identities', wraps=routing._store_identities) as store:
+            routing.observe_senders(self.manifest, self.rows(), self.now)
+        store.assert_called_once()  # Only the concurrent explicit writer stores.
+        entry = self.register()['external-worker']
+        self.assertEqual(entry['registered_by'], 'wait')
+        self.assertEqual(entry['identity']['session_id'], 'explicit')
+
     def test_removed_manifest_cache_cannot_be_promoted_by_old_or_new_rows(self):
         for via in ('post', 'hook', 'observed'):
             name = 'declared-' + via
@@ -148,6 +228,9 @@ class ObservedSenderTests(AddressedCase):
             futures.append(pool.submit(routing.write_register, self.manifest, 'explicit-worker', 'wait', {}))
             for future in futures:
                 future.result(timeout=5)
+        self.assertEqual(self.register()['explicit-worker']['registered_by'], 'wait')
+        # Observers may skip a contended writer; a later read retries safely.
+        routing.observe_senders(self.manifest, rows, self.now)
         self.assertEqual(set(self.register()), {'external-' + str(i) for i in range(8)} | {'explicit-worker'})
 
     def test_optional_observation_write_failure_keeps_roster_available(self):

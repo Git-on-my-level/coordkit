@@ -17,8 +17,11 @@ registration without appending a second row.
 Roster reads also observe senders written directly to the shared bus by other local
 writers. An eligible row from the last 24 hours adds a missing entry with
 `registered_by = "observed"` (registry `source = "observed"`), using the same private,
-locked atomic writer. Each pass batches new names into one replacement; existing
-entries are never rewritten by observation. Internal/MCP service names, connector
+locked atomic writer. Each pass scans at most the latest 1,000 already-loaded
+roster rows, newest first, and batches at most 50 first sightings into one replacement.
+Observation skips a busy registration lock and reads explicit identity bindings
+before acquiring it, without probing processes. Existing entries are never rewritten
+by observation. Internal/MCP service names, connector
 posts, relay-applied rows (including `_relay` metadata), automatic copies and
 synthetic question rows are excluded. Identity comes only from explicit bindings
 or matching lane declarations, never the roster reader's environment or bus payload.
