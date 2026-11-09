@@ -75,6 +75,9 @@ def validate_post(manifest, options):
         raise ValueError('--degrade-handoff needs a visible reason')
     refs = list(dict.fromkeys(value for value in (options.ref, options.evidence) if value))
     roots = [manifest.path(p) for p in manifest.handoffs.repos.values()] or [manifest.file.parent]
+    # Internal producers write run evidence under the state root, which can be
+    # separate from every repository. Resolve both sides to reject symlink escapes.
+    roots.append(manifest.paths.root.resolve())
     portable = False
     for value in refs:
         if value.startswith('repo:'):
