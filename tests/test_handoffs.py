@@ -189,6 +189,12 @@ class HandoffTests(FakeCase):
         self.assertEqual(exc.exception.code, 2)
         self.assertEqual(self.rows()[-1]['to'], 'worker')
 
+    def test_connector_pickup_retains_received_state_when_a_note_is_supplied(self):
+        self.post('--ref', self.ref)
+        original = self.rows()[0]
+        addressed.ack(self.manifest, original['id'], 'lead', 'received', 'Payload verified')
+        self.assertEqual(addressed.ack_state(original, addressed.replies(self.rows()), self.manifest), 'received')
+
     def test_publication_identity_preserves_ref_and_degrade_reason(self):
         self.post('--ref', self.ref, '--id', 'stable')
         self.assertIn('already posted', self.post('--ref', self.ref, '--id', 'stable'))

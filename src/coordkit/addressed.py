@@ -578,7 +578,8 @@ def ack(manifest, msg_id, name, state='received', note=''):
         raise ManifestError(f'unknown_message: {msg_id}')
     if orig.get('kind') == 'handoff' and state != 'blocked':
         # Use the bus writer lock for portable pickup checks and deduplicated bounces.
-        return bus.main(['ack', msg_id, note or state, '--from', name], manifest)
+        text = f'{state}: {note}' if note else state
+        return bus.main(['ack', msg_id, text, '--from', name], manifest)
     if orig.get('kind') == 'ruling' and orig.get('owner') == name and state != 'blocked':
         # Rulings keep their own owner ack (bus ack), which also counts as received/done here.
         return bus.main(['ack', msg_id, note or state, '--from', name], manifest)  # positionals first: bus ack is not intermixed
