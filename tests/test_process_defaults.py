@@ -186,16 +186,19 @@ class ProcessDefaultsTests(AddressedCase):
 
     def test_mcp_optional_fields_and_question_projection(self):
         self.manifest.mcp.identity = 'worker-ui'
-        result = mcp_server.write_call(self.manifest, 'post', dict(to='lead-a', kind='ask', text='Use cache?',
+        gate = mcp_server.home(self.manifest)/'writes-enabled'
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.touch()
+        result = mcp_server.call_tool(self.manifest, 'post', dict(to='lead-a', kind='ask', text='Use cache?',
                                       topic='result', key='cache', default='Use cache', no_auto_default=True))
         self.assertTrue(result['ok'])
-        result = mcp_server.write_call(self.manifest, 'post', dict(to='lead-a', kind='ask', text='Use cache?',
+        result = mcp_server.call_tool(self.manifest, 'post', dict(to='lead-a', kind='ask', text='Use cache?',
                                       topic='result', key='cache', default='Use cache', no_auto_default=True))
         self.assertTrue(result['ok'])
         result = mcp_server.question_rows(self.manifest, {}, {}, self.now)
         self.assertEqual(result['questions'][0]['default'], 'Use cache')
         self.assertEqual(result['questions'][0]['reasks'], 1)
-        mcp_server.write_call(self.manifest, 'post', dict(to='lead-a', kind='approval', text='Approved',
+        mcp_server.call_tool(self.manifest, 'post', dict(to='lead-a', kind='approval', text='Approved',
                              topic='other', no_owner_required=True))
         self.assertEqual(approvals.findings(self.manifest, self.rows(), self.now + 3601), [])
 

@@ -252,7 +252,7 @@ row('selfupdate.py', 'update.lock|releases|writer:shim|coordkit/cli.py|update-po
 row('wake.py', '.json|.wait.lock|state|attempts.jsonl|lanes.json|state/cursors|state/wakes|.lock|writer:change|writer:notify', 'addressed post or retire command', 'attempt result recorded or explicit unretire', 'wake_debounce_minutes; pending attempts hold window', 'failed or unavailable wake remains inspectable in bus state')
 row('wake.py', 'state/wakes/scan.json|writer:scan', 'scan of rows written outside bus.append', 'checkpoint advances past complete rows; replaced or truncated log restarts at end', 'one scan interval', 'missed rows are only those written before the first scan')
 
-row('mcp_install.py', 'mcp-service.json|mcp/stdout.log|mcp/stderr.log|writer:main', 'explicit mcp install', 'mcp uninstall or lifecycle down', 'persistent service; token remains private until operator removes it', 'secret validation and manager failure')
+row('mcp_install.py', 'mcp-service.json|mcp/stdout.log|mcp/stderr.log|writer:main', 'explicit mcp install', 'mcp uninstall or lifecycle down', 'persistent service; existing credentials only, never recreated after retirement', 'secret validation and manager failure')
 row('lifecycle.py', 'mcp-service.json', 'MCP installation receipt', 'explicit uninstall or down', 'persistent managed service', 'doctor loaded-job drift')
 row('selfupdate.py', 'mcp-service.json', 'registered managed MCP service', 'explicit uninstall', 'update only reconciles owned jobs', 'service manager failure restores active release pointer')
 row('identity.py', 'state|questions|sessions.json', 'explicit session binding lookup', 'read-only snapshot', 'bounded transcript prefix for delivery', 'unknown identity produces no delivery')
@@ -295,3 +295,8 @@ row('stock.py', 'stock-last.json|.lock|writer:report', 'stock report compares co
 row('machine.py', 'state|machine|lane-watch|quiet-prs.lines', 'stock report or hourly digest reads producer files',
     'read-only; producers replace or remove files', 'last 20 matching lines, no local cache',
     'missing files ignored; malformed prefixes excluded')
+row('mcp_server.py', 'clients.json|clients.json.lock|writer:clients_main',
+    'explicit mcp-clients add/revoke; external private credentials',
+    'revoke removes an entry; lock released on exit',
+    'opened-file validation per request; atomic edits; bounded metadata-keyed parsed cache',
+    'malformed/insecure file refuses admission; absent file permits legacy fallback')

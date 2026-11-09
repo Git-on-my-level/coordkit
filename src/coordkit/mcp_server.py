@@ -4,7 +4,8 @@ Stdlib MCP over Streamable HTTP (stateless JSON-RPC 2.0 on POST /mcp), bound to 
 (Tailscale Funnel) terminates TLS. Every request needs `Authorization: Bearer <secret>`; the secret lives in a
 0600 file outside any repo. Reads use manifest-owned paths and bounded `agentctl recent` calls; no caller paths
 or shell commands are accepted. Every write is
-attributed to manifest.mcp.identity, or to a lane named in manifest.mcp.post_as when the caller asks to post as it. Every call is journaled; a kill file
+attributed to a per-client identity with explicit write, answer and sender grants. A single-secret legacy
+client retains manifest.mcp.identity and manifest.mcp.post_as during migration. Every call is journaled; a kill file
 turns every request into 503. Tool results are untrusted agent text, so they are capped and labelled as such.
 
 Go-live (the secret and the public endpoint) is a guarded step: docs/MCP.md.
@@ -13,7 +14,7 @@ import argparse
 import base64
 import datetime as dt
 import difflib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import fcntl
 import hmac
 import json
@@ -31,6 +32,11 @@ from .refs import ref_file
 
 PORT = 8767
 SECRET_FILE = Path(os.environ.get('COORDKIT_MCP_SECRET_FILE', '~/.coordkit-mcp/connector.secret')).expanduser()
+CLIENTS_FILE = Path(os.environ.get('COORDKIT_MCP_CLIENTS_FILE', '~/.coordkit-mcp/clients.json')).expanduser()
+MAX_CLIENTS_BYTES = 64 * 1024
+MAX_SECRET_BYTES = 4 * 1024
+CLIENTS_LOCK = threading.Lock()
+CLIENTS_CACHE = None  # one (opened-file metadata, parsed clients or invalid sentinel) entry
 MAX_BODY = 128 * 1024
 MAX_OUTPUT = 64 * 1024
 ROW_TEXT = 4000
@@ -60,9 +66,9 @@ TOOLS = mcp_tools()
 WRITES = {op.name[4:] for op in MCP_OPS if op.mode == 'write'}
 
 class Refused(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, client='anonymous'):
         super().__init__(message)
-        self.status = status
+        self.status, self.client = status, client
 
 
 class Limiter:
@@ -87,38 +93,158 @@ def home(manifest):
     return manifest.paths.root/'state'/'mcp'
 
 
-def journal(manifest, **fields):
+def journal(manifest, client='anonymous', **fields):
     path = home(manifest)/'calls.ndjson'
     path.parent.mkdir(parents=True, exist_ok=True)
-    bounded = {k: (v if isinstance(v, (int, float, bool)) or v is None else str(v)[:FIELD]) for k, v in fields.items()}
+    bounded = {k: (v if isinstance(v, (int, float, bool)) or v is None else str(v)[:FIELD]) for k, v in dict(fields, client=client).items()}
     line = json.dumps(dict(bounded, at=dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')))
-    with path.open('a') as stream:
+    with private_journal(path) as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         if stream.tell() > JOURNAL_MAX:  # rotate under the lock: at most two files of JOURNAL_MAX
             os.replace(path, path.with_suffix('.ndjson.1'))
-            with path.open('a') as fresh:
+            with private_journal(path) as fresh:
                 fresh.write(line + '\n')
         else:
             stream.write(line + '\n')
         fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+def private_journal(path, mode='a'):
+    # Read-only opens let startup repair historical journals with no write bit.
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK
+    flags |= os.O_WRONLY | os.O_APPEND | os.O_CREAT if mode == 'a' else os.O_RDONLY
+    fd = os.open(path, flags, 0o600)
+    stream = os.fdopen(fd, mode)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError('connector journal must be a regular file')
+        os.fchmod(fd, 0o600)
+        return stream
+    except OSError:
+        stream.close()
+        raise
+
+
+def private_file(path, limit):
+    # Validate the opened inode on every request, including cache hits.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    stream = os.fdopen(fd, 'rb')
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600:
+            raise Refused(503, 'connector credentials must be regular private files (chmod 600)')
+        if st.st_size > limit:
+            raise Refused(503, 'connector credentials file too large')
+        return stream, st
+    except Exception:
+        stream.close()
+        raise
+
+
+def private_text(stream, limit):
+    # A concurrent append after fstat must not turn this into an unbounded read.
+    data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise Refused(503, 'connector credentials file too large')
+    return data.decode('utf-8')
+
+
 def load_secret(path=None):
-    path = Path(path or SECRET_FILE)
-    st = path.stat()
-    if st.st_mode & 0o077:
-        raise Refused(503, 'connector secret file must be private (chmod 600)')
-    secret = path.read_text().strip()
+    stream, _ = private_file(Path(path or SECRET_FILE), MAX_SECRET_BYTES)
+    with stream:
+        secret = private_text(stream, MAX_SECRET_BYTES).strip()
     if len(secret) < 32:
         raise Refused(503, 'connector secret too short')
     return secret
 
 
-def authorized(headers, secret):
+@dataclass(frozen=True)
+class Client:
+    id: str
+    identity: str
+    post_as: tuple = ()
+    write: bool = False
+    answer: bool = False
+
+
+def legacy_client(manifest):
+    return Client('legacy', manifest.mcp.identity, tuple(manifest.mcp.post_as), True, True)
+
+
+def load_clients(path=None):
+    """Revalidate metadata per request; reuse only an unchanged, bounded snapshot."""
+    global CLIENTS_CACHE
+    path = Path(path or CLIENTS_FILE)
+    with CLIENTS_LOCK:
+        try:
+            stream, st = private_file(path, MAX_CLIENTS_BYTES)
+        except FileNotFoundError:
+            CLIENTS_CACHE = None
+            if os.path.lexists(path):  # dangling symlink is not an absent config
+                raise Refused(503, 'invalid connector clients file') from None
+            return {}
+        with stream:
+            key = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size, st.st_ctime_ns)
+            if CLIENTS_CACHE is None or CLIENTS_CACHE[0] != key:
+                try:
+                    clients = parse_clients(private_text(stream, MAX_CLIENTS_BYTES))
+                except (Refused, UnicodeError):
+                    CLIENTS_CACHE = (key, None)
+                    raise Refused(503, 'invalid connector clients file') from None
+                CLIENTS_CACHE = (key, clients)
+            if CLIENTS_CACHE[1] is None:
+                raise Refused(503, 'invalid connector clients file')
+            return CLIENTS_CACHE[1]
+
+
+def parse_clients(text):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate key')
+            result[key] = value
+        return result
+    try:
+        clients = json.loads(text, object_pairs_hook=unique)
+        if not isinstance(clients, dict):
+            raise ValueError('expected object')
+        secrets = set()
+        for name, spec in clients.items():
+            if not NAME.fullmatch(name) or name == 'legacy' or not isinstance(spec, dict):
+                raise ValueError('invalid client')
+            if set(spec) - {'secret', 'identity', 'post_as', 'write', 'answer'}:
+                raise ValueError('unknown field')
+            secret, identity, post_as = spec.get('secret'), spec.get('identity', name), spec.get('post_as', [])
+            if not isinstance(secret, str) or len(secret) < 32 or secret != secret.strip() or secret in secrets:
+                raise ValueError('invalid secret')
+            secrets.add(secret)
+            if not isinstance(identity, str) or not NAME.fullmatch(identity):
+                raise ValueError('invalid identity')
+            if not isinstance(post_as, list) or any(not isinstance(n, str) or not NAME.fullmatch(n) for n in post_as):
+                raise ValueError('invalid post_as')
+            if any(type(spec.get(k, False)) is not bool for k in ('write', 'answer')):
+                raise ValueError('invalid permission')
+        return clients
+    except (ValueError, TypeError, RecursionError):
+        raise Refused(503, 'invalid connector clients file') from None
+
+
+def authenticate(manifest, headers, secret_path=None, clients_path=None):
+    clients = load_clients(clients_path)
     got = headers.get('Authorization') or headers.get('authorization') or ''
-    if not got.startswith('Bearer '):
-        return False
-    return hmac.compare_digest(got[7:].strip().encode(), secret.encode())
+    token = got[7:].strip().encode() if got.startswith('Bearer ') else b''
+    for name, spec in clients.items():
+        if hmac.compare_digest(token, spec['secret'].encode()):
+            return Client(name, spec.get('identity', name), tuple(spec.get('post_as', [])),
+                          spec.get('write', False), spec.get('answer', False))
+    try:
+        secret = load_secret(secret_path)
+    except FileNotFoundError:
+        if not clients:
+            raise Refused(503, 'connector not configured') from None
+        return None
+    return legacy_client(manifest) if hmac.compare_digest(token, secret.encode()) else None
 
 
 def name_arg(args, key, required=True):
@@ -160,7 +286,11 @@ def quiet(fn, *args, **kwargs):
 
 def writes_enabled(manifest):
     """Writes are off until go-live turns them on."""
-    return (home(manifest)/'writes-enabled').exists() and not (home(manifest)/'kill').exists()
+    try:
+        mode = (home(manifest)/'writes-enabled').lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) and not os.path.lexists(home(manifest)/'kill')
 
 
 def select_project(manifest, args):
@@ -893,7 +1023,7 @@ def read_call(manifest, tool, args):
     raise ValueError(f'unknown tool {tool}')
 
 
-def call_tool(manifest, tool, args):
+def call_tool(manifest, tool, args, client=None):
     if not isinstance(args, dict):
         raise ValueError('arguments must be an object')
     allowed = {t['name']: set(t['inputSchema'].get('properties', {})) for t in TOOLS}
@@ -902,6 +1032,7 @@ def call_tool(manifest, tool, args):
     extra = set(args) - allowed[tool]
     if extra:
         raise ValueError(f'unexpected arguments: {sorted(extra)}')
+    client = client or legacy_client(manifest)  # local callers retain the manifest identity
     origin, manifest = manifest, select_project(manifest, args)
     manifest = replace(manifest, mcp=replace(manifest.mcp, identity=origin.mcp.identity))
     if tool not in WRITES:
@@ -913,19 +1044,43 @@ def call_tool(manifest, tool, args):
     with WRITE_LOCK:
         if not writes_enabled(origin) or not writes_enabled(manifest):
             raise ValueError('writes are disabled on this connector')
-        return write_call(manifest, tool, args)
+        return write_call(manifest, tool, args, client, origin)
 
 
-def write_call(manifest, tool, args):
+def write_call(manifest, tool, args, client, origin):
     from . import addressed, bus, questions
+    if not client.write:
+        raise ValueError('client requires write permission')
+    if tool == 'question_answer' and not client.answer:
+        raise ValueError('client requires answer permission')
+    def open_question(qid):
+        records = questions.load_all(manifest)
+        record = records.get(qid)
+        if record:
+            return record.get('state') in ('open', 'escalated')
+        if any(r.get('state') in ('open', 'escalated') and qid in
+               (r.get('bus_id'), *r.get('bus_ids', [])) for r in records.values()):
+            return True
+        # A committed bus ask may not have reached the question projection yet.
+        bus.configure(manifest)
+        return any(r.get('id') == qid and r.get('kind') == 'ask' for r in bus.read())
+    def check_writes():
+        if not writes_enabled(origin) or not writes_enabled(manifest):
+            raise ValueError('writes are disabled on this connector')
     if tool == 'post':
         to, kind = name_arg(args, 'to'), args.get('kind')
         if kind not in POST_KINDS:
             raise ValueError(f'kind must be one of {POST_KINDS}')
         text, re_id = text_arg(args, 'text', 2000), name_arg(args, 're', required=False)
-        sender = name_arg(args, 'as', required=False) or manifest.mcp.identity
-        if sender != manifest.mcp.identity and sender not in manifest.mcp.post_as:
-            raise ValueError(f'as must be one of {manifest.mcp.post_as or "(none configured)"}')
+        sender = name_arg(args, 'as', required=False) or client.identity
+        if sender != client.identity and sender not in client.post_as:
+            raise ValueError(f'as must be one of {client.post_as or "(none configured)"}')
+        # Asks can settle defaults or supersede an existing question even with
+        # no_auto_default set. A default on another kind can reach an escalation.
+        if not client.answer and (addressed.is_human(manifest, sender) or
+                                  kind in ('ask', 'answer', 'approval', 'ruling') or 'default' in args or
+                                  kind == 'msg' and re_id and open_question(re_id)):
+            raise ValueError('client requires answer permission')
         bus.LAST_POST = None
         try:
             extra = []
@@ -933,8 +1088,11 @@ def write_call(manifest, tool, args):
                 if key in args:
                     extra += ['--' + key, text_arg(args, key, 2000 if key == 'default' else 100)]
             for key in ('no_auto_default', 'no_owner_required'):
+                if key in args and type(args[key]) is not bool:
+                    raise ValueError(f'{key} must be a boolean')
                 if args.get(key):
                     extra += ['--' + key.replace('_', '-')]
+            check_writes()
             rc, lines = quiet(addressed.send, manifest, sender, to, text, kind=kind, re_id=re_id, origin='mcp',
                               topic=name_arg(args, 'topic', required=False) or 'general', extra=extra)
         except Exception as exc:
@@ -963,16 +1121,22 @@ def write_call(manifest, tool, args):
             raise ValueError(f'state must be one of {addressed.ACK_STATES}')
         bus.configure(manifest)
         row = next((r for r in bus.read() if r.get('id') == msg_id), None)
-        if row is None or manifest.mcp.identity not in addressed.assignees(row, manifest):
-            raise ValueError(f'{msg_id} is not addressed to {manifest.mcp.identity}')
-        rc, lines = quiet(addressed.ack, manifest, msg_id, manifest.mcp.identity, state, text_arg(args, 'note', 500, required=False))
+        if row is None or client.identity not in addressed.assignees(row, manifest):
+            raise ValueError(f'{msg_id} is not addressed to {client.identity}')
+        if not client.answer and (addressed.is_human(manifest, client.identity) or
+                                  state == 'done' and open_question(msg_id)):
+            raise ValueError('client requires answer permission')
+        note = text_arg(args, 'note', 500, required=False)
+        check_writes()
+        rc, lines = quiet(addressed.ack, manifest, msg_id, client.identity, state, note)
         return {'ok': rc in (0, None), 'outcome': [clip(l, 160) for l in lines][-5:]}
     if tool == 'question_answer':
         qid, text = name_arg(args, 'qid'), text_arg(args, 'text', 2000)
         record = questions.load_all(manifest).get(qid)
         if record is None or record.get('tier', 0) < 2 or record.get('state') not in ('open', 'escalated'):
             raise ValueError(f'{qid} is not an open question escalated to the operator')
-        rc, lines = quiet(questions.answer, manifest, qid, manifest.mcp.identity, text)
+        check_writes()
+        rc, lines = quiet(questions.answer, manifest, qid, client.identity, text)
         return {'ok': rc in (0, None), 'outcome': [clip(l, 160) for l in lines][-5:]}
     raise ValueError(f'unknown tool {tool}')
 
@@ -981,28 +1145,29 @@ def rpc_error(rid, code, message):
     return {'jsonrpc': '2.0', 'id': rid, 'error': {'code': code, 'message': message}}
 
 
-def admit(manifest, headers, limiter, secret_path=None):
+def admit(manifest, headers, limiter, secret_path=None, clients_path=None):
     """Kill switch, the bearer, then the rate, from headers alone: the HTTP layer runs this before it reads any body.
     Failed auth has its own bucket, so anonymous floods are bounded without starving the operator's quota. Raises Refused."""
-    if (home(manifest)/'kill').exists():
+    if os.path.lexists(home(manifest)/'kill'):
         raise Refused(503, 'connector disabled (kill switch)')
     try:
-        secret = load_secret(secret_path)
-    except FileNotFoundError:
-        raise Refused(503, 'connector not configured')
-    if not authorized(headers, secret):
+        client = authenticate(manifest, headers, secret_path, clients_path)
+    except (OSError, UnicodeError):
+        raise Refused(503, 'connector credentials unavailable') from None
+    if client is None:
         raise Refused(401 if limiter.take(unauth=True) else 429, 'unauthorized')
     if not limiter.take():
-        raise Refused(429, 'rate limited')
+        raise Refused(429, 'rate limited', client.id)
+    return client
 
 
-def handle(manifest, headers, body, limiter, secret_path=None, remote='', admitted=False):
+def handle(manifest, headers, body, limiter, secret_path=None, remote='', client=None, clients_path=None):
     """(HTTP status, JSON-able body or None). Pure: the HTTP layer only moves bytes."""
     started = time.time()
     tool, outcome, method, asked, reason = None, 'ok', None, None, None
     try:
-        if not admitted:
-            admit(manifest, headers, limiter, secret_path)
+        if client is None:
+            client = admit(manifest, headers, limiter, secret_path, clients_path)
         if len(body) > MAX_BODY:
             raise Refused(413, 'request too large')
         try:
@@ -1044,7 +1209,7 @@ def handle(manifest, headers, body, limiter, secret_path=None, remote='', admitt
             return 200, {'jsonrpc': '2.0', 'id': rid, 'result': {'tools': TOOLS}}
         if method == 'tools/call':
             try:
-                result = call_tool(manifest, tool, params.get('arguments') or {})
+                result = call_tool(manifest, tool, params.get('arguments') or {}, client)
                 result.setdefault('elapsed_ms', round((time.time() - started) * 1000, 2))
                 text, error = json.dumps(result, ensure_ascii=False), False
             except (ValueError, KeyError) as exc:
@@ -1067,7 +1232,7 @@ def handle(manifest, headers, body, limiter, secret_path=None, remote='', admitt
     finally:
         try:
             if outcome != 'refused_429':  # an over-limit flood is not journaled line by line (bounded disk)
-                journal(manifest, tool=tool, outcome=outcome, reason=reason, ms=int((time.time() - started) * 1000),
+                journal(manifest, client=client.id if client else 'anonymous', tool=tool, outcome=outcome, reason=reason, ms=int((time.time() - started) * 1000),
                     remote=remote, bytes_in=len(body or b''), method=method, protocol=asked,
                     agent=(headers.get('User-Agent') or '')[:40])
         except OSError:
@@ -1082,9 +1247,20 @@ def _close(sock):
         pass
 
 
-def serve(manifest, port=PORT, secret_path=None, ready=None):
+def serve(manifest, port=PORT, secret_path=None, ready=None, clients_path=None):
     """Serve until killed. ready(server) is called once bound (tests use port 0 and shut it down)."""
-    load_secret(secret_path)  # refuse to start without a private secret
+    if not load_clients(clients_path):
+        load_secret(secret_path)  # at least one private credential is required
+    path = home(manifest)/'calls.ndjson'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with private_journal(path):  # tighten active and historical journals before serving
+        pass
+    for archived in path.parent.glob(path.name + '.*'):
+        try:
+            with private_journal(archived, mode='r'):
+                pass
+        except FileNotFoundError:  # a concurrent rotation may remove a matched file
+            continue
     limiter = Limiter()
 
     slots = threading.BoundedSemaphore(MAX_HANDLERS)
@@ -1208,11 +1384,12 @@ def serve(manifest, port=PORT, secret_path=None, ready=None):
 
         def do_POST(self):
             self.server.headers_done(self.request)
+            client = None
             try:
                 if self.path.split('?')[0] != '/mcp':
                     return self.reply(404, {'error': 'not found'})
                 try:
-                    admit(manifest, self.headers, limiter, secret_path)  # before reading any body
+                    client = admit(manifest, self.headers, limiter, secret_path, clients_path)  # before reading any body
                     if not self.server.take_work(self.request):
                         raise Refused(503, 'busy')
                     body = self.body()
@@ -1220,14 +1397,14 @@ def serve(manifest, port=PORT, secret_path=None, ready=None):
                 except Refused as exc:
                     if exc.status != 429:  # an over-limit flood is not journaled line by line (bounded disk)
                         try:
-                            journal(manifest, tool=None, outcome=f'refused_{exc.status}', ms=0,
+                            journal(manifest, client=client.id if client else exc.client, tool=None, outcome=f'refused_{exc.status}', ms=0,
                                     remote=self.client_address[0], bytes_in=0)
                         except OSError:
                             pass
                     return self.reply(exc.status, {'error': str(exc)})
                 # The tunnel connects from loopback; X-Forwarded-For is caller-controlled, so it is never trusted.
                 self.reply(*handle(manifest, self.headers, body, limiter, secret_path, self.client_address[0],
-                                   admitted=True))
+                                   client=client))
             except Exception:
                 try:
                     self.reply(500, {'error': 'internal error'})
@@ -1254,10 +1431,68 @@ def serve(manifest, port=PORT, secret_path=None, ready=None):
     server.serve_forever()
 
 
+def private_directory(path):
+    """Tighten only the opened, user-owned directory; never chmod a symlink target."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if os.fstat(fd).st_uid != os.geteuid():
+            raise ValueError('credential directory must be owned by the current user')
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
+def clients_main(argv, manifest=None):
+    """Local credential edits; serialize helpers and atomically publish private files."""
+    import secrets
+    from .ops import parser_for
+    from .state import write_json
+    p = parser_for('mcp-clients')
+    o = p.parse_args(argv)
+    if (o.action == 'list') != (o.name is None):
+        p.error('add/revoke require a name; list takes no name')
+    if o.name and (not NAME.fullmatch(o.name) or o.name == 'legacy'):
+        p.error('invalid or reserved client name')
+    path = Path(o.clients_file or CLIENTS_FILE).expanduser()
+    try:
+        if o.action == 'list':
+            for name, spec in sorted(load_clients(path).items()):
+                print(json.dumps(dict(client=name, identity=spec.get('identity', name),
+                                      write=spec.get('write', False), answer=spec.get('answer', False),
+                                      post_as=spec.get('post_as', []))))
+            return 0
+        private_directory(path.parent)
+        fd = os.open(path.with_name(path.name + '.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            clients = dict(load_clients(path))  # edits must not mutate the auth cache
+            if o.action == 'add':
+                if o.name in clients:
+                    p.error('client already exists; revoke it or use a new name')
+                if any(not NAME.fullmatch(n) for n in o.post_as):
+                    p.error('invalid post-as name')
+                secret = secrets.token_urlsafe(32)
+                clients[o.name] = dict(secret=secret, identity=o.name, write=o.write,
+                                       answer=o.answer, post_as=o.post_as)
+            else:
+                if o.name not in clients:
+                    p.error('unknown client')
+                del clients[o.name]
+            if len(json.dumps(clients).encode()) + 1 > MAX_CLIENTS_BYTES:
+                raise ValueError('connector clients file too large')
+            write_json(path, clients)
+        if o.action == 'add':
+            print(secret)  # the only secret-bearing output, after durable publication
+        return 0
+    except Refused as exc:
+        raise ValueError(str(exc)) from None
+
+
 def main(argv, manifest):
     from .ops import parser_for
     p = parser_for('mcp-serve')
     o = p.parse_args(argv)
     manifest.writable()
-    serve(manifest, o.port, o.secret_file)
+    serve(manifest, o.port, o.secret_file, clients_path=o.clients_file)
     return 0
