@@ -167,6 +167,42 @@ class ProcessDefaultsTests(AddressedCase):
         self.assertEqual(len(approvals.findings(self.manifest, self.rows(), self.now + 1801)), 1)
         self.assertFalse(approvals.requires_owner(dict(kind='msg', text='Approve deployment')))
 
+    def test_permission_questions_preserve_pending_owner_alert_and_its_age(self):
+        approval = self.post('Approved: deploy.', 'approval')
+        for kind in ('approval', 'ruling', 'msg', 'answer', 'decision'):
+            for text in ('Approved?', 'Approve deployment?', 'Go ahead with deployment?'):
+                with self.subTest(kind=kind, text=text):
+                    flags = ('--subject', 'deployment', '--rollback', 'hold') if kind == 'decision' else ()
+                    self.post(text, kind, '--force', *flags)
+                    finding, = approvals.findings(self.manifest, self.rows(), self.now + 1801)
+                    self.assertEqual(finding['id'], approval['id'])
+        self.digest(at=self.now + 1801)
+        self.assertIn('owner-missing topic=result approval=' + approval['id'], self.digest_text())
+
+    def test_affirmative_approval_with_a_followup_question_requires_owner(self):
+        for kind in ('approval', 'ruling', 'msg', 'answer', 'decision'):
+            for text in ('Approved: deploy. Can you report back?',
+                         'Go ahead with deployment! Who will own it?',
+                         'Permission granted.\nWhen will it finish?'):
+                with self.subTest(kind=kind, text=text):
+                    self.assertTrue(approvals.requires_owner(dict(kind=kind, text=text)))
+
+    def test_only_ownership_clears_a_pending_approval(self):
+        for resolution in ('owner', 'claim', 'ack'):
+            with self.subTest(resolution=resolution):
+                approval = self.post('Approved: deploy.', 'approval')
+                rows = [approval, dict(approval, id='exempt', text='Approved by exception',
+                                       no_owner_required=True)]
+                finding, = approvals.findings(self.manifest, rows, self.now + 1801)
+                self.assertEqual(finding['id'], approval['id'])
+                owner_row = dict(approval, id='owner', kind='msg' if resolution == 'owner' else resolution,
+                                 frm='worker-ui', text='I own it', re=approval['id'])
+                if resolution == 'owner':
+                    owner_row['owner'] = 'worker-ui'
+                else:
+                    owner_row['topic'] = 'general'  # resolve the reference's topic
+                self.assertEqual(approvals.findings(self.manifest, [*rows, owner_row], self.now + 1801), [])
+
     def test_later_owner_on_a_post_clears_and_approval_opt_out(self):
         self.post('Approved', 'approval')
         self.post('Assigned', 'msg', '--owner', 'worker-ui')

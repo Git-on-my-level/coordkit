@@ -231,10 +231,22 @@ def track_bus_ask(manifest, row):
 
 def track_bus_reply(manifest, row):
     """Persist bus answers before they age out of the bounded reconciliation tail."""
+    if os.environ.get('COORDKIT_QUESTION_GUARD') == 'off':
+        return
     def apply(records):
-        record = records.get(row.get('re'))
-        if record and record.get('capture') == 'bus' and replies(manifest, [row], record):
-            settle(manifest, record, [row], parse_ts(row['ts']).timestamp())
+        for record in records.values():
+            if record['state'] not in ('open', 'escalated'):
+                continue
+            answer = replies(manifest, [row], record)
+            if not answer:
+                continue
+            if record.get('capture') == 'bus':
+                settle(manifest, record, [answer], parse_ts(answer['ts']).timestamp())
+            else:
+                # The ladder still owns delivery and ANX withdrawal. Save only
+                # the first answer, including replies to prior escalation hops.
+                record.setdefault('bus_answer', {k: answer[k] for k in
+                                  ('id', 'ts', 'frm', 're', 'kind', 'text') if k in answer})
     update(manifest, apply)
 
 
@@ -796,6 +808,8 @@ def replies(manifest, rows, record):
     """The first real answer to this question from anyone but its asker and coordkit. A receipt
     ("received", an `ack` of received/blocked, or bare acknowledgement text) is not an answer."""
     ids = {record['qid'], record.get('bus_id'), *record.get('bus_ids', [])} - {None}
+    if isinstance(record.get('bus_answer'), dict):
+        rows = [record['bus_answer'], *rows]
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get('text', ''), str):
             continue

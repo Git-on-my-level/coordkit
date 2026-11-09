@@ -9,9 +9,14 @@ APPROVES = re.compile(r'^\s*(approved\b|go ahead\b|permission granted\b|green li
 
 
 def requires_owner(row):
-    if (row.get('no_owner_required') or row.get('copy_of') or
-            isinstance(row.get('text'), str) and row['text'].rstrip().endswith('?')):
+    if row.get('no_owner_required') or row.get('copy_of'):
         return False
+    text = row.get('text')
+    if isinstance(text, str):
+        # Classify the approval statement, not a later follow-up question.
+        statement = re.split(r'(?<=[.!?])\s+|\n', text.strip(), maxsplit=1)[0]
+        if statement.endswith('?'):
+            return False
     return (row.get('kind') in ('approval', 'ruling') or
             row.get('kind') in ('answer', 'decision', 'msg') and
             isinstance(row.get('text'), str) and bool(APPROVES.match(row['text'])))
@@ -38,15 +43,15 @@ def topics(manifest, rows, at):
             continue
         if not cutoff <= stamp <= at:
             continue
-        if row.get('kind') == 'claim' and topic == 'general' and isinstance(row.get('re'), str):
+        if row.get('kind') in ('claim', 'ack') and topic == 'general' and isinstance(row.get('re'), str):
             topic = topic_by_id.get(row['re'], topic)
         topic_by_id[row['id']] = topic
         item = result.setdefault(topic, dict(owner=None, approval=None, stamp=0))
-        owner = row.get('owner') or (row.get('frm') if row.get('kind') == 'claim' else None)
+        owner = row.get('owner') or (row.get('frm') if row.get('kind') in ('claim', 'ack') else None)
         if isinstance(owner, str) and owner.strip() and owner not in ('all', 'lead'):
             item['owner'] = owner
-        if row.get('kind') in ('approval', 'ruling') or requires_owner(row):
-            item.update(approval=row if requires_owner(row) else None, stamp=stamp)
+        if requires_owner(row):
+            item.update(approval=row, stamp=stamp)
     return result
 
 

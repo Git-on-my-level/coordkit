@@ -260,6 +260,35 @@ class QuestionContractTests(AddressedCase):
             for i in range(800):
                 stream.write(json.dumps(dict(id=f'fyi-{i}', ts=ts(self.now), frm='worker-ui', to='lead-a', kind='fyi', text='x' * 1000)).encode() + b'\n')
 
+    def test_harness_answers_survive_traffic_before_the_next_sweep(self):
+        for policy in ({}, {'default': 'Use cache', 'no_auto_default': True}):
+            for reference in ('qid', 'bus_id', 'bus_ids'):
+                with self.subTest(policy=policy, reference=reference):
+                    with patch.object(questions, 'route'):
+                        record, _ = questions.create(self.manifest, 'worker-ui', 'Use cache?',
+                                                     session_id=str((policy, reference)), **policy)
+                    qid = record['qid']
+                    alias = qid if reference == 'qid' else 'hop-' + qid
+                    binding = {} if reference == 'qid' else {reference: [alias] if reference == 'bus_ids' else alias}
+                    questions.mark(self.manifest, qid, **binding, anx_ask_id='pending-ask')
+                    self.quiet(bus.main, ['post', '--from', 'lead-a', '--to', 'worker-ui',
+                                         '--kind', 'answer', '--re', alias, 'Fetch fresh data'], self.manifest)
+                    answer = bus.LAST_POST[0]
+                    self.fill_history()  # >256 KiB after the answer, with no intervening sweep
+                    rows = questions.recent_rows(self.manifest)
+                    self.assertFalse(any(r['id'] == answer['id'] for r in rows))
+                    with patch.object(questions, 'deliver', return_value='waiter') as deliver, \
+                            patch.object(questions, 'withdraw_anx') as withdraw, \
+                            patch.object(questions, 'tier2') as escalate:
+                        self.quiet(questions.ladder, self.manifest, self.now + 7200, rows=rows)
+                    stored = questions.load_all(self.manifest)[qid]
+                    self.assertEqual((stored['state'], stored['answer_id'], stored['answer']),
+                                     ('closed', answer['id'], 'Fetch fresh data'))
+                    deliver.assert_called_once()
+                    withdraw.assert_called_once()
+                    escalate.assert_not_called()
+                    self.assertFalse(stored.get('auto_default_applied'))
+
     def test_legacy_tail_identity_matches_full_reader_and_settlement(self):
         # A nonzero byte tail and a record cap must both retain physical line
         # numbers, counting malformed and blank lines as the full reader does.
@@ -280,8 +309,17 @@ class QuestionContractTests(AddressedCase):
         self.quiet(questions.capture_bus_asks, self.manifest, rows, self.now)
         self.assertEqual(set(questions.load_all(self.manifest)), {canonical})
         self.incumbent_row('reply', 'lead-a', 'worker-ui', 'answer', 'Fetch fresh', ago=0, re=canonical)
+        previous_start, _ = self.quiet(questions.recent_rows, self.manifest, coverage=True)[0]
         for _ in range(20):
             self.incumbent_row('newer', 'worker-ui', 'lead-a', 'fyi', 'x' * 1000)
+            # Every append shifts the byte tail, but never the physical identity.
+            start_after, shifted = self.quiet(questions.recent_rows, self.manifest, coverage=True)[0]
+            self.assertGreater(start_after, previous_start)
+            previous_start = start_after
+            self.assertEqual(next(r['id'] for r in shifted if r['kind'] == 'ask'), canonical)
+            self.assertEqual(next(r['id'] for r in self.quiet(self.rows)[0] if r['kind'] == 'ask'), canonical)
+            self.quiet(questions.capture_bus_asks, self.manifest, shifted, self.now)
+            self.assertEqual(set(questions.load_all(self.manifest)), {canonical})
         rows = self.quiet(questions.recent_rows, self.manifest)[0]
         self.assertEqual(next(r['id'] for r in rows if r['kind'] == 'ask'), canonical)
         record = questions.load_all(self.manifest)[canonical]
