@@ -33,6 +33,8 @@ jobs:
           python -m pip install build
           python -m build
       - name: Smoke install wheel and sdist outside the checkout
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python -m venv "$RUNNER_TEMP/wheel-smoke"
           "$RUNNER_TEMP/wheel-smoke/bin/python" -m pip install --no-deps dist/*.whl
@@ -41,8 +43,8 @@ jobs:
           cd "$RUNNER_TEMP"
           wheel-smoke/bin/coordkit --version
           sdist-smoke/bin/coordkit --version
-          wheel-smoke/bin/python -I -c 'from coordkit import __version__; from coordkit.paths import install_root; assert __version__ == "0.2.0"; assert install_root() is None'
-          sdist-smoke/bin/python -I -c 'from coordkit import __version__; assert __version__ == "0.2.0"'
+          wheel-smoke/bin/python -I -c 'import os; from coordkit import __version__; from coordkit.paths import install_root; assert "v" + __version__ == os.environ["RELEASE_TAG"]; assert install_root() is None'
+          sdist-smoke/bin/python -I -c 'import os; from coordkit import __version__; assert "v" + __version__ == os.environ["RELEASE_TAG"]'
       - name: Checksums
         run: |
           cd dist
