@@ -353,7 +353,7 @@ def reconcile(manifest, dry_run=False, at=None):
     for detail in installation_drift(manifest):
         ask('drift', 'drift:'+hashlib.sha256(detail.encode()).hexdigest(), None,
             detail, 'Compare jobs, registered lead hooks and ANX loop cards/cadences to coordkit up --plan; repair the intended configuration explicitly.')
-    stocks = report(manifest, 'RECONCILE', at, since=state['obligations_since'], hold_warning=warn_hold_text)
+    stocks = report(manifest, 'RECONCILE', at, since=state['obligations_since'], hold_warning=warn_hold_text, persist=not dry_run)
     for kind, item in stocks.items():
         if item['count'] >= item['threshold']:
             ask('stock', 'stock:'+kind, None,

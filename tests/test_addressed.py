@@ -194,7 +194,9 @@ class AddressedTests(AddressedCase):
         result = escalation.ask(self.manifest, 'card:task', kind='rulings', situation='Ruling r1 is unacked.',
                                 impact='i', recommend='Chase the owner.', why='w')
         self.assertEqual(result['routed_to'], 'lead_digest')
-        self.assertFalse([r for r in self.rows() if r['frm'] == 'coordkit' and r['kind'] == 'ask'])
+        asks = [r for r in self.rows() if r['frm'] == 'coordkit' and r['kind'] == 'ask']
+        self.assertEqual(len(asks), 1)
+        self.assertTrue(asks[0]['digest_only'])  # durable question, still no individual wake
         self.assertIn('finding:rulings', (addressed.home(self.manifest)/'lead-digest.ndjson').read_text())
 
     def test_8d_awake_agent_ignoring_its_inbox_is_swept(self):
@@ -426,6 +428,20 @@ class ConfirmationExpiryTests(AddressedCase):
 
 
 class HumanRecipientTests(AddressedCase):
+    def test_question_human_actor_is_human_without_a_roster_entry(self):
+        # The default operator and an explicit override carry the same human policy.
+        for config, expected in (('', 'ck-sample-lead'),
+                                 ('\n[questions]\nhuman_actor = "operator"\n', 'operator')):
+            with self.subTest(actor=expected):
+                self.file.write_text(BASE + ADDRESSED + config)
+                manifest = load(self.file)
+                self.assertEqual(manifest.questions.human_actor, expected)
+                self.assertNotIn(expected, addressed.registry(manifest))
+                self.assertTrue(addressed.is_human(manifest, expected))
+                self.assertTrue(addressed.listening(manifest, expected)[0])
+                self.assertFalse(addressed.is_human(manifest, 'worker-ui'))
+                self.assertFalse(addressed.is_human(manifest, ''))
+
     def test_human_role_members_receive_only_the_hourly_digest(self):
         self.file.write_text(self.file.read_text().replace('coordinator = ["coordinator", "lead-a"]',
             'coordinator = { members = ["coordinator", "lead-a"], human = true }'))

@@ -1,5 +1,24 @@
 # Addressed routing and listening
 
+## Approval owners
+
+Approvals require one responsible topic owner by default. `--kind approval` and
+`--kind ruling` without `--owner` publish successfully with `owner_missing=true`;
+affirmative answers/decisions/messages beginning with "Approved", "Go ahead",
+"Permission granted" or "Green light" receive the same policy. A later post with
+`--owner LANE`, an owner-bearing acknowledgement, or `--kind claim` on the topic
+clears the finding. A claim uses its sender when no explicit owner is supplied;
+`--re APPROVAL_ID` inherits the approval's topic if no topic is specified.
+
+After `[obligations].owner_required_after` (default `"30m"`), an approved topic
+whose owner remains null appears in the hourly digest as `owner-missing`, with
+its topic, approval row ID and age. `--no-owner-required` on the approval is the
+exception. MCP uses optional `owner` and `no_owner_required` fields; `topics`
+exposes `owner_missing` and `approval_id`. Ownership findings are derived from
+the existing `addressed.window_hours` snapshot, capped at 10,000 rows, with no
+new alert latch. Malformed rows are ignored. Existing blocker owner validation
+and ruling owner acknowledgements remain in force when an owner is supplied.
+
 `bus post` routes registered names and roles through `addressed.py`. The manifest declares
 `[addressed.agents]` and `[addressed.roles]`. First successful local post/ack, or arming
 `bus wait --to NAME`, records the sender in private `state/addressed/register.json`.

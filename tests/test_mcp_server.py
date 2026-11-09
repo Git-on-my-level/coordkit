@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from coordkit import addressed, bus, mcp_server, questions
 from coordkit.manifest import ManifestError, load
-from tests.test_addressed import AddressedCase
+from tests.test_addressed import AddressedCase, ts
 
 SECRET = 's' * 43
 
@@ -213,7 +213,7 @@ class McpToolTests(McpCase):
         self.assertEqual(row['frm'], self.manifest.mcp.identity)
         error, text = self.tool('post', to='lead-a', kind='ask', text='x', frm='lead-a')  # no sender field exists
         self.assertTrue(error); self.assertIn('unexpected arguments', text)
-        for bad in ({'to': '../etc', 'kind': 'ask', 'text': 'x'}, {'to': 'lead-a', 'kind': 'ruling', 'text': 'x'},
+        for bad in ({'to': '../etc', 'kind': 'ask', 'text': 'x'}, {'to': 'lead-a', 'kind': 'signal', 'text': 'x'},
                     {'to': 'lead-a', 'kind': 'ask', 'text': 'x' * 2001}, {'to': 'lead-a', 'kind': 'ask', 'text': ' '}):
             self.assertTrue(self.tool('post', **bad)[0], bad)
 
@@ -236,10 +236,11 @@ class McpToolTests(McpCase):
         # The fsynced append is the post outcome. Delivery/mirroring can fail
         # afterward; reporting a preflight failure invites duplicate retries.
         self.enable_writes()
-        for index, (stage, failure) in enumerate((('after_post', SystemExit(1)), ('after_post', RuntimeError('delivery failed')),
-                                                ('project_pending', SystemExit(1)))):
+        for stage, failure in (('after_post', SystemExit(1)), ('after_post', RuntimeError('delivery failed')),
+                               ('project_pending', SystemExit(1))):
             module = addressed if stage == 'after_post' else bus
-            message = f'Durable request {index}'
+            # Bare retry counts normalize into one ask; each failure stage needs distinct information.
+            message = f'Durable {stage} request {type(failure).__name__}'
             with self.subTest(stage=stage, failure=type(failure).__name__), \
                     patch.object(module, stage, side_effect=failure):
                 error, text = self.tool('post', to='worker-ui', kind='ask', text=message)
@@ -1052,7 +1053,8 @@ class McpReadBatchTests(McpCase):
         self.assertTrue(answered['needs_decision'])
         self.assertEqual(set(answered), {'qid', 'state', 'tier', 'asker', 'target', 'answered_by', 'answer_id',
                                          'created_at', 'answered_at', 'question', 'answer', 'truncated',
-                                         'age_minutes', 'needs_decision', 'stale'})
+                                         'age_minutes', 'needs_decision', 'stale', 'default', 'reasks',
+                                         'no_auto_default', 'auto_default_applied', 'unanswered_no_default'})
         tier_one = next(r for r in result['questions'] if r['qid'] == 'q-two')
         self.assertFalse(tier_one['needs_decision'])
         self.assertEqual(answered['answer'], 'q-one: approved in chat')
@@ -1123,8 +1125,8 @@ class McpReadBatchTests(McpCase):
 class McpClientTests(McpCase):
     TOKEN = 'c' * 43
 
-    def save_clients(self, **grants):
-        self.clients.write_text(json.dumps({'connector': dict(secret=self.TOKEN, identity='client-agent', **grants)}))
+    def save_clients(self, identity='client-agent', **grants):
+        self.clients.write_text(json.dumps({'connector': dict(secret=self.TOKEN, identity=identity, **grants)}))
         self.clients.chmod(0o600)
 
     def client_tool(self, tool, **arguments):
@@ -1132,6 +1134,176 @@ class McpClientTests(McpCase):
         self.assertEqual(status, 200, reply)
         result = reply['result']
         return result['isError'], result['content'][0]['text']
+
+    def test_process_fields_do_not_grant_write_or_answer_authority(self):
+        self.enable_writes()
+        for grants in ({}, dict(answer=True), dict(write=True)):
+            self.save_clients(**grants)
+            for options in (dict(key='cache', default='Use cache'),
+                            dict(key='cache', no_auto_default=True),
+                            dict(key='cache', no_auto_default=False)):
+                with self.subTest(grants=grants, options=options):
+                    error, text = self.client_tool('post', to='all', kind='ask', text='Use cache?', **options)
+                    self.assertTrue(error, text)
+                    self.assertIn('answer permission' if grants.get('write') else 'write permission', text)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(questions.load_all(self.manifest), {})
+
+    def test_process_fields_keep_per_client_sender_authorization(self):
+        self.enable_writes()
+        self.save_clients(write=True, answer=True, post_as=['thread'])
+        self.manifest.mcp.post_as = ['manifest-only']
+        options = dict(key='cache', default='Use cache', no_auto_default=True)
+        error, text = self.client_tool('post', to='all', kind='ask', text='Use cache?',
+                                       **options, **{'as': 'manifest-only'})
+        self.assertTrue(error, text)
+        self.assertEqual(self.rows(), [])
+        error, text = self.client_tool('post', to='all', kind='ask', text='Use cache?',
+                                       **options, **{'as': 'thread'})
+        self.assertFalse(error, text)
+        record = next(iter(questions.load_all(self.manifest).values()))
+        self.assertEqual((record['asker'], record['default'], record['no_auto_default']), ('thread', 'Use cache', True))
+
+    def test_granted_reasks_default_and_revocation_blocks_default_or_supersession(self):
+        self.enable_writes()
+        self.save_clients(write=True, answer=True)
+        args = dict(to='all', kind='ask', text='Use cache?', key='cache', default='Use cache', topic='cache')
+        ids = []
+        for _ in range(2):
+            error, text = self.client_tool('post', **args)
+            self.assertFalse(error, text)
+            ids.append(json.loads(text)['id'])
+        self.assertEqual(ids[0], ids[1])
+        before = questions.load_all(self.manifest)
+        rows = self.rows()
+        self.save_clients(write=True)
+        for change in ({}, dict(text='Use fresh data?'), dict(no_auto_default=True)):
+            error, text = self.client_tool('post', **dict(args, **change))
+            self.assertTrue(error, text)
+            self.assertIn('answer permission', text)
+        self.assertEqual(questions.load_all(self.manifest), before)
+        self.assertEqual(self.rows(), rows)
+        self.save_clients(write=True, answer=True)
+        error, text = self.client_tool('post', **args)
+        self.assertFalse(error, text)
+        record = questions.load_all(self.manifest)[ids[0]]
+        self.assertEqual((record['state'], record['reasks']), ('closed', 2))
+        self.assertTrue(record['auto_default_applied'])
+        error, text = self.client_tool('open_questions', all=True)
+        self.assertFalse(error, text)
+        projected = json.loads(text)['questions'][0]
+        self.assertEqual(projected['default'], 'Use cache')
+        self.assertTrue(projected['auto_default_applied'])
+
+    def test_approval_and_ruling_require_answer_and_claim_remains_an_ownership_write(self):
+        self.enable_writes()
+        self.save_clients(write=True)
+        for kind in ('approval', 'ruling'):
+            error, text = self.client_tool('post', to='all', kind=kind, text='Proceed', re='pending')
+            self.assertTrue(error, text)
+            self.assertIn('answer permission', text)
+        # An explicit default can reach question settlement through escalation,
+        # so attaching it to a non-ask kind cannot bypass the grant either.
+        error, text = self.client_tool('post', to='all', kind='msg', text='Context', default='Proceed')
+        self.assertTrue(error, text)
+        self.assertEqual(self.rows(), [])
+        error, text = self.client_tool('post', to='all', kind='claim', text='I own it', topic='pending', owner='client-agent')
+        self.assertFalse(error, text)
+        self.save_clients(write=True, answer=True)
+        for kind in ('approval', 'ruling'):
+            error, text = self.client_tool('post', to='all', kind=kind, text='Proceed',
+                                           topic=kind, no_owner_required=True)
+            self.assertFalse(error, text)
+            self.assertTrue(self.rows()[-1]['no_owner_required'])
+
+    def test_unprojected_bus_asks_and_harness_hop_replies_require_answer(self):
+        self.enable_writes()
+        self.save_clients(write=True)
+        self.incumbent_row('unprojected', 'worker-ui', 'client-agent')
+        qid = 'q-hop'
+        questions.update(self.manifest, lambda records: records.update({qid: dict(
+            qid=qid, state='escalated', asker='worker-ui', created_at=self.now, bus_ids=['old-hop'], bus_id='current-hop')}))
+        before = self.rows()
+        for parent in ('unprojected', 'old-hop', 'current-hop'):
+            error, text = self.client_tool('post', to='all', kind='msg', text='Proceed', re=parent)
+            self.assertTrue(error, text)
+            self.assertIn('answer permission', text)
+        for state in ('received', 'blocked'):
+            error, text = self.client_tool('ack', id='unprojected', state=state)
+            self.assertFalse(error, text)
+        error, text = self.client_tool('ack', id='unprojected', state='done')
+        self.assertTrue(error, text)
+        self.assertIn('answer permission', text)
+        self.assertEqual(len(self.rows()), len(before) + 2)
+        self.save_clients(write=True, answer=True)
+        error, text = self.client_tool('ack', id='unprojected', state='done')
+        self.assertFalse(error, text)
+        self.assertEqual(self.rows()[-1]['ack'], 'done')
+
+    def test_pruned_and_untracked_asks_do_not_require_answer(self):
+        # Closed records leave the store after a week, and digest/copy asks are
+        # never questions. A write-only client can still follow those threads.
+        self.enable_writes()
+        self.save_clients(write=True)
+        path = self.manifest.paths.bus_log
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        def bus_row(msg_id, **fields):
+            rec = dict(id=msg_id, frm='worker-ui', to='client-agent', topic='general', kind='ask', text='go?',
+                       ts=ts(self.now - fields.pop('ago', 60)))
+            rec.update(fields)
+            with path.open('a') as stream:
+                stream.write(json.dumps(rec) + '\n')
+            return rec
+
+        for name in ('ancient-msg', 'ancient-ack'):
+            bus_row(name)
+        pad = json.dumps(dict(id='pad', frm='lead-a', to='all', topic='general', kind='fyi',
+                              ts=ts(self.now - 30), text='x' * 400)) + '\n'
+        with path.open('a') as stream:
+            stream.write(pad * (questions.MAX_BUS_BYTES // len(pad) + 3))
+        bus_row('defaulted')
+        bus_row('defaulted-answer', frm='coordkit', to='worker-ui', kind='answer',
+                text='auto-default applied: use cache', re='defaulted', ago=5)
+        bus_row('answered')
+        bus_row('answered-reply', frm='lead-a', to='worker-ui', kind='msg', text='Proceed with the cache',
+                re='answered', ago=5)
+        for name, fields in (
+                ('digest', dict(digest_only=True)),
+                ('copy', dict(copy_of='origin')),
+                ('ladder', dict(question='q-ladder')),
+                ('topic', dict(topic='coordkit-digest'))):
+            bus_row(name + '-msg', **fields)
+            bus_row(name + '-ack', **fields)
+        acks = ('ancient-ack', 'defaulted', 'answered', 'digest-ack', 'copy-ack', 'ladder-ack', 'topic-ack')
+        msgs = ('ancient-msg', 'defaulted', 'answered', 'digest-msg', 'copy-msg', 'ladder-msg', 'topic-msg')
+        for parent in acks:
+            with self.subTest(ack=parent):
+                error, text = self.client_tool('ack', id=parent, state='done')
+                self.assertFalse(error, text)
+        for parent in msgs:
+            with self.subTest(msg=parent):
+                error, text = self.client_tool('post', to='all', kind='msg', text='context', re=parent)
+                self.assertFalse(error, text)
+        bus_row('fresh', ago=0)
+        error, text = self.client_tool('ack', id='fresh', state='received')
+        self.assertFalse(error, text)
+        error, text = self.client_tool('post', to='all', kind='msg', text='Proceed', re='fresh')
+        self.assertTrue(error, text)
+        self.assertIn('answer permission', text)
+        error, text = self.client_tool('ack', id='fresh', state='done')
+        self.assertTrue(error, text)
+        self.assertIn('answer permission', text)
+
+    def test_process_opt_out_fields_require_boolean_values(self):
+        self.enable_writes()
+        self.save_clients(write=True, answer=True)
+        for key in ('no_auto_default', 'no_owner_required'):
+            for value in ('false', 0, None):
+                error, text = self.client_tool('post', to='all', kind='ask', text='Proceed?', **{key: value})
+                self.assertTrue(error, text)
+                self.assertIn('must be a boolean', text)
+        self.assertEqual(self.rows(), [])
 
     def test_validation_fails_closed_even_with_a_valid_legacy_bearer(self):
         # A broken permission database must not silently restore legacy powers.
@@ -1211,18 +1383,45 @@ class McpClientTests(McpCase):
         self.assertTrue(self.client_tool('ack', id='global')[0])
 
     def test_human_sender_requires_answer_including_default_identity(self):
+        # A question operator is human even without a human-marked roster entry.
         self.manifest.addressed.agents['relay']['human'] = True
         self.manifest.addressed.roles['coordinator'] = {'members': ['coordinator', 'human-member'], 'human': True}
+        senders = (self.manifest.questions.human_actor, 'relay', 'coordinator', 'human-member')
         self.enable_writes()
         for allowed in (False, True):
-            self.save_clients(write=True, answer=allowed, post_as=['relay', 'coordinator', 'human-member'])
-            for sender in ('relay', 'coordinator', 'human-member'):
-                with self.subTest(allowed=allowed, sender=sender):
-                    error, text = self.client_tool('post', to='all', kind='fyi', text='hello', **{'as': sender})
+            for sender in senders:
+                for own_identity in (False, True):
+                    self.limiter = mcp_server.Limiter()
+                    self.save_clients(identity=sender if own_identity else 'client-agent',
+                                      write=True, answer=allowed, post_as=list(senders))
+                    for kind in ('msg', 'fyi'):
+                        with self.subTest(allowed=allowed, sender=sender, own_identity=own_identity, kind=kind):
+                            before = self.rows()
+                            args = {} if own_identity else {'as': sender}
+                            error, text = self.client_tool('post', to='all', kind=kind, text='hello', **args)
+                            self.assertEqual(error, not allowed, text)
+                            if allowed:
+                                self.assertEqual(self.rows()[-1]['frm'], sender)
+                            else:
+                                self.assertIn('answer permission', text)
+                                self.assertEqual(self.rows(), before)
+
+    def test_human_client_cannot_bypass_answer_grant_by_posting_as_machine(self):
+        self.enable_writes()
+        self.manifest.addressed.agents['operator-agent'] = {'human': True}
+        self.manifest.addressed.roles['operator-role'] = {'members': ['operator-member'], 'human': True}
+        for sender in (self.manifest.questions.human_actor, 'operator-agent', 'operator-role', 'operator-member'):
+            for allowed in (False, True):
+                with self.subTest(sender=sender, allowed=allowed):
+                    self.save_clients(identity=sender, write=True, answer=allowed, post_as=['worker-ui'])
+                    before = self.rows()
+                    error, text = self.client_tool('post', to='all', kind='fyi', text='hello', **{'as': 'worker-ui'})
                     self.assertEqual(error, not allowed, text)
-        self.save_clients(write=True)
-        self.manifest.addressed.agents['client-agent'] = {'human': True}
-        self.assertTrue(self.client_tool('post', to='all', kind='fyi', text='hello')[0])
+                    if allowed:
+                        self.assertEqual(self.rows()[-1]['frm'], 'worker-ui')
+                    else:
+                        self.assertIn('answer permission', text)
+                        self.assertEqual(self.rows(), before)
 
     def test_answer_and_msg_question_replies_require_answer_permission(self):
         # msg replies can reconcile a question as answered, so kind alone is insufficient.
@@ -1244,16 +1443,21 @@ class McpClientTests(McpCase):
 
     def test_question_answer_grant_and_client_attribution(self):
         self.enable_writes()
-        record, _ = questions.create(self.manifest, 'worker-ui', 'Proceed?', session_id='q')
-        qid = record['qid']
-        questions.mark(self.manifest, qid, tier=2, state='escalated')
-        self.save_clients(write=True)
-        error, text = self.client_tool('question_answer', qid=qid, text='yes')
-        self.assertTrue(error); self.assertIn('answer permission', text)
-        self.save_clients(write=True, answer=True)
-        error, text = self.client_tool('question_answer', qid=qid, text='yes')
-        self.assertFalse(error, text)
-        self.assertEqual(questions.load_all(self.manifest)[qid]['answered_by'], 'client-agent')
+        for sender in ('client-agent', self.manifest.questions.human_actor):
+            with self.subTest(sender=sender):
+                record, _ = questions.create(self.manifest, 'worker-ui', 'Proceed?', session_id=sender)
+                qid = record['qid']
+                questions.mark(self.manifest, qid, tier=2, state='escalated')
+                self.save_clients(identity=sender, write=True)
+                before = self.rows()
+                error, text = self.client_tool('question_answer', qid=qid, text='yes')
+                self.assertTrue(error); self.assertIn('answer permission', text)
+                self.assertEqual(self.rows(), before)
+                self.assertEqual(questions.load_all(self.manifest)[qid]['state'], 'escalated')
+                self.save_clients(identity=sender, write=True, answer=True)
+                error, text = self.client_tool('question_answer', qid=qid, text='yes')
+                self.assertFalse(error, text)
+                self.assertEqual(questions.load_all(self.manifest)[qid]['answered_by'], sender)
 
     def test_symlink_safe_gates_and_last_moment_recheck(self):
         self.save_clients(write=True)
@@ -1400,7 +1604,7 @@ class McpClientTests(McpCase):
         self.enable_writes()
         self.save_clients(write=True)
         qid = 'q-ack'
-        questions.update(self.manifest, lambda records: records.update({qid: dict(qid=qid, state='open', asker='worker-ui')}))
+        questions.update(self.manifest, lambda records: records.update({qid: dict(qid=qid, state='open', asker='worker-ui', created_at=self.now)}))
         self.incumbent_row(qid, 'worker-ui', 'client-agent')
         record = questions.load_all(self.manifest)[qid]
         for state in ('received', 'blocked'):
@@ -1527,12 +1731,13 @@ class McpClientTests(McpCase):
         self.enable_writes()
         self.manifest.addressed.agents['relay']['human'] = True
         self.manifest.addressed.roles['coordinator'] = {'members': ['coordinator', 'human-member'], 'human': True}
-        for sender in ('relay', 'coordinator', 'human-member'):
+        senders = (self.manifest.questions.human_actor, 'relay', 'coordinator', 'human-member')
+        for sender in senders:
             self.incumbent_row('work-' + sender, 'worker-ui', sender)
         for allowed in (False, True):
-            for sender in ('relay', 'coordinator', 'human-member'):
-                self.clients.write_text(json.dumps({'connector': dict(secret=self.TOKEN, identity=sender, write=True, answer=allowed)}))
-                self.clients.chmod(0o600)
+            for sender in senders:
+                self.limiter = mcp_server.Limiter()
+                self.save_clients(identity=sender, write=True, answer=allowed)
                 for state in ('received', 'blocked', 'done'):
                     with self.subTest(answer=allowed, sender=sender, state=state):
                         before = len(self.rows())

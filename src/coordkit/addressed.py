@@ -49,7 +49,9 @@ from .routing import registry, roles
 
 
 def is_human(manifest, name):
-    """Human roles and their members do not require machine listening evidence."""
+    """Recognize the question operator, human agents, roles and their members."""
+    if name and name == manifest.questions.human_actor:
+        return True
     spec = registry(manifest).get(name, {})
     if spec.get('human', False):
         return True
@@ -306,26 +308,62 @@ def lead_names(manifest):
 def to_lead_digest(manifest, event, text, row=None, at=None):
     path = home(manifest)/'lead-digest.ndjson'
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as stream:
+    with path.open('a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
-        stream.write(json.dumps({'at': time.time() if at is None else at, 'event': event, 'text': text[:400],
-                                 'id': (row or {}).get('id')}) + '\n')
+        items = digest_items(stream)
+        item = {'at': time.time() if at is None else at, 'event': event, 'text': text[:400],
+                'id': (row or {}).get('id')}
+        if any(all(old.get(k) == item[k] for k in ('event', 'text', 'id')) for old in items):
+            return
+        stream.seek(0); stream.truncate()
+        stream.write(b''.join((json.dumps(i) + '\n').encode() for i in [*items[-999:], item]))
+        stream.flush(); os.fsync(stream.fileno())
         fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), dead=()):
+def digest_items(stream):
+    """Bounded queue tail; one malformed finding never blocks the hourly batch."""
+    from .tail import read_tail
+    _, data = read_tail(stream, 262144)
+    items = []
+    for line in data.splitlines():
+        try:
+            item = json.loads(line)
+            if isinstance(item, dict) and isinstance(item.get('text'), str):
+                items.append(item)
+        except (ValueError, RecursionError):
+            continue
+    return items[-1000:]
+
+
+def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), dead=(), rows=None):
     """One hourly FYI; consume the shared queue under the same lock writers take."""
     if at - state.get('lead_digest_at', 0) < DIGEST_EVERY:
         return
+    from . import approvals, questions, machine
+    machine_lines = machine.lines(manifest)
+    rows = questions.recent_rows(manifest) if rows is None else rows
+    questions.reconcile_defaults(manifest, rows, at)
+    opened = questions.open_questions(manifest, at)
+    unanswered = [r for r in opened if r.get('unanswered_no_default') and not r.get('no_default_digested')]
+    deferred = [r for r in opened if r.get('default_deferred') and not r.get('default_deferred_digested')][:12]
+    missing = approvals.findings(manifest, rows, at)
     path = home(manifest)/'lead-digest.ndjson'
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a+') as stream:
+    with path.open('a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
-        stream.seek(0)
-        items = [json.loads(line) for line in stream if line.strip()]
-        if not items and not backlog and not pending and not dead:
+        items = digest_items(stream)
+        if not items and not backlog and not pending and not dead and not opened and not missing and not machine_lines:
             return
         lines = [f"- {i.get('event')}: {i.get('text', '')[:200]}" for i in items[-12:]]
+        lines.extend(machine_lines)
+        lines += ['- ' + i['text'] for i in missing[:12]]
+        lines += [f"- {r['qid']}: unanswered, no default ({r.get('reasks', 0)} re-asks)" for r in unanswered[:12]]
+        lines += [f"- {r['qid']}: default deferred: {r['default_deferred']}" for r in deferred]
+        if opened:
+            oldest = max(opened, key=lambda r: r['age'])
+            lines.insert(0, f"- open questions: {len(opened)}; oldest {oldest['qid']} age={int(oldest['age'] // 60)}m; " +
+                         '; '.join(f"{r['qid']} {str(r.get('question', ''))[:80]}" for r in opened[:12]))
         if backlog:
             lines.insert(0, f"- backlog: {len(backlog)}; " + ' '.join(r['id'] for r in backlog[:12]))
         if pending:
@@ -341,7 +379,8 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
                                    for i in sorted(dead, key=lambda i: -i['age'])[:12]) +
                          '. Reassign each to a listening lane, or close it with a reply.')
         kind = 'ask' if dead_ids and dead_ids != state.get('dead_owner_ids') else 'fyi'
-        text = (f'coordkit hourly digest: {len(dead)} to re-home, {len(pending)} obligations, {len(items)} findings; '
+        text = (f'coordkit hourly digest: {len(dead)} to re-home, {len(pending)} obligations, '
+                f'{len(items) + len(missing) + len(unanswered) + len(deferred)} findings, {len(opened)} open questions; '
                 'coordkit obligations report for the full backlog\n' + '\n'.join(lines))
         if manifest.mode == 'live':
             from . import bus
@@ -349,6 +388,10 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
                       '--topic', 'coordkit-digest', '--no-mirror', '--force', text], manifest, site_local=True)
         else:
             to_relay_file(manifest, text, at)
+        for record in unanswered[:12]:
+            questions.mark(manifest, record['qid'], no_default_digested=at)
+        for record in deferred:
+            questions.mark(manifest, record['qid'], default_deferred_digested=at)
         # A failed publish leaves the queue intact. Keep its inode so concurrent writers cannot
         # append to an unlinked file; there are no sent archives to rotate.
         stream.seek(0); stream.truncate(); stream.flush(); os.fsync(stream.fileno())
@@ -374,11 +417,19 @@ def escalate(manifest, event, text, row=None, deaf=(), fallback='', urgent=False
         target = resolve_live(manifest, cfg(manifest).relay, at, probe, skip)
     if target and digest_only(manifest, target):
         # Policy: the lead is not woken by escalations; they batch into one digest an hour.
-        to_lead_digest(manifest, event, text, row)
+        if manifest.mode == 'live':
+            from .questions import queue_escalation
+            queue_escalation(manifest, target, (row or {}).get('topic', 'addressed'), text,
+                             key=f"escalation:{event}:{row['id']}" if row else None,
+                             default=(row or {}).get('default'),
+                             no_auto_default=(row or {}).get('no_auto_default', False), event=event)
+        else:
+            to_lead_digest(manifest, event, text, row)
         reached.append('lead_digest')
         return reached
     if target and post and manifest.mode == 'live':
         from . import bus
+        from . import questions
         copy = {'ts': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'), 'id': secrets.token_hex(3),
                 'frm': 'coordkit', 'to': target, 'topic': (row or {}).get('topic', 'addressed'),
                 # Always a plain ask: a blocker/ruling copy would be a second open blocker or an
@@ -387,7 +438,12 @@ def escalate(manifest, event, text, row=None, deaf=(), fallback='', urgent=False
                 'text': text[:manifest.bus.text_cap], 'escalation': event, 'priority': 'urgent' if urgent else 'normal'}
         if row:
             copy.update(copy_of=row['id'], orig_kind=row.get('kind'), re=row['id'])
-        bus.append([copy], project=False)
+            copy['key'] = f"escalation:{event}:{row['id']}"
+        duplicate = questions.repeat_bus_ask(manifest, copy, questions.recent_rows(manifest), at)
+        if duplicate:
+            return [target]
+        bus.append([copy], project=False,
+                   on_commit=lambda: questions.track_bus_ask(manifest, {k: v for k, v in copy.items() if k != 'copy_of'}))
         reached.append(target)
     if to_relay_file(manifest, text, at):
         reached.append('relay_file')
@@ -574,6 +630,12 @@ def _sweep(manifest, rows=None, at=None, probe=None, dry_run=False, out=print):
     rows = bus.read() if rows is None else rows
     at = time.time() if at is None else at
     a = cfg(manifest)
+    from . import questions
+    if not dry_run:
+        questions.reconcile_defaults(manifest, rows, at)
+    question_state = questions.load_all(manifest)
+    exhausted = {qid for qid, r in question_state.items()
+                 if r['state'] == 'closed' or r.get('unanswered_no_default')}
     state_path = home(manifest)/'sweep.json'
     state = read_json(state_path, {}) or {}
     state.pop('deaf_since', None)
@@ -597,6 +659,7 @@ def _sweep(manifest, rows=None, at=None, probe=None, dry_run=False, out=print):
     # One pickup policy for asks, PR handoffs and auditor flags. Derive backlog afresh so
     # replies and reassignments disappear from the digest without an alert journal.
     pending = [i for i in obligations.report(manifest, rows, at, window_hours=a.window_hours)
+               if i['id'] not in exhausted
                if i['frm'] not in (manifest.escalation.internal_senders or [manifest.escalation.internal_to])
                and (i['frm'] not in a.internal_senders or i['priority'] == 'urgent')]
     from .relay import remote_only
@@ -639,7 +702,7 @@ def _sweep(manifest, rows=None, at=None, probe=None, dry_run=False, out=print):
             to_lead_digest(manifest, f['event'], f['text'], at=at)
         seen[f['key']] = at
     if not dry_run:
-        flush_lead_digest(manifest, state, at, out, pending=pending, dead=dead)
+        flush_lead_digest(manifest, state, at, out, pending=pending, dead=dead, rows=rows)
         live_keys = wake_keys | {f['key'] for f in findings} | {k for k, v in seen.items() if at - v < (a.window_hours*3600 if k.startswith(('human:', 'unacked:', 'deaf:')) else 2*seconds(a.realert_after))}
         state['seen'] = {k: v for k, v in seen.items() if k in live_keys}
         write_json(state_path, state)
