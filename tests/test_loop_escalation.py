@@ -142,6 +142,21 @@ class LoopEscalationTests(FakeCase):
         self.assertIn('event:earlier: Preserve the earlier ruling',
                       self.asks()[-1][self.asks()[-1].index('--details') + 1])
 
+    def test_pending_string_answer_context_deduplicates_its_known_ask_id(self):
+        first = self.record_failure(1000)['ask_id']
+        self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
+            'items': [{'ask_id': first, 'answer': {'text': 'Pause deployments'}}]}}},
+            {'tool': 'anx', 'contains': ['ask'], 'exit': 2, 'stderr': 'ANX unavailable'})
+        report = self.record_failure(4600)
+        report['previous_answer'] = report.pop('previous_answers')[first]
+        write_json(self.state/'escalation.json', report)
+        self.respond()
+        loop.retry_escalation(self.manifest, 'audit', 'loop-audit', self.state)
+        report = read_json(self.state/'escalation.json')
+        self.assertTrue(report['sent'])
+        self.assertEqual(list(report['previous_answers']), [first])
+        self.assertEqual(self.asks()[-1][self.asks()[-1].index('--details') + 1].count(first + ': Pause deployments'), 1)
+
     def test_failed_reminder_retains_payload_and_does_not_advance_timer(self):
         self.record_failure(1000)
         self.respond({'tool': 'anx', 'contains': ['ask'], 'exit': 2, 'stderr': 'ANX unavailable'})

@@ -67,9 +67,10 @@ a late answer to the superseded ask still delivers exactly one decision row.
 Consecutive answered reminders retain every known ruling, deduplicated by ask
 ID, including compatibility with earlier string-valued context receipts.
 
-- PASS: Python 3.12 full discovery (1000 tests), with CI's explicit 1.0-second
-  cold CLI budget.
-- PASS: Python 3.11 focused tests with real fake-CLI subprocesses (36 tests).
+- PASS: Python 3.12 full discovery before the final string-context deduplication
+  fix (1000 tests), with CI's explicit 1.0-second cold CLI budget. Final-head
+  full discovery is covered by the PR's CI matrix.
+- PASS: Python 3.11 focused tests with real fake-CLI subprocesses (37 tests).
 - PASS: disabling supersession causes the new regression test to fail.
 - PASS: compileall, worker protocol tests (4 tests), leak gate and whitespace.
 - PASS: installed ANX offline preview accepts the generated reminder with
