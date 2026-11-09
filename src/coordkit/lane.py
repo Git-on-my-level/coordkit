@@ -36,7 +36,8 @@ def event(manifest, row, *, once=False):
             stream.seek(-1, os.SEEK_END)
             if stream.read(1) != b'\n':
                 # Preserve the interrupted writer's bytes, but fence them off from
-                # this receipt. All event writers share this lock and repair.
+                # this receipt. Coordkit writers share this lock and repair;
+                # agentctl callbacks append independently.
                 stream.write(b'\n')
                 stream.flush()
                 print('warning: newline-terminated torn lane event tail', file=sys.stderr)
@@ -59,11 +60,14 @@ def event(manifest, row, *, once=False):
             if recorded:
                 os.fsync(stream.fileno())  # Also commit any tail repair before phase completion.
                 return
-        offset = stream.seek(0, os.SEEK_END)
         value = dict(ts=dt.datetime.now(dt.timezone.utc).isoformat(), **row)
         payload = (json.dumps(value)+'\n').encode('utf-8')
         stream.write(payload)
         stream.flush()
+        # O_APPEND sets this descriptor's position to the end of its own write.
+        # A callback on another descriptor can append before or after us without
+        # changing that position. A pre-write EOF snapshot is not our offset.
+        offset = stream.tell() - len(payload)
         os.fsync(stream.fileno())
         stream.seek(offset)
         appended = stream.read(len(payload))

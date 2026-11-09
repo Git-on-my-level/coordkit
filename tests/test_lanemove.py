@@ -939,6 +939,60 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
         self.assertEqual(rows[0], '{not json')
         self.assertEqual(json.loads(rows[1])['kind'], 'launched')
 
+    def test_phase_verifies_receipt_when_callback_appends_before_its_write(self):
+        self.invoke('--plan')
+        plan = self.plan()
+        events = self.manifest.paths.events
+        callback = dict(id='callback', kind='terminal', execution_id='exec-example')
+        original_open = Path.open
+        inserted = []
+
+        class CallbackWriter:
+            def __init__(self, stream):
+                self.stream = stream
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+            def write(self, payload):
+                if not inserted:
+                    # agentctl does not participate in coordkit's flock.
+                    with original_open(events, 'ab') as writer:
+                        writer.write((json.dumps(callback)+'\n').encode())
+                    inserted.append(True)
+                return self.stream.write(payload)
+
+        def open_with_callback(path, *args, **kwargs):
+            stream = original_open(path, *args, **kwargs)
+            return CallbackWriter(stream) if path == events and args == ('a+b',) else stream
+
+        with patch.object(Path, 'open', open_with_callback), contextlib.redirect_stdout(io.StringIO()):
+            lanemove.phase(self.manifest, plan, 'freeze')
+            lanemove.phase(self.manifest, self.plan(), 'freeze')
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        self.assertEqual([row['id'] for row in rows], ['callback', plan['id']+'-freeze'])
+        self.assertEqual(self.plan()['completed'], ['freeze'])
+
+    def test_event_verifies_own_bytes_when_callback_appends_after_its_flush(self):
+        events = self.manifest.paths.events
+        callback = dict(id='callback', kind='attention', execution_id='exec-example')
+        original_fsync = os.fsync
+        inserted = []
+
+        def sync(fd):
+            original_fsync(fd)
+            if not inserted and events.exists() and os.fstat(fd).st_ino == events.stat().st_ino:
+                with events.open('ab') as writer:
+                    writer.write((json.dumps(callback)+'\n').encode())
+                inserted.append(True)
+
+        with patch.object(lane.os, 'fsync', side_effect=sync):
+            lane.event(self.manifest, dict(id='receipt', kind='lane-move'))
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        self.assertEqual([row['id'] for row in rows], ['receipt', 'callback'])
+
     def test_event_repair_and_deduplication_wait_for_the_writer_lock(self):
         events = self.manifest.paths.events
         events.parent.mkdir(parents=True, exist_ok=True)
