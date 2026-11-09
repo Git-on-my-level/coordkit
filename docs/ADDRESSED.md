@@ -13,6 +13,22 @@ not keep them routable after their manifest declaration is removed. Explicit run
 registrations (including older policy records) remain routable until retired or removed.
 Registration errors log and allow post/ack/wait to continue; an explicit-ID post retry can recover
 registration without appending a second row.
+
+Roster reads also observe senders written directly to the shared bus by other local
+writers. An eligible row from the last 24 hours adds a missing entry with
+`registered_by = "observed"` (registry `source = "observed"`), using the same private,
+locked atomic writer. Each pass batches new names into one replacement; existing
+entries are never rewritten by observation. Internal/MCP service names, connector
+posts, relay-applied rows (including `_relay` metadata), automatic copies and
+synthetic question rows are excluded. Identity comes only from explicit bindings
+or matching lane declarations, never the roster reader's environment or bus payload.
+Manifest observations save identity only. Existing identity-only caches are never
+promoted, even by a later foreign row after declaration removal; explicit local
+post/ack/wait registration remains available. Observed registrations persist after
+the observation window, but their post liveness still expires at `activity_ttl`.
+Retire an obsolete observed name to keep it unroutable; deleting its entry alone
+allows eligible retained rows to register it again on the next roster read.
+
 A role uses its first listening member. Roles marked `human = true`, and their members,
 do not need machine listening evidence.
 

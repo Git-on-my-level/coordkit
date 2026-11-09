@@ -12,6 +12,11 @@ Every call is journaled without secrets in `<root>/state/mcp/calls.ndjson`. Outp
 
 All existing names remain supported. Every read tool carries `readOnlyHint: true` and the UNTRUSTED bus-text
 label. Timestamps are ISO UTC (`Z`); ages and stale thresholds are minutes. Omitted filters mean no restriction.
+`agents_status` may persist missing local sender registrations observed in the last
+24 hours into private roster metadata, even with connector writes disabled. It does
+not append bus rows, deliver messages or renew liveness. Observation skips internal,
+service, relay and synthetic traffic, and never promotes identity-only caches left
+by removed manifest entries. See [registration](ADDRESSED.md) for persistence and exclusions.
 Every paged row list accepts `limit` (default 30, maximum 100) and `cursor` (use the preceding `next_cursor`). `wait`
 returns one row and uses its own row-count cursor, described below. Keep
 filters unchanged while paging. `next_cursor: null` means the final page. New bus appends do not shift existing
@@ -111,14 +116,16 @@ while its captured process start time still matches. Identity merges manifest la
 bindings, hook notes, allowlisted post-time environment, then question-session bindings.
 Hooks refresh identity at most once per `heartbeat_every`, retrying missing or invalid
 PIDs even when the binding is unchanged. Manifest agents save identity without changing
-their routing policy. Reads never register names or capture the connector server's environment.
+their routing policy. Roster reads persist eligible first sender observations as
+described above, without capturing the connector server's environment.
 
 `model` is the observed assistant `message.model` in a bounded 128 KiB tail of the newest
 parent transcript, with `model_observed_at`; subagent transcripts are excluded. An
 unpinned lane sharing its account/workspace has no model observation unless explicitly
 bound to a transcript. `model_launch` is the manifest lane flag;
 `model_drift` compares the two using model-family aliases. Unknown observations are null.
-Identity/model work runs only for the requested page. Local posts/acks prove listening
+Detailed identity/model projection runs only for the requested page; first sender
+observations persist safe explicit bindings before paging. Local posts/acks prove listening
 for `[addressed].activity_ttl` (default `15m`), after stronger hook/lease/wait evidence.
 Connector posts (including allowlisted `as` senders) carry `origin=mcp`, preserve
 registration and explicit bindings, and never capture the service process's identity

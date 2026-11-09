@@ -22,7 +22,8 @@ def registry(manifest):
         metadata = {'registered_at', 'registered_by', 'role', 'runtime', 'adapter',
                     'fallback', 'target', 'remote', 'human', 'label', 'description'}
         if isinstance(spec, dict) and metadata.intersection(spec):
-            out.setdefault(name, dict(spec, name=name, source='register'))
+            source = 'observed' if spec.get('registered_by') == 'observed' else 'register'
+            out.setdefault(name, dict(spec, name=name, source=source))
     return out
 
 
@@ -109,6 +110,49 @@ def internal_name(manifest, name):
     return (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name)
             or name in {'all', 'coordkit', 'lead', manifest.mcp.identity, *cfg(manifest).internal_senders,
                         *manifest.escalation.internal_senders})
+
+
+def local_activity(row):
+    """Only a sender's own local row can establish registration or recency."""
+    return (not row.get('copy_of') and not row.get('question') and '_relay' not in row
+            and row.get('origin') != 'mcp' and not str(row.get('origin', '')).startswith('relay:'))
+
+
+def observe_senders(manifest, rows, at):
+    """Persist first sightings in the roster's 24h window; no reader env or PID probe.
+
+    Existing entries throttle writes permanently, including identity-only caches:
+    observing a removed manifest name must never promote its cached identity.
+    """
+    import logging
+    from .process import parse_ts
+    try:
+        path = home(manifest)/'register.json'
+        existing = read_json(path, {}) or {}
+        names = set()
+        for row in rows:
+            name = row.get('frm')
+            if internal_name(manifest, name) or name in existing or not local_activity(row):
+                continue
+            try:
+                recent = 0 <= at - parse_ts(row['ts']).timestamp() <= 86400
+            except (ValueError, TypeError, KeyError, OverflowError):
+                continue
+            if recent:
+                names.add(name)
+        if not names:
+            return
+        with locked(home(manifest)/'register.lock'):
+            # A concurrent post/hook/observer may have written while we waited.
+            existing = read_json(path, {}) or {}
+            records = {name: identity_sources(manifest, name, env={})
+                       for name in sorted(names - existing.keys())}
+            if records:
+                _store_identities(manifest, 'observed', records,
+                                  register=records.keys() - cfg(manifest).agents.keys())
+    except Exception as exc:
+        # Roster metadata must not make an otherwise valid read unavailable.
+        logging.getLogger(__name__).warning('optional observed registration failed (%s)', type(exc).__name__)
 
 
 def identity_sources(manifest, name, env=None, *, stored=None):
@@ -218,18 +262,24 @@ def probe_identity(record):
 
 def _store_identity(manifest, name, via, identity, *, register=False):
     """Persist an identity selected while the caller holds register.lock."""
+    return _store_identities(manifest, via, {name: identity}, register={name} if register else set())[name]
+
+
+def _store_identities(manifest, via, identities, *, register=()):
+    """One atomic replacement for identities selected under register.lock."""
     import time
     from .state import update_json
     at = time.time()
     def transform(current):
-        entry = current.setdefault(name, {})
-        if register:
-            entry.setdefault('registered_at', at)
-            entry.setdefault('registered_by', via)
-        entry['identity'] = clean_identity(dict(identity, refreshed_at=at))
-        entry['refreshed_at'] = at
+        for name, identity in identities.items():
+            entry = current.setdefault(name, {})
+            if name in register:
+                entry.setdefault('registered_at', at)
+                entry.setdefault('registered_by', via)
+            entry['identity'] = clean_identity(dict(identity, refreshed_at=at))
+            entry['refreshed_at'] = at
         return current
-    return update_json(home(manifest)/'register.json', transform)[name]
+    return update_json(home(manifest)/'register.json', transform)
 
 
 def write_register(manifest, name, via, identity=None, *, env=None):
