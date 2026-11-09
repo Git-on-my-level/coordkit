@@ -145,10 +145,11 @@ def fingerprint(session, text, options=(), recommendation='', default=''):
 
 def ask_key(row):
     """Stable across whitespace/case changes and transport spill paths."""
-    if isinstance(row.get('key'), str) and row['key'].strip():
-        return 'key:' + row['key'].strip()
     parts = [str(row.get(k) or '') for k in ('frm', 'to', 'topic')]
     parts[1] = str(row.get('role') or parts[1])
+    if isinstance(row.get('key'), str) and row['key'].strip():
+        scoped = [p.casefold() for p in parts] + [row['key'].strip()]
+        return 'key:' + hashlib.sha256(json.dumps(scoped).encode()).hexdigest()
     parts.append(row['normalized_text_hash'] if isinstance(row.get('normalized_text_hash'), str)
                  else normalized_hash(row.get('text')))
     return hashlib.sha256(json.dumps([p.casefold() for p in parts]).encode()).hexdigest()
@@ -170,10 +171,25 @@ def recent_rows(manifest, *, stream=None, coverage=False):
             return (0, []) if coverage else []
     start, data = read_tail(stream, MAX_BUS_BYTES)
     lines = data.split(b'\n')[:-1]
+    # A bounded prefix count establishes physical IDs without scanning arbitrary
+    # history. If it cannot, omit ID-less rows rather than inventing identities.
+    line_offset = None
+    if start <= MAX_BUS_BYTES:
+        try:
+            stream.seek(0)
+            prefix = stream.read(start)
+            if len(prefix) == start:
+                line_offset = prefix.count(b'\n')
+        except OSError:
+            pass
     if len(lines) > MAX_RECORDS:
-        start += sum(len(line) + 1 for line in lines[:-MAX_RECORDS])
+        omitted = len(lines) - MAX_RECORDS
+        start += sum(len(line) + 1 for line in lines[:omitted])
+        if line_offset is not None:
+            line_offset += omitted
         lines = lines[-MAX_RECORDS:]
-    rows = [row for _, row in bus.parse_lines([line.decode('utf-8', errors='replace') for line in lines])]
+    rows = [row for _, row in bus.parse_lines(
+        [line.decode('utf-8', errors='replace') for line in lines], line_offset=line_offset)]
     return (start, rows) if coverage else rows
 
 
@@ -257,8 +273,8 @@ def settlement_rows(manifest, stream, record):
     data = stream.read(MAX_BUS_BYTES)
     lines = data.split(b'\n')[:-1][:MAX_RECORDS]
     consumed = sum(len(line) + 1 for line in lines)
-    fresh = [dict(row, id=f'legacy-L{count + index}') if row.get('id') == f'legacy-L{index}' else row
-             for index, row in bus.parse_lines([line.decode('utf-8', errors='replace') for line in lines])]
+    fresh = [row for _, row in bus.parse_lines(
+        [line.decode('utf-8', errors='replace') for line in lines], line_offset=count)]
     offset += consumed
     stream.seek(max(0, offset - 128))
     checkpoint = dict(file=identity, offset=offset, count=count + len(lines),

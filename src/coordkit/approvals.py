@@ -5,11 +5,12 @@ from .manifest import duration
 from .process import parse_ts
 
 
-APPROVES = re.compile(r'^\s*(approved?\b|go ahead\b|permission granted\b|green light\b)', re.I)
+APPROVES = re.compile(r'^\s*(approved\b|go ahead\b|permission granted\b|green light\b)', re.I)
 
 
 def requires_owner(row):
-    if row.get('no_owner_required') or row.get('copy_of'):
+    if (row.get('no_owner_required') or row.get('copy_of') or
+            isinstance(row.get('text'), str) and row['text'].rstrip().endswith('?')):
         return False
     return (row.get('kind') in ('approval', 'ruling') or
             row.get('kind') in ('answer', 'decision', 'msg') and

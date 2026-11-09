@@ -57,14 +57,24 @@ def normalize(index, row):
         return row
     _LEGACY['id' if set(fixed) == {'id'} else 'invalid'] += 1
     return dict(row, **fixed, legacy=','.join(sorted(fixed)))
-def parse_lines(lines, start=0):
-    """[(index, normalized row)] for lines[start:]."""
+def parse_lines(lines, start=0, *, line_offset=0):
+    """[(local index, normalized row)] for lines[start:].
+
+    line_offset locates this slice in the physical log. None skips rows that
+    need a synthetic ID when their physical line number cannot be established.
+    """
     out = []
     for i in range(start, len(lines)):
-        try: out.append((i, normalize(i, json.loads(lines[i]))))
+        try:
+            row = json.loads(lines[i])
         except ValueError:
-            print(f'BUS_INVALID_JSON line={i + 1} (skipped)', file=sys.stderr)
-            out.append((i, normalize(i, None)))
+            physical = i + line_offset + 1 if line_offset is not None else 'unknown'
+            print(f'BUS_INVALID_JSON line={physical} (skipped)', file=sys.stderr)
+            row = None
+        if line_offset is None and (not isinstance(row, dict) or
+                                   not isinstance(row.get('id'), str) or not row['id']):
+            continue
+        out.append((i, normalize(i + (line_offset or 0), row)))
     if (_LEGACY['id'] or _LEGACY['invalid']) and not _LEGACY['reported']:
         _LEGACY['reported'] = True
         print(f"BUS_LEGACY_ROWS synthesized_id={_LEGACY['id']} invalid={_LEGACY['invalid']} (normalized in memory)",

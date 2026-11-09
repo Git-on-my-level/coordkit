@@ -18,10 +18,43 @@ class QuestionContractTests(AddressedCase):
         self.manifest.bus.mirror = False
         self.lease('lead-a')
 
-    def post(self, text='Use the cached result?', *flags):
-        self.quiet(bus.main, ['post', '--from', 'worker-ui', '--to', 'lead-a',
-                             '--kind', 'ask', '--topic', 'result', *flags, text], self.manifest)
+    def post(self, text='Use the cached result?', *flags, sender='worker-ui', recipient='lead-a', topic='result'):
+        self.quiet(bus.main, ['post', '--from', sender, '--to', recipient,
+                             '--kind', 'ask', '--topic', topic, *flags, text], self.manifest)
         return bus.LAST_POST[0]
+
+    def test_explicit_keys_are_scoped_to_sender_declared_recipient_and_topic(self):
+        # Reusing a key must deliver every independent ask, including when only
+        # one identity field differs; a retry within each scope still dedupes.
+        self.manifest.addressed.agents['lead-b'] = self.manifest.addressed.agents['lead-a']
+        self.lease('lead-b')
+        originals = []
+        with patch('coordkit.adapters.notify') as wake:
+            for sender in ('worker-ui', 'worker-other'):
+                for recipient in ('lead-a', 'lead-b'):
+                    for topic in ('cache', 'build'):
+                        scope = dict(sender=sender, recipient=recipient, topic=topic)
+                        first = self.post('Use cache?', '--key', 'cache', **scope)
+                        self.assertEqual(self.post('Use cache?', '--key', 'cache', **scope)['id'], first['id'])
+                        originals.append(first)
+            self.assertEqual(wake.call_count, 8)
+        self.assertEqual(len({r['id'] for r in originals}), 8)
+        self.assertEqual({(r['frm'], r['to'], r['topic']) for r in self.rows()},
+                         {(r['frm'], r['to'], r['topic']) for r in originals})
+        self.assertEqual(len(self.rows()), 8)
+        records = questions.load_all(self.manifest)
+        self.assertEqual(len(records), 8)
+        self.assertTrue(all(r['state'] == 'open' and r['reasks'] == 1 for r in records.values()),
+                        [(r['asker'], r['target'], r['topic'], r['state'], r['reasks']) for r in records.values()])
+
+    def test_explicit_key_retains_declared_role_when_live_member_changes(self):
+        first = self.post('Use cache?', '--key', 'cache', recipient='coordinator')
+        self.assertEqual((first['role'], first['to']), ('coordinator', 'lead-a'))
+        self.lease('coordinator')
+        again = self.post('Use cache?', '--key', 'cache', recipient='coordinator')
+        self.assertEqual(again['id'], first['id'])
+        direct = self.post('Use cache?', '--key', 'cache')
+        self.assertNotEqual(direct['id'], first['id'])
 
     def answer_race(self, harness, recovery=False):
         if harness:
@@ -226,6 +259,65 @@ class QuestionContractTests(AddressedCase):
         with self.manifest.paths.bus_log.open('ab') as stream:
             for i in range(800):
                 stream.write(json.dumps(dict(id=f'fyi-{i}', ts=ts(self.now), frm='worker-ui', to='lead-a', kind='fyi', text='x' * 1000)).encode() + b'\n')
+
+    def test_legacy_tail_identity_matches_full_reader_and_settlement(self):
+        # A nonzero byte tail and a record cap must both retain physical line
+        # numbers, counting malformed and blank lines as the full reader does.
+        path = self.manifest.paths.bus_log
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = json.dumps(dict(id='old', kind='fyi', text='x' * 1000)).encode() + b'\n'
+        legacy = dict(ts=ts(self.now), frm='worker-ui', to='lead-a', kind='ask',
+                      text='Use cache?', default='Use cache')
+        path.write_bytes(old * 300 + b'\nnot-json\n' + json.dumps(legacy).encode() + b'\n')
+        canonical = self.quiet(self.rows)[0][-1]['id']
+        self.assertEqual(canonical, 'legacy-L302')
+        for cap in (questions.MAX_RECORDS, 1):
+            with self.subTest(record_cap=cap), patch.object(questions, 'MAX_RECORDS', cap):
+                start, rows = self.quiet(questions.recent_rows, self.manifest, coverage=True)[0]
+                self.assertGreater(start, 0)
+                self.assertEqual(rows[-1]['id'], canonical)
+        rows = self.quiet(questions.recent_rows, self.manifest)[0]
+        self.quiet(questions.capture_bus_asks, self.manifest, rows, self.now)
+        self.assertEqual(set(questions.load_all(self.manifest)), {canonical})
+        self.incumbent_row('reply', 'lead-a', 'worker-ui', 'answer', 'Fetch fresh', ago=0, re=canonical)
+        for _ in range(20):
+            self.incumbent_row('newer', 'worker-ui', 'lead-a', 'fyi', 'x' * 1000)
+        rows = self.quiet(questions.recent_rows, self.manifest)[0]
+        self.assertEqual(next(r['id'] for r in rows if r['kind'] == 'ask'), canonical)
+        record = questions.load_all(self.manifest)[canonical]
+        with path.open('rb') as stream:
+            fresh, complete = self.quiet(questions.settlement_rows, self.manifest, stream, record)[0]
+            self.assertFalse(complete)
+            fresh, complete = self.quiet(questions.settlement_rows, self.manifest, stream, record)[0]
+        self.assertTrue(complete)
+        self.assertTrue(record['settlement_scan']['original_seen'])
+        self.assertEqual(next(r['id'] for r in fresh if r['kind'] == 'ask'), canonical)
+        self.quiet(questions.reconcile_defaults, self.manifest, rows, self.now + 7200)
+        record = questions.load_all(self.manifest)[canonical]
+        self.assertEqual((record['state'], record['answer_id']), ('closed', 'reply'))
+        self.assertFalse(record.get('auto_default_applied'))
+
+    def test_unknown_physical_offset_skips_legacy_rows_but_preserves_authored_ids(self):
+        class Bounded(io.BytesIO):
+            read_bytes = 0
+            def read(self, size=-1):
+                if not 0 <= size <= questions.MAX_BUS_BYTES:
+                    raise AssertionError('unbounded read')
+                data = super().read(size)
+                self.read_bytes += len(data)
+                return data
+        legacy = dict(ts=ts(self.now), frm='worker-ui', to='lead-a', kind='ask', text='Use cache?')
+        authored = dict(legacy, id='legacy-L0', text='Use fresh?')
+        data = b'x' * (questions.MAX_BUS_BYTES * 3) + b'\n' + b'\n'.join(
+            json.dumps(row).encode() for row in (legacy, authored, dict(legacy, id=''),
+                                                dict(legacy, id=17))) + b'\n'
+        stream = Bounded(data)
+        start, rows = questions.recent_rows(self.manifest, stream=stream, coverage=True)
+        self.assertGreater(start, questions.MAX_BUS_BYTES)
+        self.assertLessEqual(stream.read_bytes, questions.MAX_BUS_BYTES + 1)
+        self.assertEqual([r['id'] for r in rows], ['legacy-L0'])
+        questions.capture_bus_asks(self.manifest, rows, self.now)
+        self.assertEqual(set(questions.load_all(self.manifest)), {'legacy-L0'})
 
     def catch_up(self, qid, at):
         offsets = []

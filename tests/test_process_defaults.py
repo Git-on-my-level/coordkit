@@ -142,6 +142,31 @@ class ProcessDefaultsTests(AddressedCase):
         item = next(i for i in result['topics'] if i['topic'] == 'result')
         self.assertEqual((item['owner'], item['owner_missing']), ('worker-ui', False))
 
+    def test_approval_requests_never_require_an_owner(self):
+        # Permission questions must not create owner alerts after the grace
+        # period, even when an explicit kind suggests approval.
+        for kind in ('msg', 'answer', 'decision', 'approval', 'ruling'):
+            for text in ('Approve deployment?', 'Approved?', 'Go ahead with deployment?  ',
+                         'Permission granted?', 'Green light?'):
+                with self.subTest(kind=kind, text=text):
+                    flags = ('--subject', 'deployment', '--rollback', 'hold deployment') if kind == 'decision' else ()
+                    row = self.post(text, kind, '--force', *flags)
+                    self.assertFalse(approvals.requires_owner(row))
+                    self.assertNotIn('owner_missing', row)
+        self.assertEqual(approvals.findings(self.manifest, self.rows(), self.now + 1801), [])
+
+    def test_affirmative_approval_phrases_still_require_an_owner(self):
+        for kind in ('msg', 'answer', 'decision'):
+            for text in ('Approved: deploy.', '  Go ahead with deployment',
+                         'Permission granted.', 'GREEN LIGHT for deployment'):
+                with self.subTest(kind=kind, text=text):
+                    flags = ('--subject', 'deployment', '--rollback', 'hold deployment') if kind == 'decision' else ()
+                    row = self.post(text, kind, '--force', *flags)
+                    self.assertTrue(approvals.requires_owner(row))
+                    self.assertTrue(row['owner_missing'])
+        self.assertEqual(len(approvals.findings(self.manifest, self.rows(), self.now + 1801)), 1)
+        self.assertFalse(approvals.requires_owner(dict(kind='msg', text='Approve deployment')))
+
     def test_later_owner_on_a_post_clears_and_approval_opt_out(self):
         self.post('Approved', 'approval')
         self.post('Assigned', 'msg', '--owner', 'worker-ui')
