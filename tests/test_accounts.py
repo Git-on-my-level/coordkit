@@ -90,7 +90,7 @@ class AccountsTests(FakeCase):
     def test_invalid_structure_and_values_are_unavailable_without_partial_rows(self):
         self.enable()
         bad = []
-        for value in (True, -0.1, 1.1, float('nan'), float('inf'), None, '0.1'):
+        for value in (True, -0.1, float('nan'), float('inf'), None, '0.1'):
             data = facts(); data['accounts'][0]['windows'][0]['used_ratio'] = value; bad.append(data)
         for key, value in (('observed_at', None), ('observed_at', '2030-01-01'), ('resets_at', 'bad')):
             data = facts(); data['accounts'][0]['windows'][0][key] = value; bad.append(data)
@@ -105,6 +105,34 @@ class AccountsTests(FakeCase):
             self.facts.write_text(json.dumps(data))
             result = accounts.snapshot(self.manifest, AT)
             self.assertEqual((result['available'], result['accounts']), (False, []), data)
+
+    def test_throughput_only_account_renders_without_weekly_window(self):
+        # A per-minute provider window has no weekly reset and may sample past its
+        # nominal limit; that is throughput pressure, not an unusable/expired account.
+        data = {'schema_version': 1, 'generated_at': '2030-01-01T00:00:00Z', 'accounts': [
+            {'id': 'morph', 'windows': [
+                {'name': 'tpm', 'used_ratio': 0.82},
+                {'name': 'tpm-burst', 'used_ratio': 1.4, 'resets_at': None}]}]}
+        self.facts.write_text(json.dumps(data))
+        self.enable()
+        result = accounts.snapshot(self.manifest, AT)
+        self.assertTrue(result['available'])
+        windows = result['accounts'][0]['windows']
+        self.assertEqual([w['name'] for w in windows], ['tpm', 'tpm-burst'])
+        self.assertEqual([w['used_pct'] for w in windows], [82, 140])
+        self.assertEqual([w['resets_at'] for w in windows], [None, None])
+        self.assertEqual([w['observed_at'] for w in windows], ['2030-01-01T00:00:00Z'] * 2)
+        self.assertEqual([w['stale'] for w in windows], [False, False])
+        self.assertEqual(accounts.account_windows(result, 'morph')[1]['used_pct'], 140)
+        data['generated_at'] = '2029-12-31T00:00:00Z'
+        self.facts.write_text(json.dumps(data))
+        self.assertTrue(all(w['stale'] for w in accounts.snapshot(self.manifest, AT)['accounts'][0]['windows']))
+        data = {'schema_version': 1, 'generated_at': '2030-01-01T00:00:00Z',
+                'accounts': [{'id': 'throughput-only'}]}
+        self.facts.write_text(json.dumps(data))
+        result = accounts.snapshot(self.manifest, AT)
+        self.assertTrue(result['available'])
+        self.assertEqual(result['accounts'], [{'id': 'throughput-only', 'windows': []}])
 
     def test_join_declared_discovered_and_unknown_accounts(self):
         self.enable()

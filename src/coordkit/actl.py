@@ -2,7 +2,7 @@
 import json
 import os
 import socket
-from .manifest import ManifestError, duration
+from .manifest import ManifestError, SELECTOR_KEYS, duration, parse_selector
 from .process import ToolError, call_json, is_schema, run
 
 
@@ -121,13 +121,57 @@ class AgentctlClient:
             raise ToolError(self.binary, result.returncode, result.stderr + result.stdout)
         return result.stdout
 
-    def delegate(self, prompt, run_dir, *, key, pool="plan", label=None, plan=False, detach=False, access="read_only", timeout=None, card=None, owns=(), wakeable=False):
+    def selector(self, *, pool=None, selector=None):
+        """Resolve a plan's selector: an explicit dict, a manifest pool, or a raw selector string."""
+        if selector is not None:
+            if not isinstance(selector, dict) or not selector:
+                raise ManifestError('invalid_value: lane selector must be a nonempty table')
+            value = selector
+        else:
+            configured = self.manifest.agentctl.pools.get(pool)
+            if configured is None and isinstance(pool, str) and ':' in pool:
+                configured = pool
+            if configured is None:
+                raise ManifestError(f"missing_key: agentctl.pools.{pool}")
+            value = parse_selector(configured)
+        out = {}
+        for key, item in value.items():
+            if key not in SELECTOR_KEYS:
+                raise ManifestError(f'invalid_value: unknown agentctl selector key {key}')
+            if not isinstance(item, str) or not item or item != item.strip() or len(item) > 256 \
+                    or any(ord(ch) < 32 for ch in item):
+                raise ManifestError(f'invalid_value: agentctl selector {key}')
+            out[key] = item
+        if not out:
+            raise ManifestError('invalid_value: empty agentctl selector')
+        if 'pool' in out and len(out) > 1:
+            raise ManifestError('invalid_value: agentctl pool selectors cannot combine with other keys')
+        return out
+
+    @staticmethod
+    def selector_settings(selector, access):
+        """Attach launch settings the selected harness can honour.
+
+        OpenCode has no reviewed read-only recipe; asking for one is refused by
+        agentctl, so coordkit refuses before a launch instead of silently granting
+        a wider permission mode. Families are resolved by agentctl, so this is only
+        asserted for an explicit OpenCode harness or model.
+        """
+        out = dict(selector)
+        opencode = (out.get('harness') == 'opencode'
+                    or str(out.get('model', '')).startswith('opencode/'))
+        if opencode and access == 'read_only':
+            raise ToolError('agentctl', 2, 'opencode selectors do not support read_only access; use access = "coding"',
+                            'plan_refused')
+        out['settings'] = {'access': access}
+        return out
+
+
+    def delegate(self, prompt, run_dir, *, key, pool="plan", selector=None, label=None, plan=False, detach=False, access="read_only", timeout=None, card=None, owns=(), wakeable=False):
         self.manifest.writable()
-        selector = self.manifest.agentctl.pools.get(pool)
-        if not selector:
-            raise ManifestError(f"missing_key: agentctl.pools.{pool}")
+        resolved = self.selector(pool=pool, selector=selector)
         request = {"schema_version": 1, "request_key": key,
-                   "selector": {"pool": selector.removeprefix("pool:"), "settings": {"access": access}}}
+                   "selector": self.selector_settings(resolved, access)}
         request_path = run_dir / "request.json"
         request_path.write_text(json.dumps(request) + "\n")
         argv = [self.binary, "delegate", "--request-file", str(request_path), "--prompt-stdin",
