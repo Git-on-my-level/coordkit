@@ -52,6 +52,9 @@ def main(argv=None):
         if options.command == 'bus':
             from .bus import main as bus_main
             return bus_main(rest, load(options.manifest))
+        if options.command == 'sessions':
+            from .sessions import main as sessions_main
+            return sessions_main(rest)
         if options.command in ('ops', 'version'):
             if options.command == 'version':
                 print(__version__)
@@ -83,6 +86,9 @@ def main(argv=None):
             from .ops import parser_for
             from .wake import scan
             return scan(manifest, dry_run=parser_for('wake-scan').parse_args(rest).dry_run)
+        if options.command == 'wake-helper':
+            from .peerwake import main as helper_main
+            return helper_main(rest, manifest)
         if options.command == 'relay':
             from .relay import main as relay_main
             return relay_main(rest, manifest)
