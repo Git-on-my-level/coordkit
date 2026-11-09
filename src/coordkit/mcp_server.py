@@ -1062,9 +1062,27 @@ def write_call(manifest, tool, args, client, origin):
         if any(r.get('state') in ('open', 'escalated') and qid in
                (r.get('bus_id'), *r.get('bus_ids', [])) for r in records.values()):
             return True
-        # A committed bus ask may not have reached the question projection yet.
-        bus.configure(manifest)
-        return any(r.get('id') == qid and r.get('kind') == 'ask' for r in bus.read())
+        # Projection follows the commit. Only a new tail ask that track_bus_ask
+        # would store, and that no later answer has settled, is still open.
+        tail = questions.recent_rows(manifest)
+        ask = None
+        for index, row in enumerate(tail):
+            if row.get('id') == qid and row.get('kind') == 'ask':
+                ask = index
+        if ask is None:
+            return False
+        row = tail[ask]
+        if any(row.get(flag) for flag in ('copy_of', 'digest_only', 'question')) or row.get('topic') == 'coordkit-digest':
+            return False
+        later = tail[ask + 1:]
+        if questions.replies(manifest, later, {'qid': qid, 'asker': row.get('frm')}):
+            return False
+        # Auto-default settlement is posted by coordkit, which replies() ignores.
+        return not any(reply.get('re') == qid and reply.get('frm') == 'coordkit'
+                       and reply.get('kind') in ('answer', 'decision', 'ruling', 'approval')
+                       and reply.get('ack') not in ('received', 'blocked')
+                       and not questions.RECEIPT.match(reply.get('text') or '')
+                       for reply in later)
     def check_writes():
         if not writes_enabled(origin) or not writes_enabled(manifest):
             raise ValueError('writes are disabled on this connector')

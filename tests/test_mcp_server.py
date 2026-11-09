@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from coordkit import addressed, bus, mcp_server, questions
 from coordkit.manifest import ManifestError, load
-from tests.test_addressed import AddressedCase
+from tests.test_addressed import AddressedCase, ts
 
 SECRET = 's' * 43
 
@@ -1239,6 +1239,61 @@ class McpClientTests(McpCase):
         error, text = self.client_tool('ack', id='unprojected', state='done')
         self.assertFalse(error, text)
         self.assertEqual(self.rows()[-1]['ack'], 'done')
+
+    def test_pruned_and_untracked_asks_do_not_require_answer(self):
+        # Closed records leave the store after a week, and digest/copy asks are
+        # never questions. A write-only client can still follow those threads.
+        self.enable_writes()
+        self.save_clients(write=True)
+        path = self.manifest.paths.bus_log
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        def bus_row(msg_id, **fields):
+            rec = dict(id=msg_id, frm='worker-ui', to='client-agent', topic='general', kind='ask', text='go?',
+                       ts=ts(self.now - fields.pop('ago', 60)))
+            rec.update(fields)
+            with path.open('a') as stream:
+                stream.write(json.dumps(rec) + '\n')
+            return rec
+
+        for name in ('ancient-msg', 'ancient-ack'):
+            bus_row(name)
+        pad = json.dumps(dict(id='pad', frm='lead-a', to='all', topic='general', kind='fyi',
+                              ts=ts(self.now - 30), text='x' * 400)) + '\n'
+        with path.open('a') as stream:
+            stream.write(pad * (questions.MAX_BUS_BYTES // len(pad) + 3))
+        bus_row('defaulted')
+        bus_row('defaulted-answer', frm='coordkit', to='worker-ui', kind='answer',
+                text='auto-default applied: use cache', re='defaulted', ago=5)
+        bus_row('answered')
+        bus_row('answered-reply', frm='lead-a', to='worker-ui', kind='msg', text='Proceed with the cache',
+                re='answered', ago=5)
+        for name, fields in (
+                ('digest', dict(digest_only=True)),
+                ('copy', dict(copy_of='origin')),
+                ('ladder', dict(question='q-ladder')),
+                ('topic', dict(topic='coordkit-digest'))):
+            bus_row(name + '-msg', **fields)
+            bus_row(name + '-ack', **fields)
+        acks = ('ancient-ack', 'defaulted', 'answered', 'digest-ack', 'copy-ack', 'ladder-ack', 'topic-ack')
+        msgs = ('ancient-msg', 'defaulted', 'answered', 'digest-msg', 'copy-msg', 'ladder-msg', 'topic-msg')
+        for parent in acks:
+            with self.subTest(ack=parent):
+                error, text = self.client_tool('ack', id=parent, state='done')
+                self.assertFalse(error, text)
+        for parent in msgs:
+            with self.subTest(msg=parent):
+                error, text = self.client_tool('post', to='all', kind='msg', text='context', re=parent)
+                self.assertFalse(error, text)
+        bus_row('fresh', ago=0)
+        error, text = self.client_tool('ack', id='fresh', state='received')
+        self.assertFalse(error, text)
+        error, text = self.client_tool('post', to='all', kind='msg', text='Proceed', re='fresh')
+        self.assertTrue(error, text)
+        self.assertIn('answer permission', text)
+        error, text = self.client_tool('ack', id='fresh', state='done')
+        self.assertTrue(error, text)
+        self.assertIn('answer permission', text)
 
     def test_process_opt_out_fields_require_boolean_values(self):
         self.enable_writes()
