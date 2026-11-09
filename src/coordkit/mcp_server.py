@@ -467,10 +467,10 @@ def row_view(manifest, row, by_re, args, at, reader=None, receipts=None):
                stale=not replies and at - stamp(row) > min(manifest.addressed.window_hours * 3600,
                                                           args.get('stale_minutes', 720) * 60),
                urgent=addressed.priority(row) == 'urgent' or row.get('priority') == 'urgent')
-    for key in ('ref', 're', 'owner', 'subject', 'state', 'key', 'default'):
+    for key in ('ref', 'evidence', 'handoff_degraded', 'handoff_bounce', 're', 'owner', 'subject', 'state', 'key', 'default'):
         if row.get(key) is not None:
             # Keep the coordination ack state distinct from the bus state slot (RUNNING/DONE/etc).
-            out['bus_state' if key == 'state' else key] = str(row[key])[:4096 if key == 'ref' else 200 if key == 're' else 100]
+            out['bus_state' if key == 'state' else key] = str(row[key])[:4096 if key in ('ref', 'evidence') else 500 if key.startswith('handoff_') else 200 if key == 're' else 100]
     for key in ('no_auto_default', 'no_owner_required', 'owner_missing', 'auto_default'):
         if key in row:
             out[key] = bool(row[key])
@@ -1106,6 +1106,9 @@ def write_call(manifest, tool, args, client, origin):
             for key in ('owner', 'key', 'default'):
                 if key in args:
                     extra += ['--' + key, text_arg(args, key, 2000 if key == 'default' else 100)]
+            for key in ('ref', 'evidence', 'degrade_handoff'):
+                if key in args:
+                    extra += ['--' + key.replace('_', '-'), text_arg(args, key, 500 if key == 'degrade_handoff' else 4096)]
             for key in ('no_auto_default', 'no_owner_required'):
                 if key in args and type(args[key]) is not bool:
                     raise ValueError(f'{key} must be a boolean')

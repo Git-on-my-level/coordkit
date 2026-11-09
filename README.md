@@ -74,6 +74,7 @@ manager. See the [v0.2 contracts and operations guide](docs/V02.md) and
 
 - **Bus:** explicit sender, recipient, kind, topic, timestamp and ID; long bodies spill to ref files.
 - **Obligations and addressed routing:** owners acknowledge handoffs and asks; roles choose listening members; overdue work reaches a fallback or digest.
+- **[Portable handoffs](docs/HANDOFFS.md):** committed repo paths and SHA-256, per-writer filenames, and consumer-side pickup checks that return unreadable work to its poster.
 - **Questions:** captured decisions climb from a live agent to a human; `[human-only]` forces the human tier.
 - **Loops:** recurring work with cadence, receipts, and repeated failure asks in ANX Decide. See [recovery and mirror replay](docs/LOOP-RECOVERY.md).
 - **Shadow mode:** compares read-only protocol views before cutover; local observation state and relay output remain writable.

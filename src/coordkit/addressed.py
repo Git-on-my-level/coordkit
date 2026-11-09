@@ -544,6 +544,11 @@ def ack_state(row, by_re, manifest=None):
     for reply in by_re.get(row['id'], []):
         if reply.get('frm') not in allowed or is_escalation(reply):
             continue
+        from .handoffs import portable
+        if (row.get('kind') == 'handoff' and portable(row)
+                and not (reply.get('handoff_verified') == row['id'] or reply.get('handoff_bounce')
+                         or reply.get('ack') == 'blocked')):
+            continue
         text = (reply.get('ack') or reply.get('text') or '').strip().lower()
         state = next((s for s in ACK_STATES if text.startswith(s)), 'replied')
     return state
@@ -576,6 +581,10 @@ def ack(manifest, msg_id, name, state='received', note=''):
     orig = next((r for r in rows if r.get('id') == msg_id), None)
     if orig is None:
         raise ManifestError(f'unknown_message: {msg_id}')
+    if orig.get('kind') == 'handoff' and state != 'blocked':
+        # Use the bus writer lock for portable pickup checks and deduplicated bounces.
+        text = f'{state}: {note}' if note else state
+        return bus.main(['ack', msg_id, text, '--from', name], manifest)
     if orig.get('kind') == 'ruling' and orig.get('owner') == name and state != 'blocked':
         # Rulings keep their own owner ack (bus ack), which also counts as received/done here.
         return bus.main(['ack', msg_id, note or state, '--from', name], manifest)  # positionals first: bus ack is not intermixed
