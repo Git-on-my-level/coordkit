@@ -156,8 +156,9 @@ def reconcile(manifest, dry_run=False, at=None):
         except ToolError as exc:
             ref = next((ref for ref, result in lookups.items() if result is exc), None)
             cached = missing.get(missing_card_key(manifest, ref)) if ref else None
-            record = {'card': ref, 'owner': row['owner'], 'detail': str(exc), 'scope': cache_scope,
-                      'checked_at': cached['checked_at'] if cached else at}
+            record = {'card': ref, 'owner': row['owner'], 'detail': str(exc), 'scope': cache_scope}
+            if cached:
+                record['checked_at'] = cached['checked_at']
             if unresolved.get(row['id']) != record:
                 unresolved[row['id']] = record
                 if not dry_run:
@@ -323,11 +324,15 @@ def reconcile(manifest, dry_run=False, at=None):
         # A delivered wake needs no card lookup while waiting for the ask threshold.
         if 'wake:blocker:'+key in fired and passes < manifest.loop.fail_report_after:
             state['blockers'][key] = passes
+            if not dry_run:
+                write_json(state_path, state)
             continue
         card = obligation_card(row)
         recommendation = f'Answer or disposition blocker {key} with a decision --re {key} and a reason.'
         wake_obligation('blockers', 'blocker:'+key, row, card, recommendation)
         state['blockers'][key] = passes
+        if not dry_run:
+            write_json(state_path, state)
         if state['blockers'][key] >= manifest.loop.fail_report_after:
             ask('blockers', 'blocker:'+key, card, f'Blocker {key} remains open past its maximum age.', recommendation)
     state['blockers'] = {key:value for key,value in state['blockers'].items() if key in open_ids}

@@ -231,6 +231,18 @@ class ReconcileCardCacheTests(FakeCase):
         self.assertEqual(self.state()['blockers']['ob-1'], 2)
         self.assertIn('blocker:ob-1', self.state()['fired'])
 
+    def test_delivered_wake_counter_survives_later_failure(self):
+        self.rows(2, 2, kind='blocker')
+        self.manifest.loop.fail_report_after = 2
+        with patch.object(reconcile, 'report', side_effect=RuntimeError('later failure')), \
+                self.assertRaises(RuntimeError):
+            self.run_pass()
+        self.assertIn('wake:blocker:ob-1', self.state()['fired'])
+        self.assertEqual(self.state()['blockers']['ob-1'], 1)
+        self.run_pass(at=10300)
+        self.assertEqual(self.state()['blockers']['ob-1'], 2)
+        self.assertIn('blocker:ob-1', self.state()['fired'])
+
     def test_bad_handle_warning_does_not_block_apply_but_outage_still_red(self):
         self.rows()
         with patch.object(reconcile, 'card_for', side_effect=reconcile.CardUnresolved('bad handle', 'invalid handle')):
@@ -268,6 +280,20 @@ class ReconcileCardCacheTests(FakeCase):
         self.rows(prefix='retry')
         self.run_pass(at=10300)
         self.assertGreater(len(self.lookups()), before)
+
+    def test_handled_transport_and_auth_failures_retry_next_pass_without_hour_delay(self):
+        for code, exit_code in [('unavailable', 6), ('forbidden', 3)]:
+            with self.subTest(code=code):
+                self.rows(3, prefix=code)
+                self.missing(code, exit_code)
+                self.run_pass()
+                self.assertEqual(self.state()['missing_cards'], {})
+                self.assertTrue(all('checked_at' not in row for row in self.state()['unresolved_obligations'].values()))
+                self.respond()
+                before = len(self.lookups())
+                self.run_pass(at=10300)
+                self.assertEqual(len(self.lookups()), before+1)
+                self.assertEqual(self.state()['unresolved_obligations'], {})
 
     def test_closed_obligations_clear_doctor_finding_without_lookups(self):
         self.rows(3)

@@ -9,7 +9,8 @@ Validated with synthetic obligations and fake ANX responses on 2026-11-10
   lead ask have both fired also skips action resolution. Between those two steps, polls
   advance the existing threshold without resolving a card until an ask is due.
   The counter increments only after wake delivery succeeds (or a receipt proves
-  it was already delivered); failed delivery cannot advance the ask threshold.
+  it was already delivered), then persists before later stages. Failed delivery
+  cannot advance the ask threshold; later failures cannot discard delivered counts.
   Closed/acknowledged obligations remain filtered by the existing bus rules.
 - Within a pass, successes and failures share one cache by actual card reference,
   including obligations with different owners. Owner/subject mappings also share
@@ -19,7 +20,8 @@ Validated with synthetic obligations and fake ANX responses on 2026-11-10
   lead actor, endpoint and card reference. Other-identity and legacy unscoped
   entries are dropped on load. Auth, transport, timeout,
   ambiguous linkage and malformed-response failures do not establish absence.
-  Existing bounded transport retries still apply to transient failures.
+  Existing bounded transport retries still apply to transient failures, and
+  handled rows with non-negative failures retry next pass without an hourly delay.
 - Expired negative entries are removed at pass start, and oldest-first eviction
   caps the cache at 2,000 entries on both load and insertion. Confirmed misses
   re-verify at most once per hour per cached reference. Still-open handled rows
