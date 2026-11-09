@@ -201,6 +201,21 @@ class HandoffTests(FakeCase):
         self.assertIn('already posted', self.post('--ref', self.ref, '--id', 'stable'))
         with self.assertRaises(ManifestError):
             self.post('--ref', self.ref, '--id', 'stable', '--degrade-handoff', 'changed publication')
+        self.path.unlink()
+        self.assertIn('already posted', self.post('--ref', self.ref, '--id', 'stable'))
+
+    def test_verified_answer_retry_returns_receipt_without_false_repair(self):
+        self.post('--ref', self.ref)
+        original = self.rows()[0]
+        args = ('post', '--from', 'lead', '--to', 'worker', '--kind', 'answer',
+                '--re', original['id'], '--id', 'answer-receipt', 'Verified')
+        self.invoke(*args)
+        self.path.unlink()
+        self.assertIn('already posted', self.invoke(*args))
+        self.assertEqual(len(self.rows()), 2)
+        with self.assertRaises(ManifestError):
+            self.invoke(*args[:-1], 'Conflicting payload')
+        self.assertEqual(len(self.rows()), 2)
 
     def test_config_types_and_validation(self):
         base = self.file.read_text()

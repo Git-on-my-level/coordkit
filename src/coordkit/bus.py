@@ -565,24 +565,12 @@ def dispatch(o):
     if o.cmd == 'post':
         from .routing import register_activity
         from .handoffs import check_pickup, local_digests, path_like, portable, stored_ref, validate_post
-        try:
-            degraded = validate_post(CONFIG, o)
-            if degraded and o.evidence and path_like(o.evidence):
-                o.evidence = stored_ref(o.evidence)
-            degraded_digests = local_digests(CONFIG, o) if degraded else {}
-        except ValueError as exc:
-            print(f'refused: {exc}', file=sys.stderr); sys.exit(2)
+        degraded = getattr(o, 'degrade_handoff', None)
+        if degraded and o.evidence and path_like(o.evidence):
+            o.evidence = stored_ref(o.evidence)
         # Validate the recipient so work does not silently reach an unknown lane.
         # Known but silent for IDLE_HOURS -> post it AND copy the lead so it isn't lost.
         rows = read()
-        verified_handoff = None
-        if o.re:
-            work = next((r for r in rows if r.get('id') == o.re), None)
-            if (work and work.get('kind') == 'handoff' and o.frm != work['frm']
-                    and (o.kind == 'claim' or portable(work) or CONFIG.handoffs.required)):
-                if not check_pickup(CONFIG, work, o.frm, rows):
-                    sys.exit(2)
-                verified_handoff = work['id']
         if o.kind == 'claim' and o.re and o.topic == 'general':
             original = next((r for r in rows if r.get('id') == o.re), None)
             if original and isinstance(original.get('topic'), str):
@@ -606,7 +594,6 @@ def dispatch(o):
             payload['prs'] = list(dict.fromkeys(o.pr.replace(' ', ',').split(','))) if o.pr else []
             payload['ref'] = stored_ref(o.ref) if o.ref else None
             if degraded: payload['handoff_degraded'] = degraded
-            if degraded_digests: payload['handoff_local_digests'] = degraded_digests
             signature = hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
             if old and old.get('publication_hash'):
                 if old['publication_hash'] != signature:
@@ -629,6 +616,21 @@ def dispatch(o):
                 register_activity(CONFIG, o.frm, 'post', env={} if getattr(o, 'origin', None) == 'mcp' else None)
                 print(f'already posted id={o.id}')
                 return
+        # An identical stable-ID retry is a receipt for an existing publication,
+        # not another pickup. Probe only genuinely new publications.
+        try:
+            degraded = validate_post(CONFIG, o)
+            degraded_digests = local_digests(CONFIG, o) if degraded else {}
+        except ValueError as exc:
+            print(f'refused: {exc}', file=sys.stderr); sys.exit(2)
+        verified_handoff = None
+        if o.re:
+            work = next((r for r in rows if r.get('id') == o.re), None)
+            if (work and work.get('kind') == 'handoff' and o.frm != work['frm']
+                    and (o.kind == 'claim' or portable(work) or CONFIG.handoffs.required)):
+                if not check_pickup(CONFIG, work, o.frm, rows):
+                    sys.exit(2)
+                verified_handoff = work['id']
         # Addressed bus (brief 8.2/8.3): a registered name or role is checked against waiter leases, never
         # agentctl, and is never silently copied to the lead; deafness escalates to its declared fallback.
         from . import addressed
