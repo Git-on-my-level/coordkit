@@ -428,6 +428,20 @@ class ConfirmationExpiryTests(AddressedCase):
 
 
 class HumanRecipientTests(AddressedCase):
+    def test_question_human_actor_is_human_without_a_roster_entry(self):
+        # The default operator and an explicit override carry the same human policy.
+        for config, expected in (('', 'ck-sample-lead'),
+                                 ('\n[questions]\nhuman_actor = "operator"\n', 'operator')):
+            with self.subTest(actor=expected):
+                self.file.write_text(BASE + ADDRESSED + config)
+                manifest = load(self.file)
+                self.assertEqual(manifest.questions.human_actor, expected)
+                self.assertNotIn(expected, addressed.registry(manifest))
+                self.assertTrue(addressed.is_human(manifest, expected))
+                self.assertTrue(addressed.listening(manifest, expected)[0])
+                self.assertFalse(addressed.is_human(manifest, 'worker-ui'))
+                self.assertFalse(addressed.is_human(manifest, ''))
+
     def test_human_role_members_receive_only_the_hourly_digest(self):
         self.file.write_text(self.file.read_text().replace('coordinator = ["coordinator", "lead-a"]',
             'coordinator = { members = ["coordinator", "lead-a"], human = true }'))

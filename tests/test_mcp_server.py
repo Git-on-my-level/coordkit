@@ -1125,8 +1125,8 @@ class McpReadBatchTests(McpCase):
 class McpClientTests(McpCase):
     TOKEN = 'c' * 43
 
-    def save_clients(self, **grants):
-        self.clients.write_text(json.dumps({'connector': dict(secret=self.TOKEN, identity='client-agent', **grants)}))
+    def save_clients(self, identity='client-agent', **grants):
+        self.clients.write_text(json.dumps({'connector': dict(secret=self.TOKEN, identity=identity, **grants)}))
         self.clients.chmod(0o600)
 
     def client_tool(self, tool, **arguments):
@@ -1328,18 +1328,45 @@ class McpClientTests(McpCase):
         self.assertTrue(self.client_tool('ack', id='global')[0])
 
     def test_human_sender_requires_answer_including_default_identity(self):
+        # A question operator is human even without a human-marked roster entry.
         self.manifest.addressed.agents['relay']['human'] = True
         self.manifest.addressed.roles['coordinator'] = {'members': ['coordinator', 'human-member'], 'human': True}
+        senders = (self.manifest.questions.human_actor, 'relay', 'coordinator', 'human-member')
         self.enable_writes()
         for allowed in (False, True):
-            self.save_clients(write=True, answer=allowed, post_as=['relay', 'coordinator', 'human-member'])
-            for sender in ('relay', 'coordinator', 'human-member'):
-                with self.subTest(allowed=allowed, sender=sender):
-                    error, text = self.client_tool('post', to='all', kind='fyi', text='hello', **{'as': sender})
+            for sender in senders:
+                for own_identity in (False, True):
+                    self.limiter = mcp_server.Limiter()
+                    self.save_clients(identity=sender if own_identity else 'client-agent',
+                                      write=True, answer=allowed, post_as=list(senders))
+                    for kind in ('msg', 'fyi'):
+                        with self.subTest(allowed=allowed, sender=sender, own_identity=own_identity, kind=kind):
+                            before = self.rows()
+                            args = {} if own_identity else {'as': sender}
+                            error, text = self.client_tool('post', to='all', kind=kind, text='hello', **args)
+                            self.assertEqual(error, not allowed, text)
+                            if allowed:
+                                self.assertEqual(self.rows()[-1]['frm'], sender)
+                            else:
+                                self.assertIn('answer permission', text)
+                                self.assertEqual(self.rows(), before)
+
+    def test_human_client_cannot_bypass_answer_grant_by_posting_as_machine(self):
+        self.enable_writes()
+        self.manifest.addressed.agents['operator-agent'] = {'human': True}
+        self.manifest.addressed.roles['operator-role'] = {'members': ['operator-member'], 'human': True}
+        for sender in (self.manifest.questions.human_actor, 'operator-agent', 'operator-role', 'operator-member'):
+            for allowed in (False, True):
+                with self.subTest(sender=sender, allowed=allowed):
+                    self.save_clients(identity=sender, write=True, answer=allowed, post_as=['worker-ui'])
+                    before = self.rows()
+                    error, text = self.client_tool('post', to='all', kind='fyi', text='hello', **{'as': 'worker-ui'})
                     self.assertEqual(error, not allowed, text)
-        self.save_clients(write=True)
-        self.manifest.addressed.agents['client-agent'] = {'human': True}
-        self.assertTrue(self.client_tool('post', to='all', kind='fyi', text='hello')[0])
+                    if allowed:
+                        self.assertEqual(self.rows()[-1]['frm'], 'worker-ui')
+                    else:
+                        self.assertIn('answer permission', text)
+                        self.assertEqual(self.rows(), before)
 
     def test_answer_and_msg_question_replies_require_answer_permission(self):
         # msg replies can reconcile a question as answered, so kind alone is insufficient.
@@ -1361,16 +1388,21 @@ class McpClientTests(McpCase):
 
     def test_question_answer_grant_and_client_attribution(self):
         self.enable_writes()
-        record, _ = questions.create(self.manifest, 'worker-ui', 'Proceed?', session_id='q')
-        qid = record['qid']
-        questions.mark(self.manifest, qid, tier=2, state='escalated')
-        self.save_clients(write=True)
-        error, text = self.client_tool('question_answer', qid=qid, text='yes')
-        self.assertTrue(error); self.assertIn('answer permission', text)
-        self.save_clients(write=True, answer=True)
-        error, text = self.client_tool('question_answer', qid=qid, text='yes')
-        self.assertFalse(error, text)
-        self.assertEqual(questions.load_all(self.manifest)[qid]['answered_by'], 'client-agent')
+        for sender in ('client-agent', self.manifest.questions.human_actor):
+            with self.subTest(sender=sender):
+                record, _ = questions.create(self.manifest, 'worker-ui', 'Proceed?', session_id=sender)
+                qid = record['qid']
+                questions.mark(self.manifest, qid, tier=2, state='escalated')
+                self.save_clients(identity=sender, write=True)
+                before = self.rows()
+                error, text = self.client_tool('question_answer', qid=qid, text='yes')
+                self.assertTrue(error); self.assertIn('answer permission', text)
+                self.assertEqual(self.rows(), before)
+                self.assertEqual(questions.load_all(self.manifest)[qid]['state'], 'escalated')
+                self.save_clients(identity=sender, write=True, answer=True)
+                error, text = self.client_tool('question_answer', qid=qid, text='yes')
+                self.assertFalse(error, text)
+                self.assertEqual(questions.load_all(self.manifest)[qid]['answered_by'], sender)
 
     def test_symlink_safe_gates_and_last_moment_recheck(self):
         self.save_clients(write=True)
@@ -1644,12 +1676,13 @@ class McpClientTests(McpCase):
         self.enable_writes()
         self.manifest.addressed.agents['relay']['human'] = True
         self.manifest.addressed.roles['coordinator'] = {'members': ['coordinator', 'human-member'], 'human': True}
-        for sender in ('relay', 'coordinator', 'human-member'):
+        senders = (self.manifest.questions.human_actor, 'relay', 'coordinator', 'human-member')
+        for sender in senders:
             self.incumbent_row('work-' + sender, 'worker-ui', sender)
         for allowed in (False, True):
-            for sender in ('relay', 'coordinator', 'human-member'):
-                self.clients.write_text(json.dumps({'connector': dict(secret=self.TOKEN, identity=sender, write=True, answer=allowed)}))
-                self.clients.chmod(0o600)
+            for sender in senders:
+                self.limiter = mcp_server.Limiter()
+                self.save_clients(identity=sender, write=True, answer=allowed)
                 for state in ('received', 'blocked', 'done'):
                     with self.subTest(answer=allowed, sender=sender, state=state):
                         before = len(self.rows())

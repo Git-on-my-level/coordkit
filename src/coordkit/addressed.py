@@ -49,7 +49,9 @@ from .routing import registry, roles
 
 
 def is_human(manifest, name):
-    """Human roles and their members do not require machine listening evidence."""
+    """Recognize the question operator, human agents, roles and their members."""
+    if name and name == manifest.questions.human_actor:
+        return True
     spec = registry(manifest).get(name, {})
     if spec.get('human', False):
         return True

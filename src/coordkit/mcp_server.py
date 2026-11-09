@@ -1051,7 +1051,8 @@ def write_call(manifest, tool, args, client, origin):
     from . import addressed, bus, questions
     if not client.write:
         raise ValueError('client requires write permission')
-    if tool == 'question_answer' and not client.answer:
+    # A human client needs the answer grant even when posting as a machine.
+    if not client.answer and (tool == 'question_answer' or addressed.is_human(manifest, client.identity)):
         raise ValueError('client requires answer permission')
     def open_question(qid):
         records = questions.load_all(manifest)
@@ -1077,7 +1078,7 @@ def write_call(manifest, tool, args, client, origin):
             raise ValueError(f'as must be one of {client.post_as or "(none configured)"}')
         # Asks can settle defaults or supersede an existing question even with
         # no_auto_default set. A default on another kind can reach an escalation.
-        if not client.answer and (addressed.is_human(manifest, sender) or
+        if not client.answer and (sender != client.identity and addressed.is_human(manifest, sender) or
                                   kind in ('ask', 'answer', 'approval', 'ruling') or 'default' in args or
                                   kind == 'msg' and re_id and open_question(re_id)):
             raise ValueError('client requires answer permission')
@@ -1123,8 +1124,7 @@ def write_call(manifest, tool, args, client, origin):
         row = next((r for r in bus.read() if r.get('id') == msg_id), None)
         if row is None or client.identity not in addressed.assignees(row, manifest):
             raise ValueError(f'{msg_id} is not addressed to {client.identity}')
-        if not client.answer and (addressed.is_human(manifest, client.identity) or
-                                  state == 'done' and open_question(msg_id)):
+        if not client.answer and state == 'done' and open_question(msg_id):
             raise ValueError('client requires answer permission')
         note = text_arg(args, 'note', 500, required=False)
         check_writes()
