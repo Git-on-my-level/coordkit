@@ -16,7 +16,7 @@ import uuid
 
 from . import auditor, briefs, bus, loop_answers
 from .actl import AgentctlClient
-from .anxcli import AnxClient
+from .anxcli import AnxClient, ask_reference
 from .state import read_json, write_json
 from .extract import clean, commit, extract
 from .manifest import ManifestError, duration
@@ -223,9 +223,7 @@ def _retry_escalation(manifest, name, handle, state):
         # warrants a fresh Decide ask even if the previous question is open or answered.
         if not report.get('ask_id'):
             result = AnxClient(manifest).ask(card, brief, again=True)
-            result = result.get('body', result) if isinstance(result, dict) else {}
-            result = result if isinstance(result, dict) else {}
-            ask_id = result.get('ask_id') or result.get('id') or result.get('event_ref')
+            ask_id = ask_reference(result)
             if not isinstance(ask_id, str) or not re.fullmatch(r'(?:event:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', ask_id):
                 raise ToolError('anx', 6, 'loop ask response missing a valid ask_id', 'protocol_error')
             report['ask_id'] = loop_answers.reference(ask_id)

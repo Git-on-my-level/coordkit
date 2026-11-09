@@ -1,4 +1,5 @@
 """Correlate direct loop asks across recovery and either shared answer consumer."""
+import contextlib
 import hashlib
 import sys
 
@@ -17,7 +18,7 @@ def path(manifest, ask_id):
 
 
 def defer(manifest, item):
-    """The question reader must hand other producers' replies to reconciliation durably.
+    """Every consuming reader must hand replies to reconciliation durably.
 
     Retain all consumed replies, including ones whose producer has not yet saved
     its correlation ID. The normal owner can deliver now; reconciliation dedupes.
@@ -65,10 +66,11 @@ def deliver(manifest, pending):
     text = str(answer.get('text') or answer.get('outcome') or 'ANX answer received') if isinstance(answer, dict) else str(answer)
     owner = manifest.escalation.internal_to or manifest.obligations.coordinator or 'lead'
     try:
-        bus.main(['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
-                  '--topic', 'loop-failure-answer', '--subject', record['card'],
-                  '--rollback', 'Follow up on the original ANX ask to revise this answer.',
-                  '--id', 'answer-' + record['ask_id'], '--force', '--no-mirror', text], manifest)
+        with contextlib.redirect_stdout(sys.stderr):
+            bus.main(['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
+                      '--topic', 'loop-failure-answer', '--subject', record['card'],
+                      '--rollback', 'Follow up on the original ANX ask to revise this answer.',
+                      '--id', 'answer-' + record['ask_id'], '--force', '--no-mirror', text], manifest)
         pending.unlink(missing_ok=True)
     except (SystemExit, ToolError, OSError, ValueError) as exc:
         print(f'LOOP_ANSWER_PENDING {record["ask_id"]}: {exc}', file=sys.stderr)

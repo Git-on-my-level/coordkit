@@ -250,13 +250,13 @@ def reconcile(manifest, dry_run=False, at=None):
         # Retain answer payloads before projecting so a bus mirror failure is restartable.
         pending_path=manifest.paths.root/'reconcile/answers.json'
         pending=read_json(pending_path,[])
-        deferred = loop_answers.deferred(manifest)
         try:
             answers=client.call('await','--answers','--timeout','1s','--settle','0').get('answers',[])
         except ToolError as exc:
             if exc.exit_code != 8:
                 raise
             answers=[]
+        deferred = loop_answers.deferred(manifest)
         known_answers={item.get('ask_id') for item in pending}
         for item in [item for _, item in deferred] + answers:
             if item.get('ask_id') not in known_answers:

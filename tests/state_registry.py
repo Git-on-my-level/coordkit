@@ -95,12 +95,12 @@ row('loop_answers.py', 'state/loop-asks|.json|writer:remember',
     'persistent provenance, no blocking latch; direct lookup by hashed ask ID',
     'missing/invalid ask ID fails the loop report; failed local registration retries without another ask')
 row('loop_answers.py', '.answer.json|writer:receive|writer:deliver',
-    'either consuming ANX answer reader receives a registered loop reply',
+    'any consuming ANX answer reader receives a registered loop reply through the shared client',
     'durable decision bus row with deterministic ID, then pending answer removed',
     'reconciler retries each sweep; external calls bounded by the bus command',
     'LOOP_ANSWER_PENDING retains payload; direct answer never becomes ambiguous or applies an automatic repair')
 row('loop_answers.py', 'reconcile/received-answers|*.json|writer:defer',
-    'question sweep consumes a reply from the shared ANX stream, before routing it',
+    'shared ANX client consumes a reply from the stream, before returning it to any caller',
     'reconciler durably merges into answers.json then unlinks the received file',
     'next reconciliation; immutable ask IDs dedupe duplicate stream results',
     'unmatched replies retain normal answer_max_age handling; producer-registration races do not discard replies')

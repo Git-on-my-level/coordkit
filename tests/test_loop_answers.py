@@ -3,7 +3,8 @@ import contextlib
 import io
 from unittest.mock import patch
 
-from coordkit import bus, loop, loop_answers, questions, reconcile
+from coordkit import bus, loop, loop_answers, questions, reconcile, wait
+from coordkit.anxcli import AnxClient
 from coordkit.process import ToolError
 from coordkit.state import read_json, write_json
 from tests.support import FakeCase
@@ -59,7 +60,8 @@ class LoopAnswersTests(FakeCase):
         response['json']['result']['answers'].append({'ask_id': 'event:other', 'answer': {'text': 'Other answer'}})
         self.respond(response)
         remaining = self.quiet(questions.anx_answers, self.manifest)
-        self.assertEqual(remaining, {'event:other': {'text': 'Other answer'}})
+        self.assertEqual(remaining['event:other'], {'text': 'Other answer'})
+        self.assertEqual(remaining[ask_id], {'text': 'Pause until reviewed'})
         self.assertEqual(self.rows()[0]['id'], 'answer-' + ask_id)
 
     def test_bus_failure_retains_answer_and_reconcile_drains_without_another_remote_delivery(self):
@@ -139,3 +141,51 @@ class LoopAnswersTests(FakeCase):
         with patch.object(reconcile, 'write_json', side_effect=fail_pending), self.assertRaises(OSError):
             self.quiet(reconcile.reconcile, self.manifest)
         self.assertEqual(len(loop_answers.deferred(self.manifest)), 1)
+
+    def test_lead_waiter_wins_shared_stream_and_still_routes_loop_decision(self):
+        ask_id = self.record_failure()['ask_id']
+        self.manifest.escalation.internal_to = 'worker'
+        self.quiet(wait.main, ['pending'], self.manifest)
+        self.respond(self.answers(ask_id))
+        found = self.quiet(wait.scan_anx, set())
+        self.assertTrue(any('anx-answer' in line for line in found))
+        decisions = [r for r in self.rows() if r['id'] == 'answer-' + ask_id]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]['to'], 'worker')
+        self.respond()  # no later consumer can get this reply from ANX again
+        self.quiet(reconcile.reconcile, self.manifest)
+        self.assertEqual(loop_answers.deferred(self.manifest), [])
+        self.assertEqual(read_json(self.manifest.paths.root/'reconcile/answers.json'), [])
+
+    def test_supported_ask_response_shapes_are_confirmed_without_resending(self):
+        for index, field in enumerate(('ask_id', 'id', 'event_ref', 'ask', 'body')):
+            ask_id = f'event:shape-{index}'
+            result = {'ask': {'id': ask_id}} if field == 'ask' else (
+                {'body': {'ask': {'id': ask_id}}} if field == 'body' else {field: ask_id})
+            (self.state/'escalation.json').unlink(missing_ok=True)
+            self.respond({'tool': 'anx', 'contains': ['ask'], 'json': {'ok': True, 'result': result}})
+            report = self.record_failure()
+            self.assertTrue(report['sent'])
+            self.assertEqual(report['ask_id'], ask_id)
+            before = len([c for c in self.calls() if c['tool'] == 'anx' and 'ask' in c['args']])
+            self.record_failure()
+            self.assertEqual(len([c for c in self.calls() if c['tool'] == 'anx' and 'ask' in c['args']]), before)
+
+    def test_client_captures_reordered_answer_flags_without_polluting_stdout(self):
+        ask_id = self.record_failure()['ask_id']
+        self.respond(self.answers(ask_id))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            result = AnxClient(self.manifest).call('await', '--timeout', '1s', '--answers')
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(result['answers'][0]['ask_id'], ask_id)
+        self.assertEqual(self.rows()[0]['id'], 'answer-' + ask_id)
+
+    def test_shadow_answer_read_does_not_persist_or_relay(self):
+        ask_id = self.record_failure()['ask_id']
+        self.respond(self.answers(ask_id))
+        self.manifest.mode = 'shadow'
+        before = {p: p.read_bytes() for p in self.manifest.paths.root.rglob('*') if p.is_file()}
+        result = AnxClient(self.manifest).call('await', '--answers')
+        self.assertEqual(result['answers'][0]['ask_id'], ask_id)
+        self.assertEqual(before, {p: p.read_bytes() for p in self.manifest.paths.root.rglob('*') if p.is_file()})

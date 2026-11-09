@@ -778,11 +778,10 @@ def tier2(manifest, record, why, at=None):
     text = summary(record)
     ask_id = None
     if manifest.mode == 'live':
-        from .anxcli import AnxClient
+        from .anxcli import AnxClient, ask_reference
         try:
             result = AnxClient(manifest).ask(manifest.escalation.card, brief)
-            ask_id = (result or {}).get('ask_id') or (result or {}).get('id') or ((result or {}).get('ask') or {}).get('id') \
-                or (result or {}).get('event_ref')
+            ask_id = ask_reference(result)
         except Exception as exc:  # anx down: relay file now, retry on the next sweep
             addressed.to_relay_file(manifest, f'QUESTION anx_ask_failed {record["qid"]}: {exc}'[:300])
         if not ask_id:
@@ -1079,12 +1078,6 @@ def anx_answers(manifest):
         return {}
     out = {}
     for item in (result or {}).get('answers', []):
-        # This shares a consuming answer stream with reconciliation. Preserve and
-        # route loop answers rather than silently discarding another producer's reply.
-        from . import loop_answers
-        loop_answers.defer(manifest, item)
-        if loop_answers.receive(manifest, item):
-            continue
         for key in ('ask_id', 'event_ref', 'id'):
             if item.get(key):
                 out[item[key]] = item.get('answer') or item

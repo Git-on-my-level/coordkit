@@ -25,8 +25,10 @@ access was performed.
   reproduce against the earlier implementation and pass after correction.
 - Recovery clears sent and unsent receipts; STOP suppresses reminders. PRs named
   in failures retain their evidence links for ANX authoring lint.
-- Direct ask IDs survive loop recovery. Both shared answer consumers retain and
-  relay human replies, including a reply arriving before producer registration.
+- Direct ask IDs survive loop recovery. The shared ANX client retains and relays
+  human replies for all three consumers, including the lead waiter and a reply
+  arriving before producer registration. Supported nested ask-ID responses are
+  normalized by the same parser used for question escalation.
   Failed bus delivery and failed handoff merging retain the answer for retry;
   unrelated producer answers are preserved. Replies never automatically pause
   or resolve the loop.
@@ -35,10 +37,9 @@ access was performed.
 
 | Check | Result |
 | --- | --- |
-| Python 3.11.15 focused unit tests, including shared answer integration | PASS: 194 tests |
-| Python 3.12.13 full discovery with CI's explicit 1.0-second cold-start budget, before the two final review fixes | PASS: 978 tests |
-| Python 3.12.13 focused loop/contract/review tests before shared answer integration | PASS: 57 tests |
-| Negative controls against the earlier failure handler | PASS: both new regressions fail as expected |
+| Python 3.11.15 focused unit tests, including shared answer integration and lead waiter | PASS: 207 tests |
+| Python 3.12.13 full discovery with CI's explicit 1.0-second cold-start budget, before final client-capture and response-shape fixes | PASS: 989 tests |
+| Negative controls against earlier implementations | PASS: alarm/reset race, legacy evidence, waiter consumption and nested-ID regressions fail as expected |
 | Python 3.12.13 compileall | PASS |
 | Worker protocol tests | PASS: 4 tests |
 | Leak gate | PASS: no unapproved hits |
