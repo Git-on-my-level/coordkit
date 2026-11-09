@@ -1,6 +1,8 @@
 """A continuing failure streak must remain visible even when the bus is broken."""
 import contextlib
+import fcntl
 import io
+import threading
 from unittest.mock import patch
 
 from coordkit import loop
@@ -84,6 +86,58 @@ class LoopEscalationTests(FakeCase):
         self.assertEqual(saved['sent_count'], 1)
         self.assertEqual(saved['next_at'], 4601)
         self.assertEqual(len(self.asks()), 2)
+
+    def test_unsent_legacy_report_survives_a_failed_retry_and_new_cycle_error(self):
+        self.respond({'tool': 'anx', 'contains': ['ask'], 'exit': 2, 'stderr': 'ANX unavailable'})
+        old = self.record_failure(1000, 'original error')
+        old.pop('channel')
+        write_json(self.state/'escalation.json', old)
+        self.assertEqual(self.record_failure(2000, 'different error'), old)
+        self.respond()
+        with patch.object(loop.time, 'time', return_value=3000):
+            loop.retry_escalation(self.manifest, 'audit', 'loop-audit', self.state)
+        self.assertIn('original error', self.asks()[-1][self.asks()[-1].index('--situation') + 1])
+
+    def test_concurrent_success_cannot_clear_threshold_report_before_send_attempt(self):
+        # Queue a successful-cycle reset as soon as the failure report is durable.
+        # If the sender drops its lock and reacquires, let recovery win that gap.
+        original_flock, original_write = fcntl.flock, loop.write_json
+        recovered, errors, workers = threading.Event(), [], []
+        writer = threading.get_ident()
+        acquisitions = 0
+
+        def recover():
+            try:
+                with (self.state/'result.lock').open('a') as lock:
+                    original_flock(lock, fcntl.LOCK_EX)
+                    (self.state/'escalation.json').unlink(missing_ok=True)
+                    (self.state/'fails').write_text('0\n')
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                recovered.set()
+
+        def journal(path, report):
+            original_write(path, report)
+            if not report.get('sent') and not workers:
+                workers.append(threading.Thread(target=recover))
+                workers[0].start()
+
+        def lock_with_recovery_priority(fd, operation):
+            nonlocal acquisitions
+            if threading.get_ident() == writer:
+                acquisitions += 1
+                if acquisitions == 2:
+                    self.assertTrue(recovered.wait(2), 'recovery could not acquire the released result lock')
+            return original_flock(fd, operation)
+
+        with patch.object(loop, 'write_json', side_effect=journal), \
+                patch.object(loop.fcntl, 'flock', side_effect=lock_with_recovery_priority):
+            self.record_failure(1000)
+        workers[0].join(2)
+        self.assertFalse(workers[0].is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.asks()), 1, 'the threshold-crossing failure must attempt delivery before reset')
 
     def test_success_clears_failed_delivery_and_next_streak_starts_fresh(self):
         self.respond({'tool': 'anx', 'contains': ['ask'], 'exit': 2, 'stderr': 'ANX unavailable'})

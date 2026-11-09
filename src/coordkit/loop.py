@@ -184,7 +184,7 @@ def record_failure(manifest, name, settings, handle, state, detail, cycle=None, 
         if failures >= settings.fail_report_after:
             report = read_json(state/'escalation.json')
             # Legacy sent receipts only reached an agent inbox. Deliver to Decide immediately.
-            legacy = report and report.get('channel') != 'anx'
+            legacy = report and report.get('sent') and report.get('channel') != 'anx'
             if not report or legacy or (report.get('sent') and time.time() >= report['next_at']):
                 report = {'sent': False, 'channel': 'anx',
                           'sent_count': report.get('sent_count', 0) if report and not legacy else 0,
@@ -196,7 +196,9 @@ def record_failure(manifest, name, settings, handle, state, detail, cycle=None, 
                     'recommend': f'Inspect {error_file} and restore the loop before its next scheduled cycle.',
                     'why': 'The consecutive-failure threshold was reached; automated retries have not recovered it.'}}
                 write_json(state/'escalation.json', report)
-    retry_escalation(manifest, name, handle, state)
+        # Keep the threshold-crossing receipt and delivery in one critical section:
+        # a concurrently successful cycle must not clear the alarm before its attempt.
+        _retry_escalation(manifest, name, handle, state)
 
 
 def retry_escalation(manifest, name, handle, state):

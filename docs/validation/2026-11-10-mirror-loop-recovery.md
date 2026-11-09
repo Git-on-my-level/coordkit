@@ -18,7 +18,11 @@ access was performed.
   reaches Decide directly, even with a broken bus or agent-only digest routing.
 - Persistent receipts re-arm at one hour, six hours, then daily; custom intervals
   and card prefixes work. Failed delivery retains its payload and does not
-  consume a reminder. Legacy agent-only receipts are delivered to Decide.
+  consume a reminder. Legacy agent-only receipts are delivered to Decide;
+  unsent legacy evidence survives failed retries and later cycle errors.
+- A concurrent successful-cycle reset cannot erase a threshold-crossing alarm
+  before its send attempt. Both concurrency and legacy-evidence regressions
+  reproduce against the earlier implementation and pass after correction.
 - Recovery clears sent and unsent receipts; STOP suppresses reminders. PRs named
   in failures retain their evidence links for ANX authoring lint.
 
@@ -26,13 +30,22 @@ access was performed.
 
 | Check | Result |
 | --- | --- |
-| Python 3.11.15 focused unit tests | PASS: 89 tests |
-| Python 3.14.6 new regressions/contracts | PASS: 14 tests |
+| Python 3.11.15 focused unit tests | PASS: 91 tests |
+| Python 3.12.13 full discovery with CI's explicit 1.0-second cold-start budget, before the two final review fixes | PASS: 978 tests |
+| Python 3.12.13 focused loop/contract/review tests after those fixes | PASS: 57 tests |
+| Negative controls against the earlier failure handler | PASS: both new regressions fail as expected |
 | Python 3.12.13 compileall | PASS |
 | Worker protocol tests | PASS: 4 tests |
 | Leak gate | PASS: no unapproved hits |
 | Whitespace check | PASS |
 | Installed ANX offline preview of the actual generated escalation brief, including `--again` | PASS: zero lint errors or warnings |
+
+The exploratory Python 3.14 full run executed 976 tests and failed only the cold
+CLI timing check: 0.656 seconds against its default 0.300-second budget. Its
+required isolated rerun also failed at 0.519 seconds. No timing threshold was
+changed in this patch; the supported Python 3.12 full run above used CI's
+documented explicit budget. This timing failure remains recorded rather than
+being counted as a green default-budget local suite.
 
 The preview uses `--preview`, not a live ask. Full supported-version/platform
 validation is also covered by the PR's Python 3.11/3.12 Linux/macOS CI matrix;
