@@ -266,5 +266,5 @@ row('selfupdate.py', 'relay/service.json', 'update reconciles explicitly install
 row('mcp_server.py', 'clients.json|clients.json.lock|writer:clients_main',
     'explicit mcp-clients add/revoke; external private credentials',
     'revoke removes an entry; lock released on exit',
-    're-read every request; atomic edits; no cached credentials',
+    'opened-file validation per request; atomic edits; bounded metadata-keyed parsed cache',
     'malformed/insecure file refuses admission; absent file permits legacy fallback')

@@ -22,8 +22,10 @@ of at least 32 characters and its own permissions:
 Omitted grants default to `write: false`, `answer: false`, `post_as: []`; omitted `identity` defaults to the
 client name. Names and identities use plain bus names; `legacy` is reserved. Malformed JSON, invalid fields,
 duplicate keys/secrets, short secrets, unreadable files and unsafe permissions fail closed with 503.
-The file is re-read for every request. Add a new entry and update the client to rotate a token; delete its
-entry to revoke it on the next request. Rate limits remain process-wide. There is no built-in OAuth provider:
+The file is capped at 64 KiB. Every request reopens and validates its metadata and permissions;
+an unchanged file reuses a single parsed snapshot keyed by device, inode, nanosecond modification/change times
+and size. Changed or removed files take effect on the next request. Add a new entry and update the client
+to rotate a token; delete its entry to revoke it on the next request. Rate limits remain process-wide. There is no built-in OAuth provider:
 verify your client's bearer-header support before exposing this endpoint.
 
 Read tools inspect the bus and bounded agentctl/train metadata. Every write tool (`post`, `ack`,
@@ -49,9 +51,9 @@ See the security document for rate limits, slot pools and resource bounds.
 ### Legacy migration
 
 During migration, a bearer not matching `clients.json` can still match the mode-0600
-`~/.coordkit-mcp/connector.secret` (`--secret-file` / `COORDKIT_MCP_SECRET_FILE`). This synthetic `legacy`
-client has `write: true`, `answer: true`, manifest `[mcp].identity` (default `ck-<project>-mcp`), and manifest
-`[mcp].post_as`. Named tokens never inherit manifest sender grants. A missing clients file permits legacy
+`~/.coordkit-mcp/connector.secret` (`--secret-file` / `COORDKIT_MCP_SECRET_FILE`), capped at 4 KiB.
+This synthetic `legacy` client has `write: true`, `answer: true`, manifest `[mcp].identity`
+(default `ck-<project>-mcp`), and manifest `[mcp].post_as`. Named tokens never inherit manifest sender grants. A missing clients file permits legacy
 operation; an invalid clients file refuses admission rather than silently restoring legacy powers.
 
 1. Deploy the new code with the existing legacy secret.

@@ -1415,3 +1415,109 @@ class McpClientTests(McpCase):
         error, text = self.client_tool('ack', id=qid, state='done')
         self.assertFalse(error, text)
         self.assertEqual(questions.replies(self.manifest, self.rows(), record)['frm'], 'client-agent')
+
+    def test_credential_byte_caps_refuse_before_reading_or_parsing(self):
+        # Admission is pre-auth: oversized local files must never drive large reads.
+        for path, limit in ((self.clients, mcp_server.MAX_CLIENTS_BYTES),
+                            (self.secret, mcp_server.MAX_SECRET_BYTES)):
+            with self.subTest(file=path.name):
+                path.write_bytes(b'x' * (limit + 1)); path.chmod(0o600)
+                with patch.object(mcp_server, 'private_text') as read, patch.object(mcp_server, 'parse_clients') as parse:
+                    self.assertEqual(self.call('tools/list')[0], 503)
+                read.assert_not_called(); parse.assert_not_called()
+                if path == self.clients:
+                    path.unlink()
+        # Exact byte boundaries remain usable, rather than being treated as oversized.
+        self.secret.write_bytes((SECRET + ' ' * (mcp_server.MAX_SECRET_BYTES - len(SECRET))).encode())
+        self.assertEqual(self.call('tools/list')[0], 200)
+        self.save_clients()
+        data = self.clients.read_bytes()
+        self.clients.write_bytes(data + b' ' * (mcp_server.MAX_CLIENTS_BYTES - len(data)))
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+
+    def test_credential_read_stays_bounded_if_file_grows_after_fstat(self):
+        from types import SimpleNamespace
+        self.secret.write_bytes(b'x' * (mcp_server.MAX_SECRET_BYTES + 100))
+        st = self.secret.stat()
+        stale = SimpleNamespace(st_mode=st.st_mode, st_size=1)
+        with patch.object(mcp_server.os, 'fstat', return_value=stale):
+            with self.assertRaises(mcp_server.Refused) as caught:
+                mcp_server.load_secret(self.secret)
+        self.assertEqual(caught.exception.status, 503)
+
+    def test_unchanged_clients_are_parsed_once_across_concurrent_auth_attempts(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.save_clients()
+        def attempt(_):
+            return mcp_server.authenticate(self.manifest, {'Authorization': 'Bearer wrong'}, self.secret)
+        with patch.object(mcp_server, 'parse_clients', wraps=mcp_server.parse_clients) as parse:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                self.assertEqual(list(pool.map(attempt, range(16))), [None] * 16)
+            self.assertEqual(parse.call_count, 1)
+        # Cache hits still check the opened inode's permissions and reject symlinks.
+        self.clients.chmod(0o644)
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 503)
+        self.clients.chmod(0o600)
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+        original = self.root/'clients-original.json'
+        self.clients.rename(original); self.clients.symlink_to(original)
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 503)
+
+    def test_cache_invalidates_on_mtime_size_and_inode_changes(self):
+        self.save_clients()
+        with patch.object(mcp_server, 'parse_clients', wraps=mcp_server.parse_clients) as parse:
+            self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+            original = self.clients.stat()
+            data = self.clients.read_bytes()
+            # Same inode and size: an in-place secret rotation must invalidate the cache.
+            self.TOKEN = 'n' * len(self.TOKEN)
+            self.save_clients()
+            os.utime(self.clients, ns=(original.st_atime_ns, original.st_mtime_ns + 1_000_000))
+            self.assertEqual(self.call('tools/list', token='c' * 43)[0], 401)
+            self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+            self.assertEqual(parse.call_count, 2)
+            # Size changes invalidate even when the old mtime is preserved.
+            st = self.clients.stat()
+            self.clients.write_bytes(self.clients.read_bytes() + b' ')
+            os.utime(self.clients, ns=(st.st_atime_ns, st.st_mtime_ns))
+            self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+            self.assertEqual(parse.call_count, 3)
+            # Atomic replacement invalidates even at the same size and mtime.
+            replacement = self.root/'replacement.json'
+            replacement.write_bytes(data + b' '); replacement.chmod(0o600)
+            os.utime(replacement, ns=(st.st_atime_ns, st.st_mtime_ns))
+            replacement.replace(self.clients)
+            self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 401)
+            self.assertEqual(self.call('tools/list', token='c' * 43)[0], 200)
+            self.assertEqual(parse.call_count, 4)
+            self.clients.unlink()  # revocation must not fall back to cached clients
+            self.assertEqual(self.call('tools/list', token='c' * 43)[0], 401)
+
+    def test_invalid_client_config_is_cached_and_recovers_after_edit(self):
+        for text in ('{', '[' * 1100 + '0' + ']' * 1100):
+            self.clients.write_text(text); self.clients.chmod(0o600)
+            with patch.object(mcp_server, 'parse_clients', wraps=mcp_server.parse_clients) as parse:
+                for _ in range(3):
+                    self.assertEqual(self.call('tools/list')[0], 503)
+                self.assertEqual(parse.call_count, 1)
+                self.save_clients()
+                self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+                self.assertEqual(parse.call_count, 2)
+
+    def test_helper_cannot_mutate_cached_grants_before_durable_publication(self):
+        self.save_clients()
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+        with patch('coordkit.state.write_json', side_effect=OSError('unavailable')):
+            with self.assertRaises(OSError):
+                mcp_server.clients_main(['revoke', 'connector', '--clients-file', str(self.clients)])
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+
+    def test_helper_rejects_edits_that_would_exceed_the_clients_byte_cap(self):
+        import contextlib, io
+        self.save_clients()
+        before = self.clients.read_bytes()
+        with patch.object(mcp_server, 'MAX_CLIENTS_BYTES', len(before) + 1), contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaisesRegex(ValueError, 'file too large'):
+                mcp_server.clients_main(['add', 'writer', '--clients-file', str(self.clients)])
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(self.clients.read_bytes(), before)

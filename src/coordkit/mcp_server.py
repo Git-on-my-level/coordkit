@@ -33,6 +33,10 @@ from .refs import ref_file
 PORT = 8767
 SECRET_FILE = Path(os.environ.get('COORDKIT_MCP_SECRET_FILE', '~/.coordkit-mcp/connector.secret')).expanduser()
 CLIENTS_FILE = Path(os.environ.get('COORDKIT_MCP_CLIENTS_FILE', '~/.coordkit-mcp/clients.json')).expanduser()
+MAX_CLIENTS_BYTES = 64 * 1024
+MAX_SECRET_BYTES = 4 * 1024
+CLIENTS_LOCK = threading.Lock()
+CLIENTS_CACHE = None  # one (opened-file metadata, parsed clients or invalid sentinel) entry
 MAX_BODY = 128 * 1024
 MAX_OUTPUT = 64 * 1024
 ROW_TEXT = 4000
@@ -117,18 +121,34 @@ def private_journal(path):
         raise
 
 
-def private_text(path):
-    # Check the opened inode, without following symlinks or blocking on a FIFO.
+def private_file(path, limit):
+    # Validate the opened inode on every request, including cache hits.
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd) as stream:
-        st = os.fstat(stream.fileno())
+    stream = os.fdopen(fd, 'rb')
+    try:
+        st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600:
             raise Refused(503, 'connector credentials must be regular private files (chmod 600)')
-        return stream.read()
+        if st.st_size > limit:
+            raise Refused(503, 'connector credentials file too large')
+        return stream, st
+    except Exception:
+        stream.close()
+        raise
+
+
+def private_text(stream, limit):
+    # A concurrent append after fstat must not turn this into an unbounded read.
+    data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise Refused(503, 'connector credentials file too large')
+    return data.decode('utf-8')
 
 
 def load_secret(path=None):
-    secret = private_text(Path(path or SECRET_FILE)).strip()
+    stream, _ = private_file(Path(path or SECRET_FILE), MAX_SECRET_BYTES)
+    with stream:
+        secret = private_text(stream, MAX_SECRET_BYTES).strip()
     if len(secret) < 32:
         raise Refused(503, 'connector secret too short')
     return secret
@@ -148,13 +168,32 @@ def legacy_client(manifest):
 
 
 def load_clients(path=None):
+    """Revalidate metadata per request; reuse only an unchanged, bounded snapshot."""
+    global CLIENTS_CACHE
     path = Path(path or CLIENTS_FILE)
-    try:
-        text = private_text(path)
-    except FileNotFoundError:
-        if os.path.lexists(path):  # dangling credentials symlink is not an absent config
-            raise Refused(503, 'invalid connector clients file') from None
-        return {}
+    with CLIENTS_LOCK:
+        try:
+            stream, st = private_file(path, MAX_CLIENTS_BYTES)
+        except FileNotFoundError:
+            CLIENTS_CACHE = None
+            if os.path.lexists(path):  # dangling symlink is not an absent config
+                raise Refused(503, 'invalid connector clients file') from None
+            return {}
+        with stream:
+            key = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size, st.st_ctime_ns)
+            if CLIENTS_CACHE is None or CLIENTS_CACHE[0] != key:
+                try:
+                    clients = parse_clients(private_text(stream, MAX_CLIENTS_BYTES))
+                except (Refused, UnicodeError):
+                    CLIENTS_CACHE = (key, None)
+                    raise Refused(503, 'invalid connector clients file') from None
+                CLIENTS_CACHE = (key, clients)
+            if CLIENTS_CACHE[1] is None:
+                raise Refused(503, 'invalid connector clients file')
+            return CLIENTS_CACHE[1]
+
+
+def parse_clients(text):
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -183,7 +222,7 @@ def load_clients(path=None):
             if any(type(spec.get(k, False)) is not bool for k in ('write', 'answer')):
                 raise ValueError('invalid permission')
         return clients
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         raise Refused(503, 'invalid connector clients file') from None
 
 
@@ -1370,7 +1409,7 @@ def clients_main(argv, manifest=None):
         fd = os.open(path.with_name(path.name + '.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            clients = load_clients(path)
+            clients = dict(load_clients(path))  # edits must not mutate the auth cache
             if o.action == 'add':
                 if o.name in clients:
                     p.error('client already exists; revoke it or use a new name')
@@ -1383,6 +1422,8 @@ def clients_main(argv, manifest=None):
                 if o.name not in clients:
                     p.error('unknown client')
                 del clients[o.name]
+            if len(json.dumps(clients).encode()) + 1 > MAX_CLIENTS_BYTES:
+                raise ValueError('connector clients file too large')
             write_json(path, clients)
         if o.action == 'add':
             print(secret)  # the only secret-bearing output, after durable publication
