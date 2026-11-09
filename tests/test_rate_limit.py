@@ -47,6 +47,16 @@ class RateLimitShapeTests(FakeCase):
         marked = dict(generic, retry={'status': 429, 'retry_after_ms': 1000})
         self.assertEqual(lane.rate_limit(marked, now)['retry_after_ms'], 1000)
 
+    def test_future_evidence_is_not_fresh(self):
+        """A far-future timestamp would stay fresh forever and mask a hang."""
+        now = time.time()
+        future = {'state': 'running', 'updated_at': stamp(-3 * 3600), 'events': [
+            {'type': 'retry', 'at': stamp(-3 * 3600), 'error': {'status': 429, 'retryAfterMs': 1000}}]}
+        self.assertIsNone(lane.rate_limit(future, now))
+        skewed = {'state': 'running', 'events': [
+            {'type': 'retry', 'at': stamp(-30), 'error': {'status': 429, 'retryAfterMs': 1000}}]}
+        self.assertIsNotNone(lane.rate_limit(skewed, now))
+
     def test_non_finite_and_negative_retry_values_are_ignored_not_trusted(self):
         now = time.time()
         for value in (float('inf'), float('-inf'), float('nan'), -1, -1000, 10 ** 400):

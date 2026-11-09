@@ -183,6 +183,18 @@ class OpenCodeUsageTests(FakeCase):
         self.assertNotEqual(seen[0].parent, live.parent)
         self.assertEqual(sorted(path.name for path in live.parent.iterdir()), ['opencode.db'])
 
+    def test_snapshot_copies_a_hot_rollback_journal(self):
+        """A non-WAL store mid-commit has a hot -journal; the copy must carry it so
+        SQLite rolls the partial pages back in the private directory."""
+        live = self.root / 'store.db'
+        live.write_bytes(b'db')
+        Path(str(live) + '-journal').write_bytes(b'journal')
+        copy = self.root / 'snap' / 'opencode.db'
+        copy.parent.mkdir()
+        self.assertTrue(usage._copy_opencode_store(live, copy))
+        self.assertEqual(Path(str(copy) + '-journal').read_bytes(), b'journal')
+        self.assertFalse(Path(str(copy) + '-wal').exists())
+
     def test_failed_snapshot_copy_leaves_no_private_directory(self):
         connection = self.store()
         connection.execute("INSERT INTO session_v2 VALUES ('ses_repo', '/work/repo')")

@@ -263,17 +263,24 @@ def _stat_key(path):
 
 
 def _copy_opencode_store(path, copy):
-    """Copy the store plus its WAL; a vanished WAL simply means the store has none."""
-    wal = Path(str(path) + '-wal')
-    target_wal = Path(str(copy) + '-wal')
-    before = (_stat_key(path), _stat_key(wal))
+    """Copy the store plus its WAL and rollback journal.
+
+    A vanished sidecar simply means the store has none. The rollback journal
+    matters for non-WAL stores: a copy taken mid-commit holds partially written
+    pages, and SQLite only rolls them back on open if the hot journal travels
+    with the copy (the private directory is writable, so the rollback happens
+    there, never beside the live store).
+    """
+    sidecars = [(Path(str(path) + suffix), Path(str(copy) + suffix)) for suffix in ('-wal', '-journal')]
+    before = (_stat_key(path),) + tuple(_stat_key(source) for source, _ in sidecars)
     shutil.copyfile(path, copy)
-    try:
-        shutil.copyfile(wal, target_wal)
-    except FileNotFoundError:
-        # A concurrent checkpoint may fold the WAL into the database and remove it.
-        target_wal.unlink(missing_ok=True)
-    return before == (_stat_key(path), _stat_key(wal))
+    for source, target in sidecars:
+        try:
+            shutil.copyfile(source, target)
+        except FileNotFoundError:
+            # A concurrent checkpoint or commit may remove the sidecar.
+            target.unlink(missing_ok=True)
+    return before == (_stat_key(path),) + tuple(_stat_key(source) for source, _ in sidecars)
 
 
 @contextlib.contextmanager

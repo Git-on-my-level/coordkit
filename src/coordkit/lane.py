@@ -185,6 +185,7 @@ RATE_LIMIT_CODES = {'provider_rate_limit', 'provider_rate_limited', 'rate_limite
                     'quota_exceeded'}
 RATE_LIMIT_EVENT_TYPES = {'retry', 'rate_limit', 'rate-limit'}
 RATE_LIMIT_EVIDENCE_BOUND = 5 * 60.0
+RATE_LIMIT_CLOCK_SKEW = 120  # seconds a status timestamp may lead this host's clock
 # A malformed or hostile retry delay must not keep a lane alive forever.
 MAX_RETRY_AFTER_MS = 60 * 60 * 1000
 MAX_RESET_WINDOW = 60 * 60.0
@@ -303,7 +304,9 @@ def rate_limit(status, now=None):
     reset = _epoch(found.get('reset_at') or found.get('resets_at'))
     if reset is not None and at is not None and reset > at:
         window = max(window, min(reset - at, MAX_RESET_WINDOW))
-    if at is None or at < now - window:
+    # Evidence from the future is not evidence: a far-future timestamp would
+    # stay fresh forever and mask a real hang. Allow only small clock skew.
+    if at is None or at < now - window or at > now + RATE_LIMIT_CLOCK_SKEW:
         return None
     return {'retry_after_ms': retry,
             'reset_at': found.get('reset_at') or found.get('resets_at'),
