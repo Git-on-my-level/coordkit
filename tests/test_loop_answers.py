@@ -64,6 +64,28 @@ class LoopAnswersTests(FakeCase):
         self.assertEqual(remaining[ask_id], {'text': 'Pause until reviewed'})
         self.assertEqual(self.rows()[0]['id'], 'answer-' + ask_id)
 
+    def test_late_answer_to_superseded_ask_is_delivered_once_and_new_id_still_routes(self):
+        with patch.object(loop.time, 'time', return_value=1000):
+            first = self.record_failure()['ask_id']
+        with patch.object(loop.time, 'time', return_value=4600):
+            second = self.record_failure()['ask_id']
+        self.assertNotEqual(first, second)
+        args = [c['args'] for c in self.calls() if c['tool'] == 'anx' and 'ask' in c['args']][-1]
+        self.assertEqual(args[args.index('--supersedes') + 1], first)
+        self.assertTrue(loop_answers.path(self.manifest, first).exists())
+        self.assertTrue(loop_answers.path(self.manifest, second).exists())
+        self.respond(self.answers(first))
+        self.quiet(questions.anx_answers, self.manifest)
+        self.quiet(reconcile.reconcile, self.manifest, at=10000)
+        self.quiet(reconcile.reconcile, self.manifest, at=20000)
+        rows = [r for r in self.rows() if r['id'] == 'answer-' + first]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['text'], 'Pause until reviewed')
+        self.assertEqual(read_json(loop_answers.path(self.manifest, first))['answer']['text'], 'Pause until reviewed')
+        self.respond(self.answers(second))
+        self.quiet(questions.anx_answers, self.manifest)
+        self.assertEqual(len([r for r in self.rows() if r['id'] == 'answer-' + second]), 1)
+
     def test_bus_failure_retains_answer_and_reconcile_drains_without_another_remote_delivery(self):
         ask_id = self.record_failure()['ask_id']
         item = self.answers(ask_id)['json']['result']['answers'][0]

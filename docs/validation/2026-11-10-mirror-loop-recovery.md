@@ -57,6 +57,23 @@ The preview uses `--preview`, not a live ask. Full supported-version/platform
 validation is also covered by the PR's Python 3.11/3.12 Linux/macOS CI matrix;
 the PR checks are the authoritative terminal CI record.
 
+## Reminder supersession follow-up
+
+Each re-alert carries the prior ask reference and sends `--supersedes`, keeping
+one open Decide ask through three reminders. Earlier answers appear in reminder
+details, including answers found through a bounded, non-consuming inbox lookup;
+incomplete lookups leave the reminder pending. Both ask-ID mappings survive, and
+a late answer to the superseded ask still delivers exactly one decision row.
+
+- PASS: Python 3.12 focused tests (34 tests).
+- PASS: Python 3.12 full discovery (998 tests), with CI's explicit 1.0-second
+  cold CLI budget.
+- PASS: Python 3.11 focused tests with real fake-CLI subprocesses (34 tests).
+- PASS: disabling supersession causes the new regression test to fail.
+- PASS: compileall, worker protocol tests (4 tests), leak gate and whitespace.
+- PASS: installed ANX offline preview accepts the generated reminder with
+  `--again --supersedes`, with zero lint errors or warnings and no live write.
+
 ## Operational handoff
 
 Install and replay remain separate operator work after review. Follow
@@ -64,6 +81,6 @@ Install and replay remain separate operator work after review. Follow
 cursor, hold request keys and payloads. The existing note CLI has no request-key
 flag, so mixed-backlog replay is not exactly once across uncertain remote
 outcomes. Inspect the affected card before retrying an uncertain note, and do
-not rewind over completed rows. Recovery does not automatically retire earlier
-Decide asks. Answers are relayed to the configured agent without automatic
+not rewind over completed rows. Reminders replace their predecessor; recovery
+does not automatically retire the final Decide ask. Answers reach the configured agent without automatic
 repair, pause, or card resolution.

@@ -76,14 +76,15 @@ class AnxClient:
             args += ["--next", next_in]
         return self.call(*args, write=True)
 
-    def ask(self, card, brief, *, again=False):
+    def ask(self, card, brief, *, again=False, supersedes=None):
         """The one path to the operator: files only a brief that passes briefs.validate."""
         from . import briefs
         errors = briefs.validate(brief)
         if errors:
             raise ToolError("anx", 6, "brief_refused: " + "; ".join(errors), "brief_refused")
         return self.call("ask", *briefs.anx_args(brief)[:1], "--subject-ref", card, *briefs.anx_args(brief)[1:],
-                         *(["--again"] if again else []), write=True)
+                         *(["--again"] if again else []),
+                         *(["--supersedes", supersedes] if supersedes else []), write=True)
 
 
 def ask_reference(result):

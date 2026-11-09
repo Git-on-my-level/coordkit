@@ -52,10 +52,46 @@ def receive(manifest, item):
     if not record:
         return False
     manifest.writable()
+    record['answer'] = item.get('answer') or item
     pending = target.with_suffix('.answer.json')
-    write_json(pending, dict(record, answer=item.get('answer') or item))
+    write_json(pending, record)
+    write_json(target, record)  # retain earlier rulings after successful bus delivery
     deliver(manifest, pending)
     return True
+
+
+def answer_text(answer):
+    return str(answer.get('text') or answer.get('outcome') or 'ANX answer received') if isinstance(answer, dict) else str(answer)
+
+
+def answer_context(manifest, ask_id):
+    """Read earlier answers without consuming the shared reply stream.
+
+    Bound pagination and refuse an incomplete lookup rather than replacing an
+    answered question without its context. Local receipts survive supersession.
+    """
+    from .anxcli import AnxClient
+    record = read_json(path(manifest, ask_id)) or {}
+    if record.get('answer'):
+        return reference(ask_id) + ': ' + answer_text(record['answer'])
+    cursor, seen = None, set()
+    for _ in range(10):
+        result = AnxClient(manifest).call('inbox', 'list', '--status', 'all', '--limit', '200',
+                                         *(['--cursor', cursor] if cursor else [])) or {}
+        result = result.get('body', result)
+        for item in result.get('items', []):
+            if item.get('ask_id') and reference(item['ask_id']) == reference(ask_id):
+                if item.get('answer'):
+                    receive(manifest, item)
+                    return reference(ask_id) + ': ' + answer_text(item['answer'])
+                return ''
+        cursor = result.get('next_cursor')
+        if not cursor and not (result.get('has_more') or result.get('truncated')):
+            return ''
+        if not cursor or cursor in seen:
+            break
+        seen.add(cursor)
+    raise ToolError('anx', 6, 'earlier loop answer lookup incomplete; reminder retained for retry', 'protocol_error')
 
 
 def deliver(manifest, pending):
@@ -63,7 +99,7 @@ def deliver(manifest, pending):
     if not record:
         return
     answer = record['answer']
-    text = str(answer.get('text') or answer.get('outcome') or 'ANX answer received') if isinstance(answer, dict) else str(answer)
+    text = answer_text(answer)
     owner = manifest.escalation.internal_to or manifest.obligations.coordinator or 'lead'
     try:
         with contextlib.redirect_stdout(sys.stderr):

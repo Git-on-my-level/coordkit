@@ -186,8 +186,11 @@ def record_failure(manifest, name, settings, handle, state, detail, cycle=None, 
             # Legacy sent receipts only reached an agent inbox. Deliver to Decide immediately.
             legacy = report and report.get('sent') and report.get('channel') != 'anx'
             if not report or legacy or (report.get('sent') and time.time() >= report['next_at']):
+                previous = report if report and not legacy else {}
                 report = {'sent': False, 'channel': 'anx', 'card': f'card:{handle}',
-                          'sent_count': report.get('sent_count', 0) if report and not legacy else 0,
+                          'sent_count': previous.get('sent_count', 0),
+                          'previous_ask_id': previous.get('ask_id'),
+                          'previous_answer': previous.get('previous_answer', ''),
                           'cycle': cycle, 'error_file': str(error_file), 'ask': {
                     'situation': f'Loop {name} has failed {failures} consecutive cycles: {detail}',
                     'impact': ('Scheduled checks are failing to complete reliably, so follow-ups can be missed '
@@ -215,14 +218,22 @@ def _retry_escalation(manifest, name, handle, state):
         return
     try:
         card = report.get('card') or f'card:{handle}'
+        if report.get('previous_ask_id') and not report.get('ask_id'):
+            answer = loop_answers.answer_context(manifest, report['previous_ask_id'])
+            if answer:
+                report['previous_answer'] = answer
+                write_json(path, report)
+        details = f"Cycle: {report['cycle']}\nEvidence: {report['error_file']}"
+        if report.get('previous_answer'):
+            details += '\n\nEarlier answer (the loop is still failing):\n' + report['previous_answer']
         brief = briefs.machine('loop_failure', subject=briefs.subject_words(card), **report['ask'],
-            evidence=briefs.pr_evidence(manifest, *report['ask'].values()),
-            details=f"Cycle: {report['cycle']}\nEvidence: {report['error_file']}",
+            evidence=briefs.pr_evidence(manifest, *report['ask'].values(), details),
+            details=details,
             if_no_answer='The loop keeps retrying and reports again while failures continue; no repair is applied automatically.')
         # Bypass the failing bus/mirror and deaf-exempt agent digests. New failure evidence
-        # warrants a fresh Decide ask even if the previous question is open or answered.
+        # replaces the previous Decide ask, retaining its answer and correlation.
         if not report.get('ask_id'):
-            result = AnxClient(manifest).ask(card, brief, again=True)
+            result = AnxClient(manifest).ask(card, brief, again=True, supersedes=report.get('previous_ask_id'))
             ask_id = ask_reference(result)
             if not isinstance(ask_id, str) or not re.fullmatch(r'(?:event:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', ask_id):
                 raise ToolError('anx', 6, 'loop ask response missing a valid ask_id', 'protocol_error')

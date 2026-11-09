@@ -2,6 +2,8 @@
 import contextlib
 import fcntl
 import io
+import json
+import os
 import threading
 from unittest.mock import patch
 
@@ -54,6 +56,64 @@ class LoopEscalationTests(FakeCase):
             self.assertEqual(args[args.index('--subject-ref') + 1], 'card:checks-audit')
         self.assertFalse(self.manifest.paths.bus_log.exists())
         self.assertEqual(self.escalations(), [])
+
+    def test_three_realerts_replace_the_previous_ask_leaving_one_open(self):
+        target = self.root/'anx-asks.json'
+        previous = None
+        with patch.dict(os.environ, FAKE_ANX_ASK_STATE=str(target)):
+            for at in (1000, 4600, 26200, 112600):
+                report = self.record_failure(at)
+                args = self.asks()[-1]
+                if previous:
+                    self.assertEqual(args[args.index('--supersedes') + 1], previous)
+                    self.assertEqual(report['previous_ask_id'], previous)
+                else:
+                    self.assertNotIn('--supersedes', args)
+                asks = json.loads(target.read_text())
+                self.assertEqual([key for key, item in asks.items() if item['status'] == 'open'], [report['ask_id']])
+                previous = report['ask_id']
+        self.assertEqual(len(asks), 4)
+
+    def test_answered_previous_ask_is_superseded_with_its_answer_in_details(self):
+        first = self.record_failure(1000)['ask_id']
+        self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
+            'items': [{'ask_id': first, 'status': 'answered', 'answer': {'text': 'Pause until reviewed'}}]}}})
+        second = self.record_failure(4600)
+        args = self.asks()[-1]
+        self.assertEqual(args[args.index('--supersedes') + 1], first)
+        details = args[args.index('--details') + 1]
+        self.assertIn(first + ': Pause until reviewed', details)
+        self.assertTrue(second['sent'])
+        # A delivered answer is retained even after the next replacement is open.
+        self.respond()
+        third = self.record_failure(26200)
+        self.assertTrue(third['sent'])
+        self.assertIn(first + ': Pause until reviewed', self.asks()[-1][self.asks()[-1].index('--details') + 1])
+
+    def test_answer_lookup_paginates_and_does_not_consume_replies(self):
+        first = self.record_failure(1000)['ask_id']
+        self.respond(
+            {'tool': 'anx', 'contains': ['inbox', 'list', '--cursor', 'page-two'], 'json': {'ok': True, 'result': {
+                'items': [{'ask_id': first.removeprefix('event:'), 'answer': 'Keep retrying while investigating'}]}}},
+            {'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
+                'items': [], 'next_cursor': 'page-two'}}})
+        self.assertTrue(self.record_failure(4600)['sent'])
+        self.assertIn('Keep retrying while investigating', self.asks()[-1][self.asks()[-1].index('--details') + 1])
+        self.assertFalse(any('await' in call['args'] for call in self.calls()))
+
+    def test_incomplete_answer_lookup_keeps_reminder_and_previous_id_for_retry(self):
+        first = self.record_failure(1000)['ask_id']
+        self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
+            'items': [], 'next_cursor': 'repeated'}}})
+        pending = self.record_failure(4600)
+        self.assertFalse(pending['sent'])
+        self.assertEqual(pending['previous_ask_id'], first)
+        self.assertEqual(len(self.asks()), 1)
+        self.respond()
+        with patch.object(loop.time, 'time', return_value=4700):
+            loop.retry_escalation(self.manifest, 'audit', 'loop-audit', self.state)
+        self.assertTrue(read_json(self.state/'escalation.json')['sent'])
+        self.assertEqual(self.asks()[-1][self.asks()[-1].index('--supersedes') + 1], first)
 
     def test_failed_reminder_retains_payload_and_does_not_advance_timer(self):
         self.record_failure(1000)

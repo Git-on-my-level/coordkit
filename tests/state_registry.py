@@ -88,15 +88,15 @@ row('loop.py', 'result.lock|fails|skip.json|writer:record_failure', 'failed, unk
 row('loop.py', 'escalation.json|writer:_retry_escalation', 'failure threshold; journal pending ask before sending',
     'any successful cycle clears the streak and pending/sent report under result.lock',
     'retry unsent next cycle; sent_at/next_at/sent_count re-arm at failure_realert_intervals, last interval repeats',
-    'direct ANX Decide ask on loop card; legacy agent-only sent receipts are delivered immediately')
+    'direct ANX Decide ask on loop card; previous_ask_id replaces its predecessor, previous_answer retains context; legacy agent-only sent receipts are delivered immediately')
 row('loop_answers.py', 'state/loop-asks|.json|writer:remember',
     'successful direct loop ask returns its ID, journaled before marking send complete',
-    'small immutable correlation receipts survive recovery; operator archives with bus/ask history',
+    'correlation receipts and received answers survive supersession/recovery; operator archives with bus/ask history',
     'persistent provenance, no blocking latch; direct lookup by hashed ask ID',
     'missing/invalid ask ID fails the loop report; failed local registration retries without another ask')
 row('loop_answers.py', '.answer.json|writer:receive|writer:deliver',
     'any consuming ANX answer reader receives a registered loop reply through the shared client',
-    'durable decision bus row with deterministic ID, then pending answer removed',
+    'durable decision bus row with deterministic ID, then pending answer removed; answer remains in correlation receipt for reminder context',
     'reconciler retries each sweep; external calls bounded by the bus command',
     'LOOP_ANSWER_PENDING retains payload; direct answer never becomes ambiguous or applies an automatic repair')
 row('loop_answers.py', 'reconcile/received-answers|*.json|writer:defer',

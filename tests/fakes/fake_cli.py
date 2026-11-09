@@ -21,7 +21,7 @@ if name == 'anx':
         elif flag != '--json':
             print('ANX contract: invalid global flag '+flag, file=sys.stderr)
             sys.exit(2)
-    path = tuple(tokens[:2]) if tokens[:1] in (['cards'], ['boards'], ['work'], ['bridge']) else tuple(tokens[:1])
+    path = tuple(tokens[:2]) if tokens[:1] in (['cards'], ['boards'], ['work'], ['bridge'], ['inbox']) else tuple(tokens[:1])
     # (positional count, required value flags, optional value flags, boolean flags)
     contracts = {
         ('cards', 'create'): (0, {'--board', '--handle', '--title', '--column'}, {'--body', '--body-file', '--request-key'}, set()),
@@ -36,7 +36,8 @@ if name == 'anx':
         ('context',): (1, set(), set(), set()),
         ('note',): (2, set(), {'--next', '--evidence', '--decided-by'}, {'--met'}),
         ('ask',): (1, {'--subject-ref', '--situation', '--impact', '--recommend', '--why', '--if-no-answer'},
-                   {'--alternative', '--details', '--evidence', '--by'}, {'--again'}),
+                   {'--alternative', '--details', '--evidence', '--by', '--supersedes'}, {'--again'}),
+        ('inbox', 'list'): (0, set(), {'--status', '--limit', '--cursor'}, {'--unread'}),
         **{('bridge', verb): (0, set(), set(), set()) for verb in ('status', 'install', 'add')},
     }
     if path in contracts:
@@ -90,6 +91,17 @@ for response in responses:
         sys.exit(response.get("exit", 0))
 if name == 'anx' and 'ask' in args and any('check=loop_failure' in arg for arg in args):
     result = {'ask_id': 'event:ask-' + str(len(Path(os.environ['FAKE_LOG']).read_text().splitlines()))}
+    if os.environ.get('FAKE_ANX_ASK_STATE'):
+        # Opt-in model of Decide's replacement semantics, exercised via real argv.
+        target = Path(os.environ['FAKE_ANX_ASK_STATE'])
+        asks = json.loads(target.read_text()) if target.exists() else {}
+        if '--supersedes' in args:
+            asks[args[args.index('--supersedes') + 1]]['status'] = 'superseded'
+        asks[result['ask_id']] = {'ask_id': result['ask_id'], 'status': 'open'}
+        target.write_text(json.dumps(asks))
+elif name == 'anx' and 'inbox' in args and 'list' in args and os.environ.get('FAKE_ANX_ASK_STATE'):
+    target = Path(os.environ['FAKE_ANX_ASK_STATE'])
+    result = {'items': [item for item in json.loads(target.read_text()).values() if item['status'] != 'superseded']}
 elif name == "anx" and "get" in args:
     result = {"card": {"id": "card-id", "handle": args[-1].removeprefix("card:")}}
     if args[-1] == 'card:loop-audit':

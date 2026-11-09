@@ -32,14 +32,23 @@ without `channel: "anx"` is delivered to Decide on the next invocation; it is no
 proof of human delivery. A successful cycle clears the entire escalation state,
 including an unsent ask. A stopped loop sends nothing until explicitly resumed.
 
-Asks use `--again` because continued failure is new evidence, even if an older ask
-is still open or answered. Delivery is at least once: a lost ANX response or a
+Asks use `--again` because continued failure is new evidence. Each reminder also
+uses `--supersedes event:<previous-ask>` to replace its predecessor, leaving one
+open ask for the streak. If that ask was answered, its answer appears in the new
+ask's details; known answer context carries forward to later reminders. Answers
+are retained locally after delivery. Before replacement, a read-only inbox lookup
+also checks for an answer not yet consumed locally, following at most ten pages
+of 200 asks. An unavailable or incomplete lookup leaves the reminder pending for
+retry rather than replacing a question without its context.
+Delivery is at least once: a lost ANX response or a
 crash before the local send receipt may duplicate an ask. Recovery clears local
 escalation state; it does not withdraw existing asks or apply a repair. The owner
 should disposition outdated asks in ANX.
 
 Returned ask IDs are journaled before send completion and indexed under
-`state/loop-asks/`, surviving loop recovery. Answers become decision rows for
+`state/loop-asks/`, surviving supersession and loop recovery. Both old and new ask
+IDs remain correlated, so a late answer to a superseded ask still routes once.
+Answers become decision rows for
 `escalation.internal_to`, falling back to `obligations.coordinator` and then
 `lead`. They do not automatically repair, pause, or resolve the loop. The shared
 ANX client preserves replies for every consuming reader, including the
