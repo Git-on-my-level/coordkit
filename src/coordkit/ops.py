@@ -192,7 +192,7 @@ _TOOLS = [
               dict(ROW_ARGS, **FILTER_ARGS, name=NAME_ARG,
                    before_id={'type': 'string', 'description': 'Return rows older than this existing bus id or an opaque next_cursor position key; omit on the first page. Use only one of before_id/cursor.'})),
     read_tool('topics', 'Topics with counts, latest sender/time, and recorded owner/lane, state slot and lease (null when absent).', PAGE_ARGS),
-    read_tool('agents_status', 'Registered roster plus every sender in the last 24h, newest activity and conservative listening/idle/retired/relay/human/unregistered status; labels include source and age in minutes.', PAGE_ARGS),
+    read_tool('agents_status', 'Manifest lanes, registered roster and senders in the last 24h, with listening status, private session/account identity, observed model versus launch model, and expiring state labels (source and age in minutes).', PAGE_ARGS),
     read_tool('lanes', 'Host-local running/recent agentctl executions and rollout train state; terse rows, newest activity first. Sources capped at 100 running + 100 recent executions and 100 train files.', PAGE_ARGS),
     read_tool('wait', 'Wait for the next actionable row addressed to a reader, in log order; excludes own posts and fyi. Never advances stored cursors. Omitted cursor starts at the current log end. At most four concurrent waits.',
               {'name': NAME_ARG,

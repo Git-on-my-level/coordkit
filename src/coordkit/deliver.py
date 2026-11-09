@@ -205,7 +205,7 @@ def deliver(manifest, payload, out=None):
         # A successful empty read also proves the hook is attached. Retain the session's
         # explicit transcript binding for listening(); do not manufacture a waiter lease.
         note = {'name': name, 'at': time.time(), 'via': 'hook', 'session_id': payload.get('session_id'),
-                'transcript_path': payload.get('transcript_path')}
+                'transcript_path': payload.get('transcript_path'), 'permission_mode': payload.get('permission_mode')}
         note_file = note_path(manifest, name)
         staged = note_file.with_suffix('.pending')
         # Prepare durable bytes before printing, but publish listening evidence only
@@ -220,6 +220,9 @@ def deliver(manifest, payload, out=None):
             staged.unlink(missing_ok=True)
         # Ignored rows can advance silently; actionable rows advance only after flush succeeds.
         write_json(cursor, {'file': file_identity, 'offset': offset})
+        # Optional metadata must never replay an already-flushed delivery on failure.
+        from .routing import refresh_identity
+        refresh_identity(manifest, name)
 
 
 def run_hook(manifest, stdin=None, out=None):

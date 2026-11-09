@@ -166,7 +166,9 @@ class DeliveryTests(DeliveryCase):
             stream.write(b'{"type":"user","content":"Your bus name is lead-a. ')
         self.incumbent_row('prefix', 'x', 'lead-a')
         start = time.monotonic()
-        self.assertIn('BUS ask prefix', self.run_hook(payload))
+        # Measure bounded transcript parsing separately from the optional 2s PID probe.
+        with patch('coordkit.routing.probe_identity', side_effect=lambda record: record):
+            self.assertIn('BUS ask prefix', self.run_hook(payload))
         self.assertLess(time.monotonic() - start, .3)
 
     def test_cold_cli_timing_large_log_and_tail_byte_offset(self):

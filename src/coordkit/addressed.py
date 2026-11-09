@@ -155,6 +155,29 @@ def listening(manifest, name, at=None, probe=None, rows=None, *, waiter_only=Fal
     evidence = activity_evidence(manifest, name, at)
     if evidence:
         return True, evidence
+    from .routing import waiter_evidence
+    waiting = waiter_evidence(manifest, name, at)
+    if waiting[0]:
+        return waiting
+    if rows is None:
+        from . import bus
+        rows = bus.read_path(manifest.paths.bus_log)
+    latest = None
+    for row in rows:
+        if row.get('frm') != name or row.get('copy_of') or row.get('question'):
+            continue
+        # Question adapters synthesize rows on behalf of blocked askers; those
+        # and relay-applied traffic cannot prove the sender is a local listener.
+        if str(row.get('origin', '')).startswith('relay:'):
+            continue
+        try:
+            posted = parse_ts(row['ts']).timestamp()
+        except (ValueError, TypeError, KeyError):
+            continue
+        if 0 <= at - posted <= seconds(cfg(manifest).activity_ttl):
+            latest = max(latest or posted, posted)
+    if latest is not None:
+        return True, f'posted {int(at - latest)}s ago'
     if lease and open_ids:
         return False, f'delivery_unconfirmed {",".join(open_ids[:3])}'
     if cfg(manifest).incumbent_waiters and name in (probe or PROBE)():

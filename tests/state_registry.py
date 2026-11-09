@@ -147,7 +147,7 @@ row('lifecycle.py', 'loops|STOP', 'read configured loop stop marker',
 
 # Addressed bus (briefs/addressed-bus.md section 8)
 row('addressed.py', 'addressed|state|leases|.json|.lock|writer:renew', 'question answer adapter records delivery confirmation', 'confirmation expires or an agent replies', 'lease_ttl without renewal, rearm_grace after a clean exit; SIGKILL leaves the heartbeat to go stale', 'send and sweep escalate recipient_deaf to the fallback and relay file')
-row('addressed.py', 'register.json', 'legacy register record', 'read-only compatibility', 'persistent roster entry, no blocking latch', 'its role vacancy is swept')
+row('addressed.py', 'register.json', 'first local post/wait/ack', 'explicit retire or manual removal', 'persistent roster entry, no blocking latch', 'deaf sweep as for any registered name')
 row('addressed.py', 'sweep.json|sweep.lock|state:seen|writer:sweep|writer:_sweep', 'first sweep (adoption baseline) / a finding is raised', 'pickup keys retained while open; other findings expire after 2x realert_after', 'one direct pickup per owner and clock', 'hourly digest; local owner wake')
 row('reconcile.py', 'state:obligation_seq', 'first alert on an obligation ladder', 'dropped when the obligation closes (no longer reported open)', 'bounded by open obligations', 'alerts keep unique ids after receipt pruning')
 row('lifecycle.py', 'sweep/stdout.log|sweep/stderr.log', 'up installs the addressed sweep job', 'launchd appends per run; down removes the job', 'log rotation is the host newsyslog policy', 'sweep findings reach the relay file and fallback rows')
@@ -226,7 +226,7 @@ row('mcp_install.py', 'mcp-service.json|mcp/stdout.log|mcp/stderr.log|writer:mai
 row('lifecycle.py', 'mcp-service.json', 'MCP installation receipt', 'explicit uninstall or down', 'persistent managed service', 'doctor loaded-job drift')
 row('selfupdate.py', 'mcp-service.json', 'registered managed MCP service', 'explicit uninstall', 'update only reconciles owned jobs', 'service manager failure restores active release pointer')
 row('identity.py', 'state|questions|sessions.json', 'explicit session binding lookup', 'read-only snapshot', 'bounded transcript prefix for delivery', 'unknown identity produces no delivery')
-row('routing.py', 'state|addressed|register.json', 'read-only roster routing', 'read-only snapshot and advisory lock release', 'kernel releases locks on exit', 'hook fails open on malformed binding')
+row('routing.py', 'state|addressed|register.json|register.lock|hooks|sessions.json|projects|.json|.jsonl|writer:store_identity', 'first local post/wait/ack or registered hook heartbeat', 'explicit retire or manual removal; locks release', 'persistent identity; refresh throttled by heartbeat_every', 'deaf sweep as for any registered name; hook fails open')
 row('state.py', 'writer:write_json', 'atomic JSON replacement', 'rename or failed-temp cleanup', 'bounded caller operation; new files private', 'caller receives write or serialization failure')
 row('state.py', 'writer:_replace_json|writer:update_json', 'hashed settings transformation under sibling lock', 'replace and receipt finalization or one re-merge then conflict', 'two attempts; kernel releases the lock on exit', 'settings_update_conflict preserves the latest edit')
 row('hooks.py', 'writer:prepare|writer:finish|writer:finish_recovery', 'settings transaction saves migration intent', 'receipt finalized under the same settings lock', 'one re-merge before explicit conflict', 'owned-entry or receipt conflict leaves concurrent settings intact')

@@ -177,3 +177,43 @@ def doctor_warnings(manifest, at=None):
         elif drift(lane, usage):
             warnings.append(f'lane={lane.name} intended={lane.model} actual={",".join(drift(lane, usage))}')
     return warnings
+
+
+MODEL_TAIL_BYTES = 128 * 1024
+
+
+def observed_model(sources):
+    """Last assistant model in a bounded tail of the newest transcript; no content retained."""
+    candidates = []
+    for source in sources:
+        for path in jsonl_paths(source):
+            try:
+                candidates.append((path.stat().st_mtime, str(path), path))
+            except OSError:
+                continue
+    if not candidates:
+        return None, None
+    path = max(candidates)[2]
+    try:
+        with path.open('rb') as stream:
+            stream.seek(0, 2)
+            offset = max(0, stream.tell() - MODEL_TAIL_BYTES)
+            stream.seek(offset)
+            data = stream.read(MODEL_TAIL_BYTES)
+        lines = data.splitlines()
+        if offset:
+            lines = lines[1:]  # a partial leading JSON row is never evidence
+        for line in reversed(lines):
+            try:
+                row = json.loads(line)
+            except (ValueError, UnicodeError):
+                continue
+            if not isinstance(row, dict) or row.get('type') != 'assistant':
+                continue
+            message = row.get('message')
+            if isinstance(message, dict) and isinstance(message.get('model'), str) and message['model']:
+                at = timestamp(row.get('timestamp'))
+                return message['model'], at.isoformat() if at else None
+    except OSError:
+        pass
+    return None, None

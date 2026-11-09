@@ -415,7 +415,7 @@ def ref_file(manifest, row, full=False):
     """Trust only manifest-derived roots; resolve the candidate to reject traversal and symlink escapes.
 
     The bus caps row text and spills the rest to a refs file named in a `[full: PATH]` marker. full=true (or a
-    row with no ref) reads that file, so remote readers see what was cut (11-07: lead2's 37665d handoff)."""
+    row with no ref) reads that file, so remote readers see what was cut."""
     ref = row.get('ref')
     spill = SPILL.search(str(row.get('text') or ''))
     if spill and (full or not ref):
@@ -552,6 +552,8 @@ def agent_rows(manifest, rows, args, at):
     # Legacy [[agents]] labels remain valid roster names too.
     for agent in manifest.agents:
         registry.setdefault(agent.label, {'label': agent.label, 'description': agent.actor, 'source': 'manifest'})
+    for lane in manifest.lanes:
+        registry.setdefault(lane.name, {'source': 'lane'})
     activity = {}
     for row in rows:
         name = row.get('frm')
@@ -572,7 +574,7 @@ def agent_rows(manifest, rows, args, at):
         summary = activity.get(name, {})
         last_post, last_state, last_reply = (summary.get(k) for k in ('last_post', 'last_state', 'last_reply'))
         registered = name in registry or name in roles
-        live, why = addressed.listening(manifest, name, rows=rows) if registered else (False, 'no roster entry')
+        live, why = addressed.listening(manifest, name, at=at, rows=rows) if registered else (False, 'no roster entry')
         human = addressed.is_human(manifest, name)
         from .wake import retired
         retirement = retired(manifest, name)
@@ -595,6 +597,22 @@ def agent_rows(manifest, rows, args, at):
         if not label and not description and last_state:
             label, source, label_at = last_state.get('text'), 'bus state', stamp(last_state)
         label_age = max(0, int((at - label_at) // 60)) if label_at and source != 'manifest' else None
+        label_expired = bool(label_at and source != 'manifest' and at - label_at > addressed.seconds(manifest.addressed.label_ttl))
+        if label_expired:
+            label = None
+        from . import routing, usage
+        identity = routing.roster_identity(manifest, name)
+        lane = next((lane for lane in manifest.lanes if lane.name == name), None)
+        model, model_at = usage.observed_model(usage.transcript_sources(lane) if lane else
+                                               routing.transcript_paths(manifest, name, identity))
+        config_dir = identity.get('config_dir')
+        identity_fields = {key: clip(identity.get(key), 4096) or None for key in
+                           ('config_dir', 'session_id', 'transcript_path', 'permission_mode')}
+        identity_fields.update(account=clip(Path(config_dir).name, FIELD) if config_dir else None,
+                               pid=routing.identity_pid(identity), identity_refreshed_at=identity.get('refreshed_at'),
+                               model=clip(model, 200) or None, model_observed_at=utc(model_at) if model_at else None,
+                               model_launch=clip(lane.model, 200) if lane else None,
+                               model_drift=not usage.model_matches(lane.model, model) if lane and model else None)
         state_text, cut = body_view(last_state.get('text') if last_state else '')
         sites = sources.get(name, set()) | ({manifest.relay.site} if manifest.relay and name not in remote else set())
         return dict(name=name, sites=sorted(sites), role=clip(spec.get('role'), FIELD), fallback=clip(spec.get('fallback'), FIELD),
@@ -604,7 +622,8 @@ def agent_rows(manifest, rows, args, at):
                           last_state=state_text if last_state else None, last_state_truncated=cut,
                           last_state_at=utc(last_state['ts']) if last_state else None,
                           label=body_view(label)[0] if label else None, description=body_view(description)[0] if description else None,
-                          label_source=source, label_age_minutes=label_age, label_stale=label_age is not None and label_age > 720)
+                          label_source=source, label_age_minutes=label_age, label_stale=label_age is not None and label_age > 720,
+                          label_expired=label_expired, **identity_fields)
     result = page([{'name': name} for name in names], 'name', args, project=project)
     result['agents'] = result.pop('rows')
     # Role entries are paged together with their roster names so none are silently omitted.

@@ -699,6 +699,8 @@ def dispatch(o):
         # Addressed escalation runs before the ANX projection: a mirror failure (exit 1) must never
         # stop a deaf/vacant alert from reaching the fallback, relay file or pager.
         append(recs, project=not target)
+        from .routing import write_register
+        write_register(CONFIG, o.frm, "post")
         global LAST_POST
         LAST_POST = (rec, addressed.after_post(CONFIG, rec, role) if target else None)
         if target:
@@ -715,6 +717,8 @@ def dispatch(o):
             append([dict(ts=now().isoformat(timespec='seconds'), id=secrets.token_hex(3), origin='coordkit', frm=o.frm, to=work['frm'],
                          topic=work.get('topic', 'general'), kind='ack', re=o.id, owner=owner,
                          text=o.note or (f'picked up by {owner}' if owner == o.frm else f'reassigned to {owner}'))])
+            from .routing import write_register
+            write_register(CONFIG, o.frm, 'ack')
             print(f'acked {o.id} owner={owner}')
             return
         ruling = next((r for r in rows if r.get('id') == o.id and r.get('kind') == 'ruling'), None)
@@ -729,6 +733,8 @@ def dispatch(o):
         append([dict(ts=now().isoformat(timespec='seconds'), id=secrets.token_hex(3), origin='coordkit', frm=o.frm, to=ruling['frm'],
                      topic=ruling.get('topic', 'general'), kind='ack', re=o.id,
                      text=(o.note or 'ack') + ('' if ruling.get('owner') == o.frm else f' [forced; owner {ruling.get("owner")}]'))])
+        from .routing import write_register
+        write_register(CONFIG, o.frm, 'ack')
         print(f'acked {o.id} ({age_minutes(ruling)} min after the ruling)')
     elif o.cmd == 'open-rulings':
         rows = [r for r in open_rulings(read()) if age_minutes(r) >= o.min_age]
@@ -815,6 +821,8 @@ def dispatch(o):
     elif o.cmd == 'wait':
         if not o.to:
             print('refused: bus wait needs --to LANE, --signal NAME or --subject SUBJECT', file=sys.stderr); sys.exit(2)
+        from .routing import write_register
+        write_register(CONFIG, o.to, 'wait')
         kinds = {k.strip() for k in o.kinds.split(',') if k.strip()}
         start = get_cursor(o.to, 'wait', None)
         if start is None: start = read_from(10 ** 12)[0]  # first wait: only messages from now on

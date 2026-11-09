@@ -828,7 +828,7 @@ class McpReadBatchTests(McpCase):
         self.lease('lead-a')
         self.row('active', frm='lead-a', ago=20)
         self.row('reply', frm='lead-a', re='active', ago=10)
-        self.row('retired', frm='worker-ui', kind='state', text='stopped per roster-1105', ago=50)
+        self.row('retired', frm='worker-ui', kind='state', text='stopped per roster-1105', ago=1000)
         self.row('old-state', frm='coordinator', kind='state', text='retired yesterday', ago=100)
         self.row('new-state', frm='coordinator', kind='state', text='RUNNING: stopped worker has recovered', ago=10)
         self.row('recent', frm='observer', re='active', ago=30)
@@ -840,7 +840,7 @@ class McpReadBatchTests(McpCase):
         self.assertEqual(agents['worker-ui']['status'], 'retired')
         self.assertEqual(agents['worker-ui']['last_state'], 'stopped per roster-1105')
         self.assertEqual(agents['relay']['status'], 'relay/human')
-        self.assertEqual(agents['coordinator']['status'], 'idle')
+        self.assertEqual(agents['coordinator']['status'], 'listening')
         self.assertEqual(agents['observer']['status'], 'unregistered')
         self.assertIsNotNone(agents['observer']['last_post_at'])
         self.assertNotIn('gone', agents)
@@ -851,8 +851,8 @@ class McpReadBatchTests(McpCase):
             self.row('resume-' + name, frm=name, kind='msg', text='Back at work', ago=10)
         agents = {r['name']: r for r in self.read('agents_status')['agents']}
         for name in ('lead-a', 'worker-ui'):
-            self.assertEqual(agents[name]['status'], 'idle')
-            self.assertFalse(agents[name]['listening'])
+            self.assertEqual(agents[name]['status'], 'listening')
+            self.assertTrue(agents[name]['listening'])
             self.assertIsNotNone(agents[name]['last_state'], 'keep the prior self-report visible')
 
     def test_roster_live_lease_overrides_retirement_without_new_state(self):
@@ -864,7 +864,7 @@ class McpReadBatchTests(McpCase):
         self.assertEqual(agent['last_state'], 'stopped per roster')
 
     def test_roster_expired_lease_and_other_posters_do_not_override_retirement(self):
-        self.row('stopped', frm='worker-ui', kind='state', text='retired', ago=100)
+        self.row('stopped', frm='worker-ui', kind='state', text='retired', ago=1000)
         self.row('someone-else', frm='lead-a', text='worker-ui is working', ago=10)
         self.lease('worker-ui', heartbeat_ago=1000)
         agent = next(r for r in self.read('agents_status')['agents'] if r['name'] == 'worker-ui')

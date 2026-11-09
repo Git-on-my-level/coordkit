@@ -1,4 +1,4 @@
-"""Read-only roster routing and advisory locks shared by hook delivery."""
+"""Roster routing, private runtime identity, and advisory locks."""
 import contextlib
 import fcntl
 from .state import read_json
@@ -13,7 +13,7 @@ def home(manifest):
 
 
 def registry(manifest):
-    """Manifest agents plus existing runtime registrations (read-only compatibility)."""
+    """Manifest agents plus runtime registrations; manifest policy stays authoritative."""
     out = {name: dict(spec, name=name, source='manifest') for name, spec in cfg(manifest).agents.items()}
     for name, spec in (read_json(home(manifest)/'register.json', {}) or {}).items():
         out.setdefault(name, dict(spec, name=name, source='register'))
@@ -81,3 +81,183 @@ def listening(manifest, name, *args, **kwargs):
         return waiter_evidence(manifest, name, *args, **kwargs)
     from .addressed import listening as observe
     return observe(manifest, name, *args, **kwargs)
+
+
+# Host metadata belongs only in local state and the authenticated roster projection.
+IDENTITY_TEXT = {'config_dir', 'session_id', 'transcript_path', 'pid_started', 'permission_mode', 'cwd_hint'}
+IDENTITY_KEYS = IDENTITY_TEXT | {'pid', 'refreshed_at'}
+
+
+def clean_identity(value):
+    import math
+    out = {k: v[:4096] for k, v in value.items() if k in IDENTITY_TEXT and isinstance(v, str) and v}
+    if type(value.get('pid')) is int and value['pid'] > 0 and out.get('pid_started'):
+        out['pid'] = value['pid']
+    if type(value.get('refreshed_at')) in (int, float) and math.isfinite(value['refreshed_at']):
+        out['refreshed_at'] = value['refreshed_at']
+    return out
+
+
+def internal_name(manifest, name):
+    import re
+    return (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name)
+            or name in {'all', 'coordkit', 'lead', *cfg(manifest).internal_senders,
+                        *manifest.escalation.internal_senders})
+
+
+def identity_sources(manifest, name, env=None, *, stored=None):
+    """Merge explicit bindings, lowest priority first; never persist arbitrary env."""
+    import os
+    from pathlib import Path
+    from .identity import home as questions_home
+    from .state import name_key
+    from .usage import transcript_dir
+    env = os.environ if env is None else env
+    sessions = read_json(questions_home(manifest)/'sessions.json', {}) or {}
+    bindings = [dict(binding, session_id=session) for session, binding in sessions.items()
+                if isinstance(binding, dict) and binding.get('name') == name]
+    # Multiple sessions for one name are not an unambiguous identity.
+    binding = bindings[0] if len(bindings) == 1 else {}
+    if binding and not binding.get('transcript_path'):
+        candidates = transcript_paths(manifest, name)
+        if len(candidates) == 1:
+            binding['transcript_path'] = str(next(iter(candidates)))
+    post = {k: env.get(v) for k, v in (('config_dir', 'CLAUDE_CONFIG_DIR'),
+                                     ('session_id', 'CLAUDE_CODE_SESSION_ID'))}
+    cwd = os.getcwd()
+    matching = [lane for lane in manifest.lanes if str(Path(lane.cwd).expanduser().resolve()) == cwd]
+    if any(lane.name == name for lane in matching):
+        post['cwd_hint'] = cwd
+    note = read_json(home(manifest)/'hooks'/f'{name_key(name)}.json', {}) or {}
+    if note.get('name') != name:
+        note = {}
+    lane = next((lane for lane in manifest.lanes if lane.name == name), None)
+    declared = dict(config_dir=lane.config_dir, cwd_hint=lane.cwd, session_id=lane.session_id) if lane else {}
+    if lane and lane.session_id:
+        declared['transcript_path'] = str(transcript_dir(lane)/f'{lane.session_id}.jsonl')
+    merged = {}
+    for source in (binding, stored or {}, post, note, declared):
+        source = clean_identity(source)
+        if not source.get('config_dir') and source.get('transcript_path'):
+            for parent in Path(source['transcript_path']).expanduser().parents:
+                if parent.name == 'projects':
+                    source['config_dir'] = str(parent.parent)
+                    break
+        # Do not attach a lower-priority session's path/PID to a new session.
+        if source.get('session_id') and merged.get('session_id') != source['session_id']:
+            for key in ('config_dir', 'transcript_path', 'pid', 'pid_started', 'permission_mode', 'cwd_hint'):
+                merged.pop(key, None)
+        if any(source.get(key) and source[key] != merged.get(key) for key in ('config_dir', 'transcript_path')):
+            merged.pop('pid', None)
+            merged.pop('pid_started', None)
+        merged.update(source)
+    merged.pop('refreshed_at', None)
+    return clean_identity(merged)
+
+
+def transcript_paths(manifest, name, identity=None):
+    """Exact hook/session paths used by non-lane model observations."""
+    from pathlib import Path
+    from .identity import home as questions_home
+    from .state import name_key
+    paths = set()
+    note = read_json(home(manifest)/'hooks'/f'{name_key(name)}.json', {}) or {}
+    sessions = read_json(questions_home(manifest)/'sessions.json', {}) or {}
+    for record in [identity or {}, note if note.get('name') == name else {},
+                   *(b for b in sessions.values() if isinstance(b, dict) and b.get('name') == name)]:
+        if isinstance(record.get('transcript_path'), str) and record['transcript_path']:
+            paths.add(Path(record['transcript_path']).expanduser())
+    import re
+    for session, binding in sessions.items():
+        if isinstance(binding, dict) and binding.get('name') == name and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', session):
+            for directory in manifest.questions.config_dirs:
+                paths.update((Path(directory).expanduser()/'projects').glob(f'*/{session}.jsonl'))
+    return paths
+
+
+def identity_pid(record):
+    """Reject missing/dead/reused PIDs using their captured process start time."""
+    import subprocess
+    from .adapters import claude_resume
+    try:
+        if record.get('pid') and record.get('pid_started') == claude_resume.start_time(record['pid']):
+            return record['pid']
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def probe_identity(record):
+    import subprocess
+    from .adapters import claude_resume
+    from .process import ToolError
+    out = dict(record)
+    for key in ('pid', 'pid_started'):
+        out.pop(key, None)
+    from pathlib import Path
+    if not out.get('transcript_path') or not Path(out['transcript_path']).is_file():
+        return out
+    try:
+        result = claude_resume.probe([claude_resume.lsof_binary(), '-nP', '-t', '--', out['transcript_path']])
+        pids = result.stdout.split()
+        if result.returncode == 0 and not result.stderr.strip() and pids and all(p.isdecimal() for p in pids):
+            pid = min(map(int, pids))
+            started = claude_resume.start_time(pid)
+            if started:
+                out.update(pid=pid, pid_started=started)
+    except (OSError, subprocess.SubprocessError, ToolError):
+        pass
+    return out
+
+
+def store_identity(manifest, name, via, identity, *, register=False):
+    import time
+    from .state import update_json
+    at = time.time()
+    with locked(home(manifest)/'register.lock'):
+        def transform(current):
+            entry = current.setdefault(name, {})
+            if register:
+                entry.setdefault('registered_at', at)
+                entry.setdefault('registered_by', via)
+            entry['identity'] = clean_identity(dict(identity, refreshed_at=at))
+            entry['refreshed_at'] = at
+            return current
+        return update_json(home(manifest)/'register.json', transform)[name]
+
+
+def write_register(manifest, name, via, identity=None):
+    """First local post/ack/wait makes a name routable; manifest policy wins."""
+    if internal_name(manifest, name) or name in cfg(manifest).agents:
+        return
+    previous = ((read_json(home(manifest)/'register.json', {}) or {}).get(name) or {}).get('identity') or {}
+    record = identity_sources(manifest, name, stored=previous) if identity is None else clean_identity(identity)
+    return store_identity(manifest, name, via, probe_identity(record), register=True)
+
+
+def refresh_identity(manifest, name):
+    """Hook heartbeat, bounded and throttled; does not register never-seen names."""
+    import time
+    from .manifest import duration
+    if internal_name(manifest, name):
+        return
+    entry = (read_json(home(manifest)/'register.json', {}) or {}).get(name)
+    if entry is None and name not in cfg(manifest).agents:
+        return
+    previous = clean_identity((entry or {}).get('identity') or {})
+    record = identity_sources(manifest, name, stored=previous)
+    comparable = {k: v for k, v in previous.items() if k not in {'pid', 'pid_started', 'refreshed_at'}}
+    changed = {k: v for k, v in record.items() if k not in {'pid', 'pid_started'}} != comparable
+    if not changed or 0 <= time.time() - previous.get('refreshed_at', 0) < duration(cfg(manifest).heartbeat_every):
+        return
+    return store_identity(manifest, name, 'hook', probe_identity(record))
+
+
+def roster_identity(manifest, name):
+    """Read-only projection: stored heartbeat plus authoritative manifest identity."""
+    record = clean_identity(((read_json(home(manifest)/'register.json', {}) or {}).get(name) or {}).get('identity') or {})
+    # Reading the roster never captures the MCP server's environment as lane identity.
+    observed = identity_sources(manifest, name, env={}, stored=record)
+    if record.get('refreshed_at') is not None:
+        observed['refreshed_at'] = record['refreshed_at']
+    return observed
