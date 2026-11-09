@@ -76,7 +76,7 @@ class LoopEscalationTests(FakeCase):
     def test_legacy_agent_only_sent_receipt_is_delivered_to_decide(self):
         self.record_failure(1000)
         old = read_json(self.state/'escalation.json')
-        for key in ('channel', 'sent_count', 'sent_at', 'next_at'):
+        for key in ('channel', 'sent_count', 'sent_at', 'next_at', 'ask_id'):
             old.pop(key)
         write_json(self.state/'escalation.json', old)
         with patch.object(loop.time, 'time', return_value=1001):

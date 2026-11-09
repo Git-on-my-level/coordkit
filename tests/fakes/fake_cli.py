@@ -88,7 +88,9 @@ for response in responses:
         print(response.get("stdout", json.dumps(payload)))
         print(response.get("stderr", ""), file=sys.stderr)
         sys.exit(response.get("exit", 0))
-if name == "anx" and "get" in args:
+if name == 'anx' and 'ask' in args and any('check=loop_failure' in arg for arg in args):
+    result = {'ask_id': 'event:ask-' + str(len(Path(os.environ['FAKE_LOG']).read_text().splitlines()))}
+elif name == "anx" and "get" in args:
     result = {"card": {"id": "card-id", "handle": args[-1].removeprefix("card:")}}
     if args[-1] == 'card:loop-audit':
         result['card'].update(board_ref='board:ck-sample',cadence={

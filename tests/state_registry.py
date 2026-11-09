@@ -89,6 +89,21 @@ row('loop.py', 'escalation.json|writer:_retry_escalation', 'failure threshold; j
     'any successful cycle clears the streak and pending/sent report under result.lock',
     'retry unsent next cycle; sent_at/next_at/sent_count re-arm at failure_realert_intervals, last interval repeats',
     'direct ANX Decide ask on loop card; legacy agent-only sent receipts are delivered immediately')
+row('loop_answers.py', 'state/loop-asks|.json|writer:remember',
+    'successful direct loop ask returns its ID, journaled before marking send complete',
+    'small immutable correlation receipts survive recovery; operator archives with bus/ask history',
+    'persistent provenance, no blocking latch; direct lookup by hashed ask ID',
+    'missing/invalid ask ID fails the loop report; failed local registration retries without another ask')
+row('loop_answers.py', '.answer.json|writer:receive|writer:deliver',
+    'either consuming ANX answer reader receives a registered loop reply',
+    'durable decision bus row with deterministic ID, then pending answer removed',
+    'reconciler retries each sweep; external calls bounded by the bus command',
+    'LOOP_ANSWER_PENDING retains payload; direct answer never becomes ambiguous or applies an automatic repair')
+row('loop_answers.py', 'reconcile/received-answers|*.json|writer:defer',
+    'question sweep consumes a reply from the shared ANX stream, before routing it',
+    'reconciler durably merges into answers.json then unlinks the received file',
+    'next reconciliation; immutable ask IDs dedupe duplicate stream results',
+    'unmatched replies retain normal answer_max_age handling; producer-registration races do not discard replies')
 row('loop.py', 'pending.json|writer:_cycle', 'extract completed before publication', 'receipt/checkpoint complete then unlink', 'next bounded cycle; loop.max_age', 'failure threshold ask')
 row('loop.py', 'offsets|.json|plan.json|req', 'auditor request / transcript checkpoint', 'commit checkpoint on success; archive evidence', 'one cycle max_age; archive retained', 'cycle failure ask')
 row('loop.py', '.plist|writer:install', 'stage plist', 'up apply or down', 'persistent staged configuration, no latch', 'doctor drift')

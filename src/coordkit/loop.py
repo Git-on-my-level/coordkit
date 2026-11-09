@@ -14,7 +14,7 @@ import time
 import sys
 import uuid
 
-from . import auditor, briefs, bus
+from . import auditor, briefs, bus, loop_answers
 from .actl import AgentctlClient
 from .anxcli import AnxClient
 from .state import read_json, write_json
@@ -186,7 +186,7 @@ def record_failure(manifest, name, settings, handle, state, detail, cycle=None, 
             # Legacy sent receipts only reached an agent inbox. Deliver to Decide immediately.
             legacy = report and report.get('sent') and report.get('channel') != 'anx'
             if not report or legacy or (report.get('sent') and time.time() >= report['next_at']):
-                report = {'sent': False, 'channel': 'anx',
+                report = {'sent': False, 'channel': 'anx', 'card': f'card:{handle}',
                           'sent_count': report.get('sent_count', 0) if report and not legacy else 0,
                           'cycle': cycle, 'error_file': str(error_file), 'ask': {
                     'situation': f'Loop {name} has failed {failures} consecutive cycles: {detail}',
@@ -214,14 +214,25 @@ def _retry_escalation(manifest, name, handle, state):
     if not report or (report.get('sent') and report.get('channel') == 'anx'):
         return
     try:
-        card = f'card:{handle}'
+        card = report.get('card') or f'card:{handle}'
         brief = briefs.machine('loop_failure', subject=briefs.subject_words(card), **report['ask'],
             evidence=briefs.pr_evidence(manifest, *report['ask'].values()),
             details=f"Cycle: {report['cycle']}\nEvidence: {report['error_file']}",
             if_no_answer='The loop keeps retrying and reports again while failures continue; no repair is applied automatically.')
         # Bypass the failing bus/mirror and deaf-exempt agent digests. New failure evidence
         # warrants a fresh Decide ask even if the previous question is open or answered.
-        AnxClient(manifest).ask(card, brief, again=True)
+        if not report.get('ask_id'):
+            result = AnxClient(manifest).ask(card, brief, again=True)
+            result = result.get('body', result) if isinstance(result, dict) else {}
+            result = result if isinstance(result, dict) else {}
+            ask_id = result.get('ask_id') or result.get('id') or result.get('event_ref')
+            if not isinstance(ask_id, str) or not re.fullmatch(r'(?:event:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', ask_id):
+                raise ToolError('anx', 6, 'loop ask response missing a valid ask_id', 'protocol_error')
+            report['ask_id'] = loop_answers.reference(ask_id)
+            write_json(path, report)
+        # Keep correlation beyond cycle recovery, and retry local registration without
+        # creating another remote ask if only this local write failed.
+        loop_answers.remember(manifest, report['ask_id'], card, name, report['cycle'])
         count = report.get('sent_count', 0) + 1
         intervals = config(manifest, name)[0].failure_realert_intervals
         report['sent'] = True

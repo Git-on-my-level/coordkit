@@ -1070,7 +1070,7 @@ def relay_anx_answer(manifest, record, answer):
 
 
 def anx_answers(manifest):
-    """{ask id: answer} newly available from anx (read-only await)."""
+    """{ask id: answer} from the shared stream, retained before routing to an owner."""
     from .anxcli import AnxClient
     from .process import ToolError
     try:
@@ -1079,6 +1079,12 @@ def anx_answers(manifest):
         return {}
     out = {}
     for item in (result or {}).get('answers', []):
+        # This shares a consuming answer stream with reconciliation. Preserve and
+        # route loop answers rather than silently discarding another producer's reply.
+        from . import loop_answers
+        loop_answers.defer(manifest, item)
+        if loop_answers.receive(manifest, item):
+            continue
         for key in ('ask_id', 'event_ref', 'id'):
             if item.get(key):
                 out[item[key]] = item.get('answer') or item

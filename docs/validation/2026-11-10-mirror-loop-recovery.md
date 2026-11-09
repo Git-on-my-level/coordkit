@@ -25,14 +25,19 @@ access was performed.
   reproduce against the earlier implementation and pass after correction.
 - Recovery clears sent and unsent receipts; STOP suppresses reminders. PRs named
   in failures retain their evidence links for ANX authoring lint.
+- Direct ask IDs survive loop recovery. Both shared answer consumers retain and
+  relay human replies, including a reply arriving before producer registration.
+  Failed bus delivery and failed handoff merging retain the answer for retry;
+  unrelated producer answers are preserved. Replies never automatically pause
+  or resolve the loop.
 
 ## Completed local checks
 
 | Check | Result |
 | --- | --- |
-| Python 3.11.15 focused unit tests | PASS: 91 tests |
+| Python 3.11.15 focused unit tests, including shared answer integration | PASS: 194 tests |
 | Python 3.12.13 full discovery with CI's explicit 1.0-second cold-start budget, before the two final review fixes | PASS: 978 tests |
-| Python 3.12.13 focused loop/contract/review tests after those fixes | PASS: 57 tests |
+| Python 3.12.13 focused loop/contract/review tests before shared answer integration | PASS: 57 tests |
 | Negative controls against the earlier failure handler | PASS: both new regressions fail as expected |
 | Python 3.12.13 compileall | PASS |
 | Worker protocol tests | PASS: 4 tests |
@@ -59,4 +64,5 @@ cursor, hold request keys and payloads. The existing note CLI has no request-key
 flag, so mixed-backlog replay is not exactly once across uncertain remote
 outcomes. Inspect the affected card before retrying an uncertain note, and do
 not rewind over completed rows. Recovery does not automatically retire earlier
-Decide asks or interpret their answers.
+Decide asks. Answers are relayed to the configured agent without automatic
+repair, pause, or card resolution.

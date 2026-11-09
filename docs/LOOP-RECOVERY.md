@@ -35,9 +35,20 @@ including an unsent ask. A stopped loop sends nothing until explicitly resumed.
 Asks use `--again` because continued failure is new evidence, even if an older ask
 is still open or answered. Delivery is at least once: a lost ANX response or a
 crash before the local send receipt may duplicate an ask. Recovery clears local
-escalation state; it does not withdraw existing asks, interpret a human answer,
-or apply a repair. The owner should disposition outdated asks in ANX. Normal
-answer collection remains the reconciler's responsibility.
+escalation state; it does not withdraw existing asks or apply a repair. The owner
+should disposition outdated asks in ANX.
+
+Returned ask IDs are journaled before send completion and indexed under
+`state/loop-asks/`, surviving loop recovery. Answers become decision rows for
+`escalation.internal_to`, falling back to `obligations.coordinator` and then
+`lead`. They do not automatically repair, pause, or resolve the loop. Both ANX
+answer consumers preserve replies: the question reader durably hands consumed
+replies to `reconcile/received-answers/`, so a reply arriving before producer
+registration can still be correlated. Reconciliation merges those files into
+its pending answers before removing them. A failed decision relay retains a
+separate pending answer and retries without another remote delivery; stable
+bus IDs prevent duplicate decision rows. Small ask-ID index receipts remain as
+provenance; archive them only with the corresponding ask and bus history.
 
 ## Replay a stalled mirror after installing a reviewed fix
 
