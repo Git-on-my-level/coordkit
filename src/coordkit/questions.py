@@ -1036,7 +1036,16 @@ def close(manifest, record, by, text, answer_id=None):
     sweep retries delivery (the asker's re-armed waiter also picks up the decision row)."""
     def accept(records):
         current = records.get(record['qid'])
-        if current is None or current['state'] not in ('open', 'escalated'):
+        if current is None:
+            return None
+        if current['state'] == 'answered':
+            # A bus reply may already be projected while its normal delivery
+            # is pending. Resume that same settlement without replacing it.
+            if (current.get('answered_by') == by and current.get('answer') == text[:500]
+                    and current.get('answer_id') == answer_id):
+                return dict(current)
+            return None
+        if current['state'] not in ('open', 'escalated'):
             return None
         current.update(state='answered', answered_by=by, answer=text[:500], answer_id=answer_id,
                        answered_at=now(), claim=None)
