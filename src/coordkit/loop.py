@@ -14,7 +14,7 @@ import time
 import sys
 import uuid
 
-from . import auditor, bus, escalation
+from . import auditor, briefs, bus
 from .actl import AgentctlClient
 from .anxcli import AnxClient
 from .state import read_json, write_json
@@ -159,8 +159,7 @@ def _cycle(manifest, name, settings, handle, state):
         pending_path.unlink()
         with (state/'result.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            if read_json(state/'escalation.json', {}).get('sent'):
-                (state/'escalation.json').unlink()
+            (state/'escalation.json').unlink(missing_ok=True)
             failures_path.write_text('0\n')
         print(f'CYCLE_OK {name} {cycle} findings={findings} items={len(items)}')
         return 0
@@ -182,28 +181,52 @@ def record_failure(manifest, name, settings, handle, state, detail, cycle=None, 
         failures += 1
         failures_path.write_text(str(failures)+'\n')
         print(f'CYCLE_FAIL {name} {cycle} consecutive={failures}: {detail}', file=sys.stderr)
-        if failures >= settings.fail_report_after and not read_json(state/'escalation.json', {}).get('sent'):
+        if failures >= settings.fail_report_after:
             report = read_json(state/'escalation.json')
-            if not report:
-                report = {'sent': False, 'cycle': cycle, 'error_file': str(error_file), 'ask': {
+            # Legacy sent receipts only reached an agent inbox. Deliver to Decide immediately.
+            legacy = report and report.get('channel') != 'anx'
+            if not report or legacy or (report.get('sent') and time.time() >= report['next_at']):
+                report = {'sent': False, 'channel': 'anx',
+                          'sent_count': report.get('sent_count', 0) if report and not legacy else 0,
+                          'cycle': cycle, 'error_file': str(error_file), 'ask': {
                     'situation': f'Loop {name} has failed {failures} consecutive cycles: {detail}',
-                    'impact': 'Auditor findings and cadence receipts are missing; follow-ups can be dropped.',
+                    'impact': ('Scheduled checks are failing to complete reliably, so follow-ups can be missed '
+                               'and completion updates may be absent. Repeated retries have not restored reporting; '
+                               'someone needs to investigate the error and restore the loop or explicitly pause its checks.'),
                     'recommend': f'Inspect {error_file} and restore the loop before its next scheduled cycle.',
                     'why': 'The consecutive-failure threshold was reached; automated retries have not recovered it.'}}
                 write_json(state/'escalation.json', report)
-            retry_escalation(manifest, name, handle, state)
+    retry_escalation(manifest, name, handle, state)
 
 
 def retry_escalation(manifest, name, handle, state):
+    # A skipped invocation can race the active cycle; the same lock guards reset and send.
+    with (state/'result.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _retry_escalation(manifest, name, handle, state)
+
+
+def _retry_escalation(manifest, name, handle, state):
     path = state/'escalation.json'
     report = read_json(path)
-    if not report or report.get('sent'):
+    if not report or (report.get('sent') and report.get('channel') == 'anx'):
         return
     try:
-        _post(manifest, handle, f'Loop {name}: consecutive cycle failures; see evidence.',
-              Path(report['error_file']), no_mirror=True, publication_id='loop-failure-'+report['cycle'])
-        escalation.ask(manifest, f'card:{handle}', kind='loop_failure', **report['ask'])
+        card = f'card:{handle}'
+        brief = briefs.machine('loop_failure', subject=briefs.subject_words(card), **report['ask'],
+            evidence=briefs.pr_evidence(manifest, *report['ask'].values()),
+            details=f"Cycle: {report['cycle']}\nEvidence: {report['error_file']}",
+            if_no_answer='The loop keeps retrying and reports again while failures continue; no repair is applied automatically.')
+        # Bypass the failing bus/mirror and deaf-exempt agent digests. New failure evidence
+        # warrants a fresh Decide ask even if the previous question is open or answered.
+        AnxClient(manifest).ask(card, brief, again=True)
+        count = report.get('sent_count', 0) + 1
+        intervals = config(manifest, name)[0].failure_realert_intervals
         report['sent'] = True
+        report['channel'] = 'anx'
+        report['sent_count'] = count
+        report['sent_at'] = time.time()
+        report['next_at'] = report['sent_at'] + duration(intervals[min(count - 1, len(intervals) - 1)])
         write_json(path, report)
     except (ToolError, ManifestError, OSError, ValueError) as exc:
         print(f'CYCLE_REPORT_FAILED ask: {exc}', file=sys.stderr)

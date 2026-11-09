@@ -41,15 +41,15 @@ class ReviewRegressions(FakeCase):
         self.assertEqual(len(list((self.manifest.paths.root/'state/refs').glob('*'))),1)
 
     def test_failed_escalation_retries_after_threshold(self):
-        from coordkit import addressed
         self.respond({'tool':'agentctl','contains':['--wait'],'exit':11,'stderr':'failed'})
-        with patch.object(addressed,'send',side_effect=OSError('bus temporarily down')):
+        with patch.object(loop.AnxClient,'ask',side_effect=OSError('ANX temporarily down')):
             for _ in range(3):
                 self.assertEqual(self.cycle(),1)
         self.assertEqual(self.escalations(),[])
         self.assertEqual(self.cycle(),1)
         self.assertEqual(self.cycle(),1)
-        self.assertEqual(len(self.escalations()),1, 'retried once the bus is back, then sent exactly once')
+        self.assertEqual(len([c for c in self.calls() if c['tool'] == 'anx' and 'ask' in c['args']]),1,
+                         'retried once ANX is back, then suppressed until the reminder is due')
 
     def test_colliding_lane_names_have_independent_inbox_and_wait_cursors(self):
         bus.configure(self.manifest)
@@ -61,13 +61,13 @@ class ReviewRegressions(FakeCase):
             self.assertEqual(bus.get_cursor('a_b',kind,None),2)
 
     def test_pending_escalation_retries_same_payload_even_when_cycle_recovers(self):
-        from coordkit import addressed
         self.respond({'tool':'agentctl','contains':['--wait'],'exit':11,'stderr':'failed'})
-        with patch.object(addressed,'send',side_effect=OSError('bus temporarily down')) as failing:
+        with patch.object(loop.AnxClient,'ask',side_effect=OSError('ANX temporarily down')) as failing:
             for _ in range(3): self.cycle()
-        first = failing.call_args.args[3]
+        first = failing.call_args.args[1]
         self.respond()
         self.assertEqual(self.cycle(),0)
-        asks=self.escalations()
+        asks=[c for c in self.calls() if c['tool'] == 'anx' and 'ask' in c['args']]
         self.assertEqual(len(asks),1)
-        self.assertEqual(asks[0]['args'][1], first)  # the journaled payload, not a fresh one
+        self.assertIn(first['situation'], asks[0]['args'])  # the journaled payload, not a fresh one
+        self.assertIn(first['details'], asks[0]['args'])

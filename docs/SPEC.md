@@ -42,9 +42,9 @@ Optional configuration groups:
 | `obligations` | Pickup at `30m`, alert at `2h`, repeat at `6h`; addressed ask deadlines `15m`/urgent `5m`. Empty `coordinator` resolves to `lead`. |
 | `questions` | Human decision capture and escalation. `fallback_role="lead"`; `human_actor` defaults to the configured ANX lead actor (including adopted identity). `delivery_cli` is an optional absolute executable; Different simultaneous values are rejected. Unconfigured transcript heuristics inspect only `~/.claude`. |
 | `review` | Exact-head ledger, default `family="ledger"`; the legacy family remains configurable. Result files, start IDs, timestamps and hashes must agree before SHIP qualifies. |
-| `escalation` | `card` must resolve for integrated operation; `internal_to` routes toolkit health findings. `internal_senders=[]` uses `internal_to` as the sender excluded from pickup scans; an explicit list overrides it. |
+| `escalation` | `card` must resolve for integrated operation; `internal_to` routes toolkit health findings except repeated loop failures, which go directly to ANX Decide on the loop card. `internal_senders=[]` uses `internal_to` as the sender excluded from pickup scans; an explicit list overrides it. |
 | `lane` / `agentctl` | Pool-based delegation, bounded runtime, capacity retries, durable handoff and leases. No live launch is implicit in a read command. |
-| `loop` | Cadence, progress budget, stop rule and per-loop overrides; repeated failures escalate once until recovery. |
+| `loop` | Cadence, progress budget, stop rule and per-loop overrides. At `fail_report_after=3`, failures create an ANX Decide ask on the loop card; continuing failures repeat after `failure_realert_intervals=["1h","6h","1d"]`, then at the last interval indefinitely. Intervals are positive, nondecreasing durations and may be overridden per loop. Successful cycles reset the streak and pending escalation; STOP suppresses runs. See [loop recovery and mirror replay](LOOP-RECOVERY.md). |
 | `wait` | Bus/events/CI/ANX observations, settle/debounce and optional bounded backoff. Timeouts are explicit and finite. |
 | `reconciler` / `limits` | Bounded stock and age checks; stale leases, missing receipts and projection drift become findings. |
 | `merge` | Hold/review/check policy consumed by coordination helpers; no top-level merge command in v0.1. |

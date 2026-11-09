@@ -9,6 +9,60 @@ name = os.environ["CK_FAKE_NAME"]
 args = sys.argv[1:]
 stdin = sys.stdin.read() if "--prompt-stdin" in args else ""
 record = {"tool": name, "args": args, "stdin": stdin}
+# Pinned ANX flag subset emitted by mirror/lifecycle, checked against CLI help.
+# Keep this before scripted success responses: a permissive fake hid a required
+# cards-create body in production. Unknown commands belong to other fixtures.
+if name == 'anx':
+    tokens = list(args)
+    while tokens and tokens[0].startswith('--'):
+        flag = tokens.pop(0)
+        if flag in ('--workspace', '--as', '--base-url') and tokens:
+            tokens.pop(0)
+        elif flag != '--json':
+            print('ANX contract: invalid global flag '+flag, file=sys.stderr)
+            sys.exit(2)
+    path = tuple(tokens[:2]) if tokens[:1] in (['cards'], ['boards'], ['work'], ['bridge']) else tuple(tokens[:1])
+    # (positional count, required value flags, optional value flags, boolean flags)
+    contracts = {
+        ('cards', 'create'): (0, {'--board', '--handle', '--title', '--column'}, {'--body', '--body-file', '--request-key'}, set()),
+        ('cards', 'get'): (1, set(), set(), set()),
+        ('cards', 'list'): (0, set(), {'--board'}, set()),
+        ('cards', 'move'): (1, {'--column'}, {'--reason'}, set()),
+        ('cards', 'resolve'): (1, {'--reason'}, set(), set()),
+        ('boards', 'get'): (1, set(), set(), set()),
+        ('boards', 'create'): (0, {'--title', '--summary'}, set(), set()),
+        ('work', 'cadence'): (1, {'--every', '--budget', '--stop-rule'}, set(), set()),
+        ('orient',): (0, set(), set(), set()),
+        ('context',): (1, set(), set(), set()),
+        ('note',): (2, set(), {'--next', '--evidence', '--decided-by'}, {'--met'}),
+        ('ask',): (1, {'--subject-ref', '--situation', '--impact', '--recommend', '--why', '--if-no-answer'},
+                   {'--alternative', '--details', '--evidence', '--by'}, {'--again'}),
+        **{('bridge', verb): (0, set(), set(), set()) for verb in ('status', 'install', 'add')},
+    }
+    if path in contracts:
+        count, required, optional, switches = contracts[path]
+        positionals, seen, error = [], set(), ''
+        remaining = tokens[len(path):]
+        while remaining:
+            token = remaining.pop(0)
+            if token in required | optional:
+                seen.add(token)
+                if not remaining or not remaining.pop(0).strip():
+                    error = 'missing value for '+token; break
+            elif token in switches:
+                seen.add(token)
+            elif token.startswith('--'):
+                error = 'unknown flag '+token; break
+            else:
+                positionals.append(token)
+        if path == ('cards', 'create') and not {'--body', '--body-file'} & seen:
+            error = '--body or --body-file is required'
+        if error or required - seen or len(positionals) != count:
+            print(f'ANX contract {path}: {error or "missing flags/positionals"} {sorted(required-seen)}', file=sys.stderr)
+            sys.exit(2)
+        if path == ('note',) and '--met' in seen and ('--evidence' not in seen or '--next' in seen):
+            print('ANX contract: --met needs --evidence and excludes --next', file=sys.stderr)
+            sys.exit(2)
 if "--request-file" in args:
     record["request"] = json.loads(Path(args[args.index("--request-file") + 1]).read_text())
 # ANX rejects untyped local evidence; enforce that boundary in offline tests.

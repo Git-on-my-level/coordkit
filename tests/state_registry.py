@@ -85,7 +85,10 @@ row('lifecycle.py', 'reconcile/state.json', 'read last-run receipt', 'new succes
 row('loop.py', 'STOP|writer:stop', 'loop stop with reason', 'explicit human removal after reactivation', 'explicit disposition; card resolved', 'stopped card excluded from cadence asks')
 row('loop.py', 'cycle.lock|writer:run_cycle', 'cycle begins with pid/start/deadline', 'finally truncate metadata; kernel unlock', 'loop.max_age', 'failure ask; skipped run receipt counts')
 row('loop.py', 'result.lock|fails|skip.json|writer:record_failure', 'failed, unknown or skipped cycle', 'successful cycle resets counter', 'fail_report_after cycles', 'durable escalation ask')
-row('loop.py', 'escalation.json|writer:retry_escalation', 'failure threshold', 'successful cycle after confirmed send clears', 'retry next cycle; loop.max_age per run', 'ANX ask then configured page')
+row('loop.py', 'escalation.json|writer:_retry_escalation', 'failure threshold; journal pending ask before sending',
+    'any successful cycle clears the streak and pending/sent report under result.lock',
+    'retry unsent next cycle; sent_at/next_at/sent_count re-arm at failure_realert_intervals, last interval repeats',
+    'direct ANX Decide ask on loop card; legacy agent-only sent receipts are delivered immediately')
 row('loop.py', 'pending.json|writer:_cycle', 'extract completed before publication', 'receipt/checkpoint complete then unlink', 'next bounded cycle; loop.max_age', 'failure threshold ask')
 row('loop.py', 'offsets|.json|plan.json|req', 'auditor request / transcript checkpoint', 'commit checkpoint on success; archive evidence', 'one cycle max_age; archive retained', 'cycle failure ask')
 row('loop.py', '.plist|writer:install', 'stage plist', 'up apply or down', 'persistent staged configuration, no latch', 'doctor drift')

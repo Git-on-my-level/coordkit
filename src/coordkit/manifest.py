@@ -111,6 +111,7 @@ class Loop:
     max_age: str = "30m"
     default_cadence: str = "30m"
     fail_report_after: int = 3
+    failure_realert_intervals: list[str] = field(default_factory=lambda: ["1h", "6h", "1d"])
     receipt_prefix: str = "loop-"
     # SPEC leaves per-loop configuration syntax open. Overrides inherit project defaults.
     prompt_template: str = ""
@@ -305,7 +306,7 @@ def _table(cls, data, section, required=()):
         if key not in data or data[key] == "":
             raise ManifestError(f"missing_key: {section}.{key}")
     # Dataclass annotations are postponed; these schema field names carry uniform types.
-    lists = {"flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as"}
+    lists = {"failure_realert_intervals", "flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as"}
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects"}
     booleans = {"stop_requires_waiter", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
     integers = {"auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
@@ -540,10 +541,17 @@ def load(path: str | Path | None = None) -> Manifest:
     if config["loop"].fail_report_after < 1 or config["bus"].text_cap < 1 or config["reconciler"].interval_seconds < 1:
         raise ManifestError("invalid_value: loop.fail_report_after, bus.text_cap or reconciler.interval_seconds")
     loop = config["loop"]
+    def validate_realerts(intervals, section):
+        seconds = [duration(value) for value in intervals]
+        if not seconds or seconds != sorted(seconds):
+            raise ManifestError(f"invalid_value: {section}.failure_realert_intervals must be nonempty and nondecreasing")
+    validate_realerts(loop.failure_realert_intervals, "loop")
     for name, override in loop.loops.items():
         if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", name) or not isinstance(override, dict):
             raise ManifestError(f"invalid_value: loop.loops.{name}")
         _table(Loop, override, f"loop.loops.{name}")
+        if "failure_realert_intervals" in override:
+            validate_realerts(override["failure_realert_intervals"], f"loop.loops.{name}")
         if override.get("fail_report_after", 1) < 1:
             raise ManifestError(f"invalid_value: loop.loops.{name}.fail_report_after")
         for key in ("default_cadence", "progress_budget", "max_age"):
