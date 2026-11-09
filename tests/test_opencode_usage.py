@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import sqlite3
+from unittest.mock import patch
 
 from coordkit import usage
 from coordkit.manifest import ManifestError, UsageLane, load
@@ -92,6 +93,8 @@ class OpenCodeUsageTests(FakeCase):
         self.assertEqual(usage.opencode_observed_model(lane)[0], 'morph-kimik31')
         self.assertTrue(usage.model_matches('opencode/morph-kimik31', 'morph-kimik31'))
         self.assertTrue(usage.model_matches('morph-kimik31', 'morph-kimik31'))
+        self.assertTrue(usage.model_matches('morph/morph-kimik31', 'morph/morph-kimik31'))
+        self.assertFalse(usage.model_matches('other/morph-kimik31', 'morph/morph-kimik31'))
 
     def test_migrated_session_is_counted_once_across_schema_generations(self):
         connection = self.store()
@@ -132,6 +135,28 @@ class OpenCodeUsageTests(FakeCase):
         self.assertEqual(results['other'].input_tokens, 5)
         self.assertIsNone(results['shared'])
 
+    def test_wal_database_is_read_from_a_snapshot_without_sidecars(self):
+        connection = self.store()
+        connection.execute('PRAGMA journal_mode = WAL')
+        connection.execute('PRAGMA wal_autocheckpoint = 0')
+        connection.execute("INSERT INTO session_v2 VALUES ('ses_repo', '/work/repo')")
+        self.message(connection, 'ses_repo', 'm1', self.assistant())
+        connection.commit()
+        path = self.root/'oc'/'opencode.db'
+        # Capture the live WAL state, then restore just the db + wal with no -shm.
+        db_bytes = path.read_bytes()
+        wal_bytes = (self.root/'oc'/'opencode.db-wal').read_bytes()
+        connection.close()
+        path.write_bytes(db_bytes)
+        (self.root/'oc'/'opencode.db-wal').write_bytes(wal_bytes)
+        before = sorted(item.name for item in (self.root/'oc').iterdir())
+        self.assertIn('opencode.db-wal', before)
+        self.assertNotIn('opencode.db-shm', before)
+        reading = usage.collect([self.lane()], AT)[0][1]
+        self.assertEqual(reading.turns, 1)
+        self.assertEqual(reading.input_tokens, 10)
+        self.assertEqual(sorted(item.name for item in (self.root/'oc').iterdir()), before)
+
     def test_store_is_read_only_and_damaged_sources_fail_open(self):
         connection = self.store()
         connection.execute("INSERT INTO session_v2 VALUES ('ses_repo', '/work/repo')")
@@ -151,6 +176,33 @@ class OpenCodeUsageTests(FakeCase):
     def lane_with_config(self, config):
         return UsageLane('worker', str(self.root/config), '/work/repo', 'morph-kimik31', 'high',
                          harness='opencode')
+
+    def test_agents_status_uses_opencode_store_for_lane_harness_and_shared_scope(self):
+        with self.file.open('a') as stream:
+            stream.write('\n[[lanes]]\nname="pinned"\nconfig_dir="oc"\ncwd="repo"\nmodel="morph-kimik31"\n'
+                         'effort="high"\nharness="opencode"\nsession_id="ses_a"\n'
+                         '\n[[lanes]]\nname="shared"\nconfig_dir="oc"\ncwd="repo"\nmodel="morph-kimik31"\n'
+                         'effort="high"\nharness="opencode"\n')
+        manifest = load(self.file)
+        cwd = manifest.lanes[0].cwd
+        connection = self.store()
+        connection.execute('INSERT INTO session_v2 VALUES (?, ?)', ('ses_a', cwd))
+        connection.execute('INSERT INTO session_v2 VALUES (?, ?)', ('ses_b', cwd))
+        self.message(connection, 'ses_a', 'a', self.assistant(model='morph-pinned'))
+        self.message(connection, 'ses_b', 'b', self.assistant(model='morph-shared'))
+        connection.commit(); connection.close()
+        from coordkit import mcp_server, routing
+
+        def identity(unused, name):
+            # A Claude-shaped roster path must not override the lane harness.
+            return {'transcript_path': str(self.root/'ghost'/'missing.jsonl')} if name == 'pinned' else {}
+
+        with patch.object(routing, 'roster_identity', side_effect=identity):
+            result = mcp_server.call_tool(manifest, 'agents_status', {})
+        rows = {row['name']: row for row in result['agents']}
+        self.assertEqual(rows['pinned']['model'], 'morph-pinned')
+        # The unpinned lane shares its store and cwd, so no model is attributable.
+        self.assertIsNone(rows['shared']['model'])
 
     def test_manifest_harness_and_session_inference(self):
         with self.file.open('a') as stream:

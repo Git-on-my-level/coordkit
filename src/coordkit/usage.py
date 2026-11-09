@@ -6,7 +6,9 @@ import json
 import os
 from itertools import islice
 from pathlib import Path
+import shutil
 import sqlite3
+import tempfile
 from .identity import encoded_cwd, transcript_dir
 
 TOKEN_FIELDS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')
@@ -247,9 +249,37 @@ def _opencode_counters(data):
             'cache_creation_input_tokens': _count(cache.get('write', tokens.get('cache_write')))}
 
 
+def _opencode_is_wal(path):
+    """Read the SQLite header directly: byte 18 is the file write version (2 = WAL)."""
+    try:
+        with Path(path).open('rb') as stream:
+            header = stream.read(20)
+    except OSError:
+        return False
+    return len(header) >= 20 and header[:16] == b'SQLite format 3\x00' and header[18] == 2
+
+
+def _opencode_snapshot(path):
+    """Copy a live WAL database and its WAL into a private directory to read.
+
+    `immutable=1` is wrong for a live OpenCode store: the main file can change
+    while committed pages still sit in the WAL, so bypassing WAL recovery can
+    return stale or inconsistent counters. A private copy lets SQLite recover
+    that WAL normally without creating `-shm`/`-wal` beside the live store.
+    """
+    directory = Path(tempfile.mkdtemp(prefix='coordkit-opencode-'))
+    copy = directory / OPENCODE_DB
+    shutil.copyfile(path, copy)
+    wal = Path(str(path) + '-wal')
+    if wal.exists():
+        shutil.copyfile(wal, Path(str(copy) + '-wal'))
+    return directory, copy
+
+
 def _opencode_connect(path):
-    # mode=ro plus query_only makes an accidental write impossible; a missing WAL
-    # sidecar fails open as an unreadable source rather than creating one.
+    # The caller passes either the untouched store when it is not in WAL mode,
+    # or a private snapshot. mode=ro plus query_only makes an accidental write
+    # impossible; any WAL sidecars belong to the snapshot directory.
     connection = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.25)
     connection.execute('PRAGMA query_only = ON')
     return connection
@@ -295,13 +325,20 @@ def _opencode_sessions(connection, tables, lane):
 
 def _opencode_messages(lane, *, since=None, until=None):
     """Assistant message counters from OpenCode v1/v2 SQLite rows; never writes."""
+    scratch = None
     try:
         path = opencode_store(lane)
     except (OSError, ValueError, TypeError):
         return [], False, 0, 1
     try:
-        connection = _opencode_connect(path)
+        if _opencode_is_wal(path):
+            scratch, source = _opencode_snapshot(path)
+        else:
+            source = path
+        connection = _opencode_connect(source)
     except (sqlite3.Error, OSError, ValueError):
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
         return [], False, 0, 1
     try:
         tables = _opencode_tables(connection)
@@ -366,6 +403,8 @@ def _opencode_messages(lane, *, since=None, until=None):
         return [], False, 0, 1
     finally:
         connection.close()
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def opencode_usage(lane, since, until):
@@ -415,11 +454,17 @@ def read_lane(lane, since, until):
 def model_matches(intended, actual):
     """A short family alias accepts its versioned variants; a version stays pinned.
 
-    A provider-qualified OpenCode id (`provider/model`) matches the unqualified model.
+    A provider-qualified OpenCode id (`provider/model`) matches an unqualified
+    model, but two different providers never match just because their model
+    names share a last component.
     """
     intended, actual = (v.lower().removeprefix('claude-') for v in (intended, actual))
-    if intended.rsplit('/', 1)[-1] == actual.rsplit('/', 1)[-1]:
-        return True
+    intended_provider, intended_sep, intended_name = intended.rpartition('/')
+    actual_provider, actual_sep, actual_name = actual.rpartition('/')
+    if intended_sep and actual_sep and intended_provider != actual_provider:
+        return False
+    intended = intended_name if intended_sep else intended
+    actual = actual_name if actual_sep else actual
     return intended == actual or (intended.isalpha() and actual.startswith(intended + '-'))
 
 

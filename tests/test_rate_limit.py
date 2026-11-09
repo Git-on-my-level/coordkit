@@ -33,6 +33,20 @@ class RateLimitShapeTests(FakeCase):
                        {'events': [{'type': 'retry', 'error': {'message': '429 rate limit'}}]}):
             self.assertIsNone(lane.rate_limit(status), status)
 
+    def test_evidence_must_be_fresh_and_carry_a_structured_marker(self):
+        now = time.time()
+        fresh = {'state': 'running', 'events': [
+            {'type': 'retry', 'at': stamp(30), 'error': {'status': 429, 'retryAfterMs': 1000}}]}
+        self.assertIsNotNone(lane.rate_limit(fresh, now))
+        stale = {'state': 'running', 'updated_at': stamp(3 * 3600), 'events': [
+            {'type': 'retry', 'at': stamp(3 * 3600), 'error': {'status': 429, 'retryAfterMs': 1000}}]}
+        self.assertIsNone(lane.rate_limit(stale, now))
+        # A generic retry object is not evidence unless it carries the 429 marker.
+        generic = {'state': 'running', 'updated_at': stamp(30), 'retry': {'retry_after_ms': 1000}}
+        self.assertIsNone(lane.rate_limit(generic, now))
+        marked = dict(generic, retry={'status': 429, 'retry_after_ms': 1000})
+        self.assertEqual(lane.rate_limit(marked, now)['retry_after_ms'], 1000)
+
 
 class RateLimitRecoveryTests(FakeCase):
     def quiet(self, fn, *args, **kwargs):
@@ -49,7 +63,7 @@ class RateLimitRecoveryTests(FakeCase):
 
     def test_recovery_renews_a_rate_limited_run_instead_of_expiring_it(self):
         plan = self.plan()
-        throttled = {'state': 'running', 'liveness': 'unreachable', 'updated_at': stamp(3 * 3600),
+        throttled = {'state': 'running', 'liveness': 'unreachable', 'updated_at': stamp(30),
                      'rate_limit': {'retry_after_ms': 2500, 'model': 'morph-kimik31'}}
         with patch.object(lane.AgentctlClient, 'status', return_value=throttled), \
                 patch.object(lane, 'detach_watcher') as restored:
@@ -98,7 +112,7 @@ class RateLimitRecoveryTests(FakeCase):
 
     def test_watcher_records_throttling_then_completes(self):
         plan = self.plan()
-        throttled = {'state': 'running', 'liveness': 'unreachable', 'updated_at': stamp(3 * 3600),
+        throttled = {'state': 'running', 'liveness': 'unreachable', 'updated_at': stamp(30),
                      'rate_limit': {'retry_after_ms': 1000}}
         with patch.object(lane.AgentctlClient, 'await_result', side_effect=[ToolError('agentctl', 9, 'await timeout'), 'answer']), \
                 patch.object(lane.AgentctlClient, 'status', return_value=throttled):
@@ -107,6 +121,20 @@ class RateLimitRecoveryTests(FakeCase):
         self.assertEqual((saved['terminal'], saved['completion']['rc']), ('completed', 0))
         self.assertEqual(saved['rate_limit']['retry_after_ms'], 1000)
         self.assertFalse(any('cancel' in row['args'] for row in self.calls()))
+
+    def test_stale_429_falls_back_to_the_normal_hung_check(self):
+        plan = self.plan()
+        stale = {'state': 'running', 'liveness': 'unreachable', 'updated_at': stamp(3 * 3600),
+                 'events': [{'type': 'retry', 'at': stamp(3 * 3600),
+                             'error': {'status': 429, 'retryAfterMs': 1000}}]}
+        with patch.object(lane.AgentctlClient, 'status',
+                          side_effect=[stale, stale, stale, {'state': 'cancelled'}]):
+            self.quiet(lane.recover, self.manifest, plan)
+        self.assertTrue(any('cancel' in row['args'] for row in self.calls()))
+        self.assertTrue(any('ask' in row['args'] and 'execution_hung' in ' '.join(row['args'])
+                            for row in self.calls()))
+        events = [__import__('json').loads(line) for line in self.manifest.paths.events.read_text().splitlines()]
+        self.assertFalse(any(row['kind'] == 'rate_limited' for row in events))
 
     def test_lanes_view_labels_a_throttled_execution(self):
         from coordkit import mcp_server

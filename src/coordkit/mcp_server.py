@@ -725,8 +725,13 @@ def agent_rows(manifest, rows, args, at):
         from . import routing, usage
         identity = routing.roster_identity(manifest, name)
         lane = next((lane for lane in manifest.lanes if lane.name == name), None)
-        if lane and usage.lane_harness(lane) == 'opencode' and not identity.get('transcript_path'):
-            model, model_at = usage.opencode_observed_model(lane)
+        if lane and usage.lane_harness(lane) == 'opencode':
+            # A roster transcript path is Claude-shaped; the lane harness decides
+            # which store to read. Unpinned OpenCode lanes share their store and
+            # cwd, so apply the same ambiguity rule as Claude.
+            shared = sum(usage.scope_key(other) == usage.scope_key(lane) for other in manifest.lanes)
+            model, model_at = (usage.opencode_observed_model(lane)
+                               if lane.session_id or shared == 1 else (None, None))
         else:
             paths = routing.transcript_paths(manifest, name, identity)
             if identity.get('transcript_path'):

@@ -176,43 +176,106 @@ HUNG_LIVENESS = {'unreachable', 'lost', 'exited', 'orphaned'}
 
 # Provider throttling is not a hung process. agentctl does not publish a stable
 # rate-limit field yet (another change is adding retry events under `status`), so
-# read every shape we know tolerantly and require an explicit 429/rate-limit code.
+# read every shape we know tolerantly, but only structured 429/rate-limit markers
+# and only while the evidence is fresh enough to still explain the silence.
 RATE_LIMIT_STATES = {'rate_limited', 'rate-limited', 'paused_rate_limit', 'paused_provider_rate_limit'}
 RATE_LIMIT_CODES = {'provider_rate_limit', 'provider_rate_limited', 'rate_limited',
                     'rate-limit', 'provider.rate-limit', 'quota_exceeded'}
+RATE_LIMIT_EVENT_TYPES = {'retry', 'rate_limit', 'rate-limit'}
+RATE_LIMIT_EVIDENCE_BOUND = 5 * 60.0
 
 
-def rate_limit(status):
-    """Return retry evidence when a nonterminal run is only waiting on provider 429s."""
+def _epoch(value):
+    """Best-effort epoch seconds from a numeric tick or an ISO timestamp."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value / 1000 if value >= 10 ** 11 else value if value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            number = float(text)
+        except ValueError:
+            try:
+                return parse_ts(text).timestamp()
+            except (AttributeError, TypeError, ValueError):
+                return None
+        return number / 1000 if number >= 10 ** 11 else number if number >= 0 else None
+    return None
+
+
+def _evidence_time(value):
+    if not isinstance(value, dict):
+        return None
+    for key in ('observed_at', 'updated_at', 'occurred_at', 'timestamp', 'created_at', 'time_created', 'at', 'ts'):
+        at = _epoch(value.get(key))
+        if at is not None:
+            return at
+    return None
+
+
+def _rate_limit_marker(value):
+    if not isinstance(value, dict):
+        return False
+    return (value.get('status') == 429 or value.get('status_code') == 429
+            or value.get('code') in RATE_LIMIT_CODES or value.get('type') in RATE_LIMIT_CODES
+            or value.get('category') in RATE_LIMIT_CODES)
+
+
+def rate_limit(status, now=None):
+    """Return fresh retry evidence when a nonterminal run is waiting on provider 429s."""
     if not isinstance(status, dict):
         return None
-    found = {}
+    now = time.time() if now is None else now
+    status_at = _evidence_time(status)
+    candidates = []
+
+    def add(fields, at=None):
+        at = status_at if at is None else at
+        candidates.append((now if at is None else at, fields))
+
     state = status.get('state')
     if state in RATE_LIMIT_STATES:
-        found.update(retry_after_ms=status.get('retry_after_ms'),
-                     reset_at=status.get('reset_at'), model=status.get('model'))
-    for container in (status.get('rate_limit'), status.get('rateLimit'), status.get('retry')):
+        add(dict(retry_after_ms=status.get('retry_after_ms'),
+                 reset_at=status.get('reset_at'), model=status.get('model'), status=429))
+    for key in ('rate_limit', 'rateLimit'):
+        container = status.get(key)
         if isinstance(container, dict):
-            found.update(container)
-    failure = status.get('failure') or status.get('error') or {}
-    if isinstance(failure, dict):
-        code = failure.get('code') or failure.get('type') or failure.get('category')
-        if code in RATE_LIMIT_CODES or failure.get('status') == 429 or failure.get('status_code') == 429:
-            found.update(failure)
+            add(container, _evidence_time(container))
+    # A bare `retry` object is not proof of throttling: require a 429/rate-limit marker.
+    retry = status.get('retry')
+    if _rate_limit_marker(retry):
+        add(retry, _evidence_time(retry))
+    for key in ('failure', 'error'):
+        failure = status.get(key)
+        if _rate_limit_marker(failure):
+            add(failure, _evidence_time(failure))
+    if _rate_limit_marker(status):
+        add(status, status_at)
     events = status.get('events')
     if isinstance(events, list):
         for row in reversed(events[-64:]):
-            if not isinstance(row, dict) or row.get('type') not in ('retry', 'rate_limit', 'rate-limit'):
+            if not isinstance(row, dict) or row.get('type') not in RATE_LIMIT_EVENT_TYPES:
                 continue
-            error = row.get('error') if isinstance(row.get('error'), dict) else {}
-            if error.get('type') in ('provider.rate-limit', 'provider.rate_limit') or error.get('status') == 429:
-                found.update(error)
-                found['retry_after_ms'] = found.get('retryAfterMs', found.get('retry_after_ms'))
-                break
-    if not found:
+            error = row.get('error') if isinstance(row.get('error'), dict) else row
+            if not _rate_limit_marker(error):
+                continue
+            add(error, _evidence_time(row) or _evidence_time(error))
+            break
+    if not candidates:
         return None
-    retry = found.get('retry_after_ms', found.get('retryAfterMs'))
-    return {'retry_after_ms': retry if type(retry) in (int, float) and retry >= 0 else None,
+    at, found = max(candidates, key=lambda item: item[0])
+    found = dict(found)
+    retry = found.get('retry_after_ms')
+    if retry is None:
+        retry = found.get('retryAfterMs')
+    retry = retry if type(retry) in (int, float) and retry >= 0 else None
+    # A provider retry window makes its own evidence relevant for twice that long,
+    # but a small 429 window must not pin a lane forever on a retained old event.
+    window = max(2 * (retry / 1000 if retry is not None else 0), RATE_LIMIT_EVIDENCE_BOUND)
+    if at is None or at < now - window:
+        return None
+    return {'retry_after_ms': retry,
             'reset_at': found.get('reset_at') or found.get('resets_at'),
             'model': found.get('model') or found.get('model_id'),
             'status': found.get('status') or 429}
