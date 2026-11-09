@@ -31,3 +31,13 @@ class LaneSubscriptionTests(FakeCase):
         self.assertEqual(call.call_args.args, ('subscribe', 'create', '--execution', 'exec-example',
                          '--destination', 'file', '--target', self.manifest.paths.events,
                          '--kind', 'terminal', '--kind', 'attention', '--ttl', '72h'))
+
+    def test_inventory_preserves_multiple_active_filter_sets_per_execution(self):
+        rows = [dict(id='sub-'+kind, origin_host_id='source', state='active',
+                     filter=dict(execution_ids=['exec-example'], kinds=[kind]),
+                     destination=dict(kind='file', path=str(self.manifest.paths.events)),
+                     expires_at='2999-01-01T00:00:00Z') for kind in ('attention', 'terminal')]
+        with patch.object(AgentctlClient, 'call', return_value=dict(subscriptions=rows)):
+            entries = AgentctlClient(self.manifest).lane_subscriptions()
+        self.assertEqual(len(entries), 2)
+        self.assertEqual({tuple(e['kinds']) for e in entries}, {('terminal',), ('attention',)})

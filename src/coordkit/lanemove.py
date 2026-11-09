@@ -4,6 +4,7 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import io
 from itertools import islice
 import socket
 import json
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +20,7 @@ import time
 import tomllib
 
 from . import bus, lane, obligations, routing, usage
-from .actl import AgentctlClient
+from .actl import AgentctlClient, subscription_key
 from .adapters import claude_resume
 from .manifest import UsageLane, load
 from .process import ToolError
@@ -40,6 +42,7 @@ MAX_RECEIPTS = 128
 MAX_MOVE_ENTRIES = 2048
 _VERIFIER_CHILDREN = {}
 MAX_RECEIPT_BYTES = 1024 * 1024
+MAX_OBLIGATION_BYTES = 4 * 1024 * 1024
 
 
 def exposed(manifest, path):
@@ -279,6 +282,28 @@ def move_state(manifest, plan):
     return state
 
 
+def lane_waiter(state, name):
+    """Parse the real CLI flags, including equals syntax and repeated options."""
+    from .ops import bus_parser
+    matches = []
+    for entry in state.get('re_arms', []):
+        if entry.get('kind') != 'bus-waiter' or 'wait' not in entry.get('argv', []):
+            continue
+        try:
+            flags = entry['argv'][entry['argv'].index('wait')+1:]
+            with contextlib.redirect_stderr(io.StringIO()):
+                options = bus_parser().parse_args(['wait', *flags])
+        except SystemExit:
+            raise Refusal('invalid_bus_waiter', entry['name']) from None
+        if options.to == name and not options.signal and not options.subject:
+            if not options.persistent or options.timeout not in (None, 0):
+                raise Refusal('unbounded_lane_waiter_required', entry['name'])
+            matches.append(entry)
+    if len(matches) != 1:
+        raise Refusal('default_rearms_required')
+    return matches[0]
+
+
 def final_state(manifest, plan):
     state = move_state(manifest, plan)
     entries = state.get('re_arms', [])
@@ -306,10 +331,8 @@ def final_state(manifest, plan):
         if not isinstance(entry.get('env', {}), dict) or not all(
                 isinstance(k, str) and isinstance(v, str) for k, v in entry.get('env', {}).items()):
             raise Refusal('invalid_rearm_environment', entry['name'])
-    if not any(e['kind'] == 'heartbeat' for e in entries) or not any(
-            e['kind'] == 'bus-waiter' and '--to' in e['argv']
-            and e['argv'][e['argv'].index('--to')+1:e['argv'].index('--to')+2] == [plan['name']]
-            for e in entries):
+    lane_waiter(state, plan['name'])
+    if not any(e['kind'] == 'heartbeat' for e in entries):
         raise Refusal('default_rearms_required', plan['move_state_file'])
     if any(not isinstance(shell, dict) or (shell.get('rearm') not in names and not shell.get('completed_reason'))
            for shell in state.get('background_shells', [])):
@@ -331,11 +354,13 @@ def final_state(manifest, plan):
                 or not entry['execution_id'] or not entry.get('source_host') or not entry.get('target')
                 or not entry.get('expires_at')):
             raise Refusal('invalid_subscription_inventory')
-        if entry['execution_id'] in recorded:
+        key = subscription_key(entry)
+        if key in recorded:
             raise Refusal('duplicate_subscription_inventory')
-        recorded.add(entry['execution_id'])
-    if not required <= recorded:
-        raise Refusal('subscription_inventory_required', ','.join(sorted(required - recorded)))
+        recorded.add(key)
+    recorded_executions = {e['execution_id'] for e in subscriptions}
+    if not required <= recorded_executions:
+        raise Refusal('subscription_inventory_required', ','.join(sorted(required - recorded_executions)))
     state['waiters'] = [dict(name=e['name'], flags=e['argv'][e['argv'].index('wait')+1:])
                         for e in entries if e['kind'] == 'bus-waiter']
     private_json(manifest, Path(plan['move_state_file']), state)
@@ -346,9 +371,16 @@ def final_state(manifest, plan):
 
 def open_work(manifest, plan):
     bus.configure(manifest)
-    # No age window: even an old unpicked obligation must block a move.
+    # A bounded tail is safe only if it covers history: refuse rather than hide older asks.
+    path = manifest.paths.bus_log
+    rows = []
+    if path.exists():
+        lines = usage.tail_lines(path, MAX_OBLIGATION_BYTES)
+        if path.stat().st_size > MAX_OBLIGATION_BYTES:
+            raise Refusal('obligation_history_limit', 'archive/reconcile bus history before moving')
+        rows = [row for _, row in bus.parse_lines(lines)]
     name = bus.resolve(plan['name'])
-    return [item for item in obligations.report(manifest) if item['owner'] == name]
+    return [item for item in obligations.report(manifest, rows=rows) if item['owner'] == name]
 
 
 def quiet(manifest, target, idle, plan=None):
@@ -388,7 +420,10 @@ def atomic_bytes(path, data, *, exclusive=False, mode=0o600):
     temporary = Path(temporary)
     try:
         with os.fdopen(fd, 'wb') as stream:
-            stream.write(data)
+            if hasattr(data, 'read'):
+                shutil.copyfileobj(data, stream, length=1024 * 1024)
+            else:
+                stream.write(data)
             os.fchmod(stream.fileno(), mode)
             stream.flush()
             os.fsync(stream.fileno())
@@ -419,7 +454,8 @@ def copy_session(plan):
         raise Refusal('destination_symlink', str(destination))
     if not destination.exists():
         try:
-            atomic_bytes(destination, source.read_bytes(), exclusive=True)
+            with source.open('rb') as stream:
+                atomic_bytes(destination, stream, exclusive=True)
         except FileExistsError:
             pass  # Another writer won: verify, never overwrite it.
     if checksum(source) != digest or checksum(destination) != digest:
@@ -615,7 +651,18 @@ def rearm_subscriptions(manifest, plan, no_rearm):
     complete = True
     for entry in plan['move_state']['subscriptions']:
         execution = entry['execution_id']
-        outcome = outcomes.setdefault(execution, {})
+        key = subscription_key(entry)
+        if key not in outcomes and execution in outcomes:
+            old = outcomes[execution]
+            created = old.get('subscription', {})
+            created = created.get('subscription', created)
+            kinds = created.get('filter', {}).get('kinds')
+            same_execution = [e for e in plan['move_state']['subscriptions'] if e['execution_id'] == execution]
+            if (kinds is not None and set(kinds) == set(entry.get('kinds', ['terminal', 'attention']))) or len(same_execution) == 1:
+                outcomes[key] = outcomes.pop(execution)
+            else:
+                raise Refusal('subscription_outcome_upgrade_required', execution)
+        outcome = outcomes.setdefault(key, {})
         if not outcome:
             outcome.update(status='skipped' if no_rearm else 'intent', host=socket.gethostname(),
                            target=str(manifest.paths.events), requested_at=time.time())
@@ -634,14 +681,14 @@ def rearm_subscriptions(manifest, plan, no_rearm):
         expected_id = created.get('id')
         if no_rearm:
             manual = read_json(Path(plan['move_state_file']), {}).get('subscriptions', [])
-            expected_id = next((e.get('replacement_id') for e in manual if e['execution_id'] == execution), None)
+            expected_id = next((e.get('replacement_id') for e in manual if subscription_key(e) == key), None)
         verified = bool(expected_id) and any(row.get('subscription_id') == expected_id
                        and row.get('state') == 'active' and row['execution_id'] == execution
                        and row['source_host'] == socket.gethostname()
                        and row['target'] == str(manifest.paths.events)
                        and usage.timestamp(row['expires_at']) is not None
                        and usage.timestamp(row['expires_at']).timestamp() > max(outcome['requested_at'], time.time())
-                       and set(entry.get('kinds', ['terminal', 'attention'])) <= set(row.get('kinds', []))
+                       and subscription_key(row) == key
                        for row in fresh)
         outcome['verified'] = verified
         complete = complete and verified
@@ -649,15 +696,18 @@ def rearm_subscriptions(manifest, plan, no_rearm):
     return complete
 
 
-def rearm_all(manifest, plan, no_rearm=False):
+def rearm_all(manifest, plan, no_rearm=False, *, entries=None):
     state = plan.get('move_state')
     if (not state or 'subscriptions' not in state or any(
             e['kind'] == 'bus-waiter' and '--persistent' not in e['argv']
             for e in state.get('re_arms', []))):
         # Paused older receipts must seal an upgraded inventory before any spawn.
         state = final_state(manifest, plan)
+    lane_waiter(state, plan['name'])
     outcomes = plan.setdefault('rearm_outcomes', {})
-    for index, entry in enumerate(state['re_arms']):
+    selected = state['re_arms'] if entries is None else entries
+    for entry in selected:
+        index = state['re_arms'].index(entry)
         outcome = outcomes.setdefault(entry['name'], {})
         if not outcome:
             if not no_rearm:
@@ -688,7 +738,7 @@ def rearm_all(manifest, plan, no_rearm=False):
     # Probe once after all starts: a successful spawn alone never proves readiness.
     snapshot = claude_resume.processes()
     complete = True
-    for entry in state['re_arms']:
+    for entry in selected:
         outcome = outcomes[entry['name']]
         try:
             verified = verify_rearm(manifest, plan, entry, outcome, snapshot)
@@ -703,7 +753,7 @@ def rearm_all(manifest, plan, no_rearm=False):
             outcome['status'] = 'verification_pending'
         save(plan)
         complete = verified and complete
-    return rearm_subscriptions(manifest, plan, no_rearm) and complete
+    return (rearm_subscriptions(manifest, plan, no_rearm) if entries is None else True) and complete
 
 
 def resume(manifest, plan):
@@ -744,8 +794,34 @@ def resume(manifest, plan):
     save(plan)
 
 
+def maintain_waiter(manifest, plan, timeout, no_rearm):
+    entry = lane_waiter(plan['move_state'], plan['name'])
+    outcomes = plan.setdefault('rearm_outcomes', {})
+    outcome = outcomes.get(entry['name'], {})
+    snapshot = claude_resume.processes()
+    if outcome and verify_rearm(manifest, plan, entry, outcome, snapshot):
+        return
+    if outcome:
+        pid = outcome.get('pid')
+        if not pid or (pid in snapshot and (not outcome.get('started')
+                or snapshot[pid]['started'] == outcome['started'])):
+            raise Refusal('waiter_recovery_ambiguous', entry['name'])
+        # Only a proven dead/reused identity can be automatically replaced.
+        plan['waiter_restart_count'] = plan.get('waiter_restart_count', 0) + 1
+        outcomes[entry['name']] = {}
+        save(plan)
+    deadline = time.monotonic() + timeout
+    while not rearm_all(manifest, plan, no_rearm, entries=[entry]):
+        if time.monotonic() >= deadline:
+            attention(manifest, plan, 'waiter_recovery_timeout')
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    plan.pop('attention', None)
+    save(plan)
+
+
 def apply(manifest, plan, timeout, idle, no_rearm=False):
     if 'done' in plan['completed']:
+        maintain_waiter(load(manifest.file), plan, timeout, no_rearm)
         print('LANE_MOVE_DONE ' + plan['plan_file'])
         return 0
     current = asdict(lane_for(load(manifest.file), plan['name']))

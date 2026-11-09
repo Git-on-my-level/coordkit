@@ -11,6 +11,12 @@ from .process import ToolError, call_json, is_schema, run
 AGENTCTL_SCHEMA_VERSION = 1
 
 
+def subscription_key(entry):
+    """An execution may need several distinct callback filter sets."""
+    return json.dumps([entry['execution_id'], sorted(set(entry.get('kinds', ['terminal', 'attention'])))],
+                      separators=(',', ':'))
+
+
 class AgentctlClient:
     def __init__(self, manifest):
         self.manifest = manifest
@@ -100,10 +106,11 @@ class AgentctlClient:
                                           source_host=socket.gethostname(), authority_host=row.get('origin_host_id'),
                                           target=destination['path'], expires_at=row.get('expires_at'),
                                           kinds=filters.get('kinds', []), state=row.get('state'), ttl='72h')
-                previous = entries.get(execution, {})
+                key = subscription_key(item)
+                previous = entries.get(key, {})
                 if (item['state'] == 'active', item['expires_at'] or '') >= (
                         previous.get('state') == 'active', previous.get('expires_at') or ''):
-                    entries[execution] = item
+                    entries[key] = item
         return list(entries.values())
 
     def await_result(self, execution, timeout="30m", ignore_attention=False):

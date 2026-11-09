@@ -318,8 +318,22 @@ effort = "low"
     def test_real_rearm_children_arm_wait_cursor_heartbeat_and_monitor(self):
         plan = self.rearm_fixture()
         entries = plan['move_state']['re_arms']
-        entries[0]['argv'] += ['--timeout', '0.1', '--poll', '0.03']
+        entries[0]['argv'] += ['--poll', '0.03']
         finish, status = self.root/'finish', self.root/'heartbeat.json'
+        # A cooperative fixture ends the otherwise unbounded consumer without signals.
+        wrapper = f"""import sys
+from pathlib import Path
+from coordkit import bus, cli
+sleep = bus.time.sleep
+def pause(seconds):
+    if Path({str(self.root/'finish')!r}).exists():
+        raise SystemExit(0)
+    sleep(seconds)
+bus.time.sleep = pause
+raise SystemExit(cli.main(sys.argv[1:]))
+"""
+        entries[0]['argv'] = [sys.executable, '-c', wrapper, *entries[0]['argv'][3:]]
+
         binary = self.root/'agent-heartbeat'
         binary.write_text('#!'+sys.executable+'\n'+f'''
 import json, os, sys, time
@@ -367,8 +381,12 @@ else:
                 self.assertIsNone(children[0].poll())
                 bus.append([dict(id='second', ts='2026-01-01T00:00:02Z', frm='other', to='worker',
                                  kind='ask', text='second work item')])
-                self.assertEqual(children[0].wait(timeout=10), 3)
+                deadline = time.monotonic()+3
+                while 'second work item' not in log.read_text() and time.monotonic() < deadline:
+                    time.sleep(.03)
                 self.assertIn('second work item', log.read_text())
+                finish.touch()
+                self.assertEqual(children[0].wait(timeout=10), 0)
         finally:
             finish.touch()
             for child in children:
@@ -850,3 +868,108 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
         self.manifest.mcp.ref_roots = [str(self.manifest.paths.root)]
         with self.assertRaisesRegex(lanemove.Refusal, 'exposed_legacy_receipts'):
             lanemove.prepare(self.manifest, 'worker', str(self.target))
+
+    def test_required_waiter_refuses_every_finite_timeout_syntax(self):
+        self.frozen()
+        plan = self.plan()
+        path = Path(plan['move_state_file'])
+        state = read_json(path)
+        argv = state['re_arms'][0]['argv']
+        pos = argv.index('--timeout')
+        base = argv[:pos] + argv[pos+2:]
+        for suffix in (['--timeout', '1'], ['--timeout=1'], ['--timeout', '0', '--timeout', '2']):
+            with self.subTest(suffix=suffix):
+                state['re_arms'][0]['argv'] = base + suffix
+                write_json(path, state)
+                with self.assertRaisesRegex(lanemove.Refusal, 'unbounded_lane_waiter_required'):
+                    lanemove.final_state(self.manifest, plan)
+        state['re_arms'][0]['argv'] = base
+        write_json(path, state)
+        self.assertEqual(lanemove.lane_waiter(lanemove.final_state(self.manifest, plan), 'worker')['argv'], base)
+
+    def test_completed_move_recovers_dead_waiter_once_without_replaying_other_arms(self):
+        self.frozen()
+        self.complete()
+        plan = self.plan()
+        plan['rearm_outcomes'] = dict(worker=dict(pid=44, started='old', requested_at=1, status='verified'))
+        lanemove.save(plan)
+        self.rearm_patch.stop()
+        snapshot = {}
+        def spawn(argv, **kwargs):
+            snapshot[55] = dict(started='new', argv=shlex.join(argv))
+            cursor = self.manifest.paths.bus_log.parent/'state/cursors/worker.wait'
+            cursor.parent.mkdir(parents=True, exist_ok=True)
+            cursor.write_text('0')
+            write_json(cursor.with_suffix('.wait.owner.json'), dict(pid=55, started='new', session_id='session-one'))
+            return Mock(pid=55)
+        rows = len(self.rows())
+        with patch.object(claude_resume, 'processes', return_value=snapshot), patch.object(
+                claude_resume, 'start_time', return_value='new'), patch.object(
+                lanemove.subprocess, 'Popen', side_effect=spawn) as start:
+            self.assertEqual(self.invoke('--apply')[0], 0)
+            self.assertEqual(self.invoke('--apply')[0], 0)
+        start.assert_called_once()
+        self.assertEqual(self.plan()['waiter_restart_count'], 1)
+        self.assertEqual(self.plan()['rearm_outcomes']['worker']['pid'], 55)
+        self.assertEqual(len(self.rows()), rows)
+
+    def test_completed_move_refuses_ambiguous_waiter_instead_of_duplicating(self):
+        self.frozen()
+        self.complete()
+        plan = self.plan()
+        plan['rearm_outcomes'] = dict(worker=dict(status='intent', requested_at=1))
+        lanemove.save(plan)
+        with patch.object(lanemove.subprocess, 'Popen') as start, self.assertRaisesRegex(
+                lanemove.Refusal, 'waiter_recovery_ambiguous'):
+            self.invoke('--apply')
+        start.assert_not_called()
+
+    def test_obligation_tail_is_bounded_and_refuses_incomplete_history(self):
+        self.invoke('--plan')
+        self.manifest.paths.bus_log.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest.paths.bus_log.write_text('{}\n'*100)
+        with patch.object(lanemove, 'MAX_OBLIGATION_BYTES', 16), patch.object(
+                bus, 'read', side_effect=AssertionError('full bus reads forbidden')), self.assertRaisesRegex(
+                lanemove.Refusal, 'obligation_history_limit'):
+            lanemove.open_work(self.manifest, self.plan())
+
+    def test_transcript_copy_streams_without_read_bytes(self):
+        self.invoke('--plan')
+        plan = self.plan()
+        with self.source.open('wb') as stream:
+            for _ in range(4):
+                stream.write(b'x'*(1024*1024))
+        real = Path.read_bytes
+        def read(path):
+            if path == self.source:
+                raise AssertionError('transcript must be streamed')
+            return real(path)
+        with patch.object(Path, 'read_bytes', read), patch.object(
+                lanemove.shutil, 'copyfileobj', wraps=lanemove.shutil.copyfileobj) as copy:
+            lanemove.copy_session(plan)
+        self.assertEqual(copy.call_args.kwargs['length'], 1024*1024)
+        destination = Path(plan['destination'])
+        self.assertEqual(destination.stat().st_size, 4*1024*1024)
+        self.assertEqual(lanemove.checksum(destination), lanemove.checksum(self.source))
+        self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+
+    def test_distinct_subscription_filters_are_all_recreated_and_verified(self):
+        plan = self.rearm_fixture()
+        path = Path(plan['move_state_file'])
+        state = read_json(path)
+        state['subscriptions'] = [dict(execution_id='exec-example', source_host='source', target='/old/events',
+                                       expires_at='2020-01-01T00:00:00Z', kinds=[kind])
+                                  for kind in ('terminal', 'attention')]
+        write_json(path, state)
+        lanemove.final_state(self.manifest, plan)
+        fresh = [dict(entry, source_host='destination', target=str(self.manifest.paths.events),
+                      subscription_id='new-'+entry['kinds'][0], state='active', expires_at='2999-01-01T00:00:00Z')
+                 for entry in state['subscriptions']]
+        with patch.object(lanemove.socket, 'gethostname', return_value='destination'), patch.object(
+                lanemove.AgentctlClient, 'subscribe', side_effect=lambda execution, kinds: dict(id='new-'+kinds[0])) as create, patch.object(
+                lanemove.AgentctlClient, 'lane_subscriptions', return_value=fresh):
+            self.assertTrue(lanemove.rearm_subscriptions(self.manifest, plan, False))
+            self.assertTrue(lanemove.rearm_subscriptions(self.manifest, plan, False))
+        self.assertEqual(create.call_count, 2)
+        self.assertEqual(len(plan['subscription_outcomes']), 2)
+        self.assertTrue(all(o['verified'] for o in plan['subscription_outcomes'].values()))

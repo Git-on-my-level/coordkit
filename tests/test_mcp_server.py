@@ -89,7 +89,7 @@ class McpAuthTests(McpCase):
         self.assertIn('untrusted', reply['result']['instructions'])
         status, reply = self.call('tools/list')
         self.assertEqual(sorted(t['name'] for t in reply['result']['tools']),
-                         ['ack', 'agents_status', 'bus_history', 'inbox', 'lanes', 'open_questions', 'post', 'question_answer', 'ref_read', 'topics', 'trace', 'wait'])
+                         ['accounts', 'ack', 'agents_status', 'bus_history', 'inbox', 'lanes', 'open_questions', 'post', 'question_answer', 'ref_read', 'topics', 'trace', 'wait'])
         for token in (None, 'wrong', SECRET + 'x', SECRET[:-1]):
             self.assertEqual(self.call('tools/list', token=token)[0], 401, token)
 
@@ -228,6 +228,55 @@ class McpToolTests(McpCase):
                 self.assertFalse(error, text)
                 self.assertEqual(self.rows()[-1]['frm'], name)
                 self.assertNotIn(name, read_json(routing.home(self.manifest)/'register.json', {}))
+
+    def test_post_receipt_survives_delivery_and_mirror_failures(self):
+        # The fsynced append is the post outcome. Delivery/mirroring can fail
+        # afterward; reporting a preflight failure invites duplicate retries.
+        self.enable_writes()
+        for index, (stage, failure) in enumerate((('after_post', SystemExit(1)), ('after_post', RuntimeError('delivery failed')),
+                                                ('project_pending', SystemExit(1)))):
+            module = addressed if stage == 'after_post' else bus
+            message = f'Durable request {index}'
+            with self.subTest(stage=stage, failure=type(failure).__name__), \
+                    patch.object(module, stage, side_effect=failure):
+                error, text = self.tool('post', to='worker-ui', kind='ask', text=message)
+            self.assertFalse(error, text)
+            data = json.loads(text)
+            self.assertEqual((data['ok'], data['rc'], data['write_sent'], data['phase']), (True, 0, True, 'posted'))
+            self.assertEqual(data['post_processing']['rc'], 1)
+            self.assertTrue(any(row['id'] == data['id'] and row['text'] == message for row in self.rows()))
+
+    def test_post_append_sink_exit_cannot_hide_write_or_reuse_previous_receipt(self):
+        from coordkit import adapters
+        self.enable_writes()
+        with patch.object(adapters, 'notify', side_effect=SystemExit(1)):
+            error, text = self.tool('post', to='worker-ui', kind='ask', text='Committed before sink exit')
+        data = json.loads(text)
+        self.assertFalse(error, text)
+        self.assertTrue(data['write_sent'])
+        self.assertEqual(self.rows()[-1]['id'], data['id'])
+        error, text = self.tool('post', to='unknown-agent', kind='ask', text='Must not post')
+        self.assertFalse(error, text)
+        data = json.loads(text)
+        self.assertFalse(data['ok']); self.assertFalse(data['write_sent'])
+        self.assertEqual(data['phase'], 'preflight'); self.assertIsNone(data['id'])
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_post_reports_failed_wake_separately_from_successful_write(self):
+        from coordkit import wake
+        from types import SimpleNamespace
+        self.enable_writes()
+        self.manifest.bus.mirror = False
+        self.lease('lead-a')
+        adapter = SimpleNamespace(name='fake', wake=lambda *a: {'status': 'failed', 'reason': 'unavailable'})
+        with patch.object(wake, 'wake_adapters', return_value=[adapter]):
+            error, text = self.tool('post', to='worker-ui', kind='ask', text='Wake may fail')
+        self.assertFalse(error, text)
+        data = json.loads(text)
+        self.assertEqual((data['ok'], data['write_sent'], data['rc']), (True, True, 0))
+        self.assertEqual(data['wake'], {'status': 'failed', 'attempts': [{'adapter': 'fake', 'status': 'failed'}]})
+        self.assertEqual(data['delivery'], 'recipient_deaf')
+        self.assertEqual(data['post_processing']['rc'], addressed.EXIT_DEAF)
 
     def test_post_as_only_an_allowlisted_lane(self):
         self.enable_writes()

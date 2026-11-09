@@ -60,6 +60,12 @@ class Deliver:
 
 
 @dataclass
+class Accounts:
+    facts_file: str = ""
+    max_age: str = "2h"
+
+
+@dataclass
 class Agent:
     label: str
     actor: str
@@ -359,6 +365,7 @@ class Manifest:
     lanes: list[UsageLane] = field(default_factory=list)
     mcp: Mcp = field(default_factory=Mcp)
     services: Services = field(default_factory=Services)
+    accounts: Accounts = field(default_factory=Accounts)
     relay: Relay | None = None
     adapters: dict = field(default_factory=dict)
     mode: str = "live"
@@ -442,7 +449,7 @@ def load(path: str | Path | None = None) -> Manifest:
         raw["questions"] = question_data
     config = {name: _table(cls, raw.get(name, {}), name) for name, cls in
               (("deliver", Deliver), ("bus", Bus), ("agentctl", Agentctl), ("lane", Lane), ("loop", Loop), ("reconciler", Reconciler),
-               ("wait", Wait), ("merge", Merge), ("launchd", Launchd), ("rc_host", RcHost), ("shadow", Shadow), ("limits", Limits), ("escalation", Escalation), ("obligations", Obligations), ("addressed", Addressed), ("review", Review), ("questions", Questions), ("mcp", Mcp), ("services", Services))}
+               ("wait", Wait), ("merge", Merge), ("launchd", Launchd), ("rc_host", RcHost), ("shadow", Shadow), ("limits", Limits), ("escalation", Escalation), ("obligations", Obligations), ("addressed", Addressed), ("review", Review), ("questions", Questions), ("mcp", Mcp), ("services", Services), ("accounts", Accounts))}
     if config["services"].manager not in ("", "launchd", "systemd"):
         raise ManifestError("invalid_value: services.manager")
     if any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}', key) for key in config['mcp'].projects):
@@ -469,7 +476,7 @@ def load(path: str | Path | None = None) -> Manifest:
                           ("merge", ("max_hold_age",)), ("obligations", ("ack_after", "alert_after", "realert_after", "ask_deadline", "urgent_deadline")), ("wait", ("stale_alert_after",)),
                           ("addressed", ("lease_ttl", "busy_window", "activity_ttl", "label_ttl", "heartbeat_every", "iteration_deadline", "rearm_grace", "urgent_deadline",
                                          "normal_deadline", "realert_after", "confirm_timeout", "deaf_backlog")),
-                          ("questions", ("urgent_deadline", "normal_deadline", "modal_min_age", "notification_idle"))):
+                          ("questions", ("urgent_deadline", "normal_deadline", "modal_min_age", "notification_idle")), ("accounts", ("max_age",))):
         for key in keys:
             value = getattr(config[section], key)
             if value or key != "timeout":

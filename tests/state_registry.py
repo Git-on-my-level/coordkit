@@ -287,3 +287,8 @@ row('rearmcheck.py', 'writer:main', 'readiness wrapper runs recorded argv withou
     'writes PID and exit result on normal completion; caller collects on next poll',
     'caller deadline bounds observation only; an unresolved verifier intent requires inspection',
     'failed or absent result never verifies readiness or triggers another launch')
+
+row('lanemove.py', 'plan:waiter_restart_count', 'completed move detects a dead or reused waiter identity',
+    'receipt-first recovery replaces only the required lane waiter and re-verifies it',
+    'caller timeout bounds recovery polling; uncertain identities never respawn',
+    'ambiguous live identity or missing readiness refuses completion')

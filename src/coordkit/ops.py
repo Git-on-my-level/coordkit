@@ -91,7 +91,7 @@ BUS_OPS = (
         Arg('--since', help='with --signal/--subject: also accept posts in this window (e.g. 30m); default from now'),
         Arg('--subject', help='wait for a kind=state post about this subject (text is never matched)'),
         Arg('--state', help='with --subject: comma-separated states to accept (default DONE,FAILED)'),
-        Arg('--timeout', type=float, default=240, help='minutes'),
+        Arg('--timeout', type=float, default=None, help='minutes; default unlimited with --persistent, 240 otherwise'),
         Arg('--poll', type=float, default=15, help='seconds'),
     ), 'ops:bus_call'),
     Operation('bus.state', 'read', (
@@ -194,7 +194,8 @@ _TOOLS = [
               dict(ROW_ARGS, **FILTER_ARGS, name=NAME_ARG,
                    before_id={'type': 'string', 'description': 'Return rows older than this existing bus id or an opaque next_cursor position key; omit on the first page. Use only one of before_id/cursor.'})),
     read_tool('topics', 'Topics with counts, latest sender/time, and recorded owner/lane, state slot and lease (null when absent).', PAGE_ARGS),
-    read_tool('agents_status', 'Manifest lanes, registered roster and senders in the last 24h, with listening status, private session/account identity, observed model versus launch model, and expiring state labels (source and age in minutes).', PAGE_ARGS),
+    read_tool('agents_status', 'Manifest lanes, registered roster and senders in the last 24h, with listening status, private session/account identity, account_windows from optional capacity facts, observed model versus launch model, and expiring state labels (source and age in minutes).', PAGE_ARGS),
+    read_tool('accounts', 'Fleet-published capacity facts, one row per account with windows (name, used_pct, resets_at, observed_at, stale). Disabled unless accounts.facts_file is set; missing or invalid facts report unavailable. No provider probes or credential reads.', PAGE_ARGS),
     read_tool('lanes', 'Host-local running/recent agentctl executions and rollout train state; terse rows, newest activity first. Sources capped at 100 running + 100 recent executions and 100 train files.', PAGE_ARGS),
     read_tool('wait', 'Wait for the next actionable row addressed to a reader, in log order; excludes own posts and fyi. Never advances stored cursors. Omitted cursor starts at the current log end. At most four concurrent waits.',
               {'name': NAME_ARG,
@@ -263,7 +264,7 @@ def mcp_call(manifest, args):
 
 
 COMMANDS = {
-    'relay': 'relay', 'bus': 'bus', 'sweep': 'addressed', 'mcp-serve': 'mcp_server', 'deliver': 'deliver',
+    'accounts': 'accounts', 'relay': 'relay', 'bus': 'bus', 'sweep': 'addressed', 'mcp-serve': 'mcp_server', 'deliver': 'deliver',
     'lane': 'lane', 'lane-move': 'lanemove', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
     'obligations': 'obligations', 'review': 'review', 'question': 'questions',
     'init': 'lifecycle', 'up': 'lifecycle', 'down': 'lifecycle', 'doctor': 'lifecycle', 'lead': 'lifecycle',
@@ -291,12 +292,14 @@ def main(argv, manifest=None):
 # Public CLI arguments also live here. Compatibility orchestration parsers remain
 # in their adapters until those entry points can be retired independently.
 CLI_ARGS = {
+    'accounts': (Arg('--json', action='store_true'),),
     'lane-move': (Arg('name'), Arg('--to-config', required=True),
                   Arg('--plan', action='store_true', group='mode'),
                   Arg('--apply', action='store_true', group='mode'),
                   Arg('--no-rearm', action='store_true', help='verify recorded re-arms without starting them (operator exception)'),
                   Arg('--timeout', type=int, default=60, help='holder/re-arm deadline in seconds (default 60)'),
                   Arg('--idle-seconds', type=int, default=10, help='minimum transcript quiet age (default 10)')),
+
     'init': (Arg('project'), Arg('--profile', choices=('minimal','anx'), default='minimal'),
              Arg('--workspace',default='anx'), Arg('--board'), Arg('--git-repo')),
     'retire': (Arg('lane'), Arg('--to')),

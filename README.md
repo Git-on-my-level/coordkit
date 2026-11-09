@@ -138,12 +138,14 @@ Apply uses this sequence:
    flags), `bus_name`, `next_steps`, session/transcript paths, `background_shells`,
    `subscriptions`, and `re_arms`. Subscription inventory records execution ID,
    original subscription ID, source host/authority, host-local event target, kinds,
-   expiry and the renewal TTL (72h). Include every execution in `lanes_in_flight`;
+   expiry and the renewal TTL (72h). Distinct event-kind filter sets on the same
+   execution are separate inventory and outcome keys; all are recreated. Include every execution in `lanes_in_flight`;
    missing callbacks refuse finalization. Post a redacted final-state summary,
    then verify absence again.
 4. Copy the session JSONL into the matching `projects/<encoded-cwd>/` directory
    under the new account. `--apply` authorizes this copy: the original is retained,
-   the checksum is receipted before copying, and both copies must match. An
+   the checksum is receipted before copying, the copy streams in 1 MiB chunks,
+   and both copies must match. An
    existing different destination refuses; it is never overwritten. Only the
    parent session JSONL is copied; account settings, credentials and subagent
    directories are not migrated. The destination account must already be usable.
@@ -164,7 +166,8 @@ Apply uses this sequence:
    normal addressed wake kinds), and `agent-heartbeat 50` with the session's explicit
    heartbeat key. Include every extra waiter, monitor, watcher and background shell:
    they die with the old session. Persistent waiters continue consuming after each
-   match, flush deliveries to the private receipt log, and stay armed until explicitly
+   match, flush and fsync deliveries to regular receiver logs before committing
+   the cursor (at least once: a crash in between can replay a delivery), and stay armed until explicitly
    stopped by the operator. This is a durable log receiver, not injection into Claude.
    A second consumer on the same lane cursor refuses; verification requires the
    exact PID, start time, session and cursor-owner record. Each launch intent, PID/start time, output log,
@@ -195,7 +198,10 @@ summary only: move ID, lane, phase, completed phases and attention code. Private
 paths, raw commands, environment values and process/session identities are excluded.
 Paused version-1 receipts discard the old resume verification and require an
 upgraded persistent-waiter/subscription inventory before any re-arm.
-Repeating a finished move is a no-op. Retain the plan, backup and
+Repeating `--apply` after completion verifies the required lane waiter again.
+A proven dead or reused PID is replaced and verified without replaying the copy,
+resume, heartbeat or other completed arms. An uncertain spawn or still-live
+unverified identity refuses automatic replacement; inspect it before manual recovery. Retain the plan, backup and
 resume log as private audit evidence; no cleanup or rollback runs automatically.
 For rollback, quiesce the resumed lane first and review the backup against any
 later manifest edits before restoring the original entry; the source JSONL is
@@ -209,8 +215,10 @@ the exact command and flags. Optional `env` values apply to that recipe; optiona
 Heartbeat recipes require `verify_argv`, whose JSON status must report `event=arm`
 and the same owner PID. Bus waiters require their exact recorded flags and, for
 lane waiters, a freshly written cursor owned by that process and session. Waiter
-recipes require `--persistent`; an explicit nonzero timeout can bound a test or
-operator-managed run. Readiness checks run once in a receipt-producing child;
+recipes require `--persistent`. The required waiter addressed to the moved lane
+must be unbounded: use `--timeout 0`, or omit timeout (persistent mode defaults to
+unlimited). Finite timeouts, including equals syntax or later overrides, refuse.
+Other recorded waiters may use an explicit finite timeout. Readiness checks run once in a receipt-producing child;
 `--timeout` bounds polling without killing a slow verifier. Rerun apply to collect
 its result; an ambiguous verifier intent never launches a duplicate. Use foreground commands; move
 receipts retain each process's output log for the resumed lane/operator to collect.
@@ -232,3 +240,7 @@ file and 16 MiB overall. `usage.truncated=true` marks incomplete readings. These
 are recent-window observations, not lifetime accounting. Own-ask waiter seeding
 uses the last 1 MiB of bus history and retains at most 4096 ask IDs; replies to
 older excluded asks still wake when they match the normal addressed wake kinds.
+
+Move obligation checks read a bus tail capped at 4 MiB. If the tail cannot cover
+the retained history, the move refuses with `obligation_history_limit` rather than
+silently overlooking old obligations; reconcile/archive history before retrying.

@@ -73,9 +73,9 @@ def main(argv=None):
                     raise ManifestError("init_requires_git_repo: pass --git-repo owner/name")
             return initialize(init_options.project, target, init_options.workspace, init_options.board, repo, profile=init_options.profile)
         manifest = load(options.manifest)
-        if options.command == 'lane-move':
-            from .lanemove import main as lanemove_main
-            return lanemove_main(rest, manifest)
+        if options.command in ('accounts', 'lane-move'):
+            module = __import__('coordkit.' + COMMANDS[options.command], fromlist=['main'])
+            return module.main(rest, manifest)
         if options.command in ('retire', 'unretire'):
             from .ops import parser_for
             lane_parser = parser_for(options.command)
