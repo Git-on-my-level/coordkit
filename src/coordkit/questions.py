@@ -778,11 +778,10 @@ def tier2(manifest, record, why, at=None):
     text = summary(record)
     ask_id = None
     if manifest.mode == 'live':
-        from .anxcli import AnxClient
+        from .anxcli import AnxClient, ask_reference
         try:
             result = AnxClient(manifest).ask(manifest.escalation.card, brief)
-            ask_id = (result or {}).get('ask_id') or (result or {}).get('id') or ((result or {}).get('ask') or {}).get('id') \
-                or (result or {}).get('event_ref')
+            ask_id = ask_reference(result)
         except Exception as exc:  # anx down: relay file now, retry on the next sweep
             addressed.to_relay_file(manifest, f'QUESTION anx_ask_failed {record["qid"]}: {exc}'[:300])
         if not ask_id:
@@ -1070,7 +1069,7 @@ def relay_anx_answer(manifest, record, answer):
 
 
 def anx_answers(manifest):
-    """{ask id: answer} newly available from anx (read-only await)."""
+    """{ask id: answer} from the shared stream, retained before routing to an owner."""
     from .anxcli import AnxClient
     from .process import ToolError
     try:

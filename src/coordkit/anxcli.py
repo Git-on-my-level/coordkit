@@ -15,15 +15,24 @@ class AnxClient:
         self.actor = actor or manifest.anx.lead_actor
 
     def call(self, *args, write=False, **kwargs):
+        answer_poll = args[:1] == ('await',) and '--answers' in args
         read_only = (args[:2] in (("cards", "get"), ("cards", "list"), ("lease", "show"), ("inbox", "list"))
-                     or args[:1] in (("orient",), ("context",)) or args[:2] == ("bridge", "status") or args[:2] == ("await", "--answers"))
+                     or args[:1] in (("orient",), ("context",)) or args[:2] == ("bridge", "status") or answer_poll)
         if write or (self.manifest.mode == "shadow" and not read_only):
             self.manifest.writable()
         cfg = self.manifest.anx
         argv = [os.environ.get("ANX", "anx"), "--workspace", cfg.workspace, "--as", self.actor, "--json"]
         if cfg.base_url:
             argv += ["--base-url", cfg.base_url]
-        return call_json([*argv, *map(str, args)], **kwargs)
+        result = call_json([*argv, *map(str, args)], **kwargs)
+        if answer_poll and self.manifest.mode == 'live' and isinstance(result, dict):
+            # A shared consuming stream needs one receipt boundary for every reader,
+            # including lead waiters and future integrations, before returning data.
+            from . import loop_answers
+            for item in result.get('answers', []):
+                loop_answers.defer(self.manifest, item)
+                loop_answers.receive(self.manifest, item)
+        return result
 
     def identities(self):
         """Names this actor is held under: its --as name and the principal id ANX records on leases
@@ -67,13 +76,28 @@ class AnxClient:
             args += ["--next", next_in]
         return self.call(*args, write=True)
 
-    def ask(self, card, brief):
+    def ask(self, card, brief, *, again=False, supersedes=None):
         """The one path to the operator: files only a brief that passes briefs.validate."""
         from . import briefs
         errors = briefs.validate(brief)
         if errors:
             raise ToolError("anx", 6, "brief_refused: " + "; ".join(errors), "brief_refused")
-        return self.call("ask", *briefs.anx_args(brief)[:1], "--subject-ref", card, *briefs.anx_args(brief)[1:], write=True)
+        return self.call("ask", *briefs.anx_args(brief)[:1], "--subject-ref", card, *briefs.anx_args(brief)[1:],
+                         *(["--again"] if again else []),
+                         *(["--supersedes", supersedes] if supersedes else []), write=True)
+
+
+def ask_reference(result):
+    """Prefer a wrapped response's reference; fall back to compatibility top-level fields."""
+    if not isinstance(result, dict):
+        return None
+    for candidate in (result.get('body'), result):
+        if isinstance(candidate, dict):
+            ask = candidate.get('ask') if isinstance(candidate.get('ask'), dict) else {}
+            ref = candidate.get('ask_id') or candidate.get('id') or ask.get('id') or candidate.get('event_ref')
+            if ref:
+                return ref
+    return None
 
 
 def past_promises(orient):

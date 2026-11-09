@@ -52,7 +52,8 @@ def mirror(manifest, row, rows):
             if kind == 'hold':
                 client.call('cards', 'create', '--board', manifest.anx.board, '--handle',
                             f"hold-pr-{pr}-{row['frm']}", '--title', f"Hold PR {pr}: {row['text']}",
-                            '--column', 'blocked', '--request-key', f"ck-{manifest.project.name}-hold-{pr}-{row['frm']}", write=True)
+                            '--body', row['text'], '--column', 'blocked',
+                            '--request-key', f"ck-{manifest.project.name}-hold-{pr}-{row['frm']}", write=True)
             else:
                 posters = {r['frm'] for r in rows if r.get('kind') == 'hold' and pr in r.get('prs', [])
                            and (r['frm'] == row['frm'] or row['frm'] == 'lead')}

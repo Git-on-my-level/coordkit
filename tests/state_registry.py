@@ -96,7 +96,25 @@ row('lifecycle.py', 'reconcile/state.json', 'read last-run receipt', 'new succes
 row('loop.py', 'STOP|writer:stop', 'loop stop with reason', 'explicit human removal after reactivation', 'explicit disposition; card resolved', 'stopped card excluded from cadence asks')
 row('loop.py', 'cycle.lock|writer:run_cycle', 'cycle begins with pid/start/deadline', 'finally truncate metadata; kernel unlock', 'loop.max_age', 'failure ask; skipped run receipt counts')
 row('loop.py', 'result.lock|fails|skip.json|writer:record_failure', 'failed, unknown or skipped cycle', 'successful cycle resets counter', 'fail_report_after cycles', 'durable escalation ask')
-row('loop.py', 'escalation.json|writer:retry_escalation', 'failure threshold', 'successful cycle after confirmed send clears', 'retry next cycle; loop.max_age per run', 'ANX ask then configured page')
+row('loop.py', 'escalation.json|writer:_retry_escalation', 'failure threshold; journal pending ask before sending',
+    'any successful cycle clears the streak and pending/sent report under result.lock',
+    'retry unsent next cycle; sent_at/next_at/sent_count re-arm at failure_realert_intervals, last interval repeats',
+    'direct ANX Decide ask on loop card; previous_ask_id replaces its predecessor, previous_answers retains known rulings by ID; legacy agent-only sent receipts are delivered immediately')
+row('loop_answers.py', 'state/loop-asks|.json|writer:remember',
+    'successful direct loop ask returns its ID, journaled before marking send complete',
+    'correlation receipts and received answers survive supersession/recovery; operator archives with bus/ask history',
+    'persistent provenance, no blocking latch; direct lookup by hashed ask ID',
+    'missing/invalid ask ID fails the loop report; failed local registration retries without another ask')
+row('loop_answers.py', '.answer.json|writer:receive|writer:deliver',
+    'any consuming ANX answer reader receives a registered loop reply through the shared client',
+    'durable decision bus row with deterministic ID, then pending answer removed; answer remains in correlation receipt for reminder context',
+    'reconciler retries each sweep; external calls bounded by the bus command',
+    'LOOP_ANSWER_PENDING retains payload; direct answer never becomes ambiguous or applies an automatic repair')
+row('loop_answers.py', 'reconcile/received-answers|*.json|writer:defer',
+    'shared ANX client consumes a reply from the stream, before returning it to any caller',
+    'reconciler durably merges into answers.json then unlinks the received file',
+    'next reconciliation; immutable ask IDs dedupe duplicate stream results',
+    'unmatched replies retain normal answer_max_age handling; producer-registration races do not discard replies')
 row('loop.py', 'pending.json|writer:_cycle', 'extract completed before publication', 'receipt/checkpoint complete then unlink', 'next bounded cycle; loop.max_age', 'failure threshold ask')
 row('loop.py', 'offsets|.json|plan.json|req', 'auditor request / transcript checkpoint', 'commit checkpoint on success; archive evidence', 'one cycle max_age; archive retained', 'cycle failure ask')
 row('loop.py', '.plist|writer:install', 'stage plist', 'up apply or down', 'persistent staged configuration, no latch', 'doctor drift')

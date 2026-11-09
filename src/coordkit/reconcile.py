@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 import time
 
-from . import bus, deadletters, lane, loop, escalation
+from . import bus, deadletters, lane, loop, loop_answers, escalation
 from .stock import held, report
 from .actl import AgentctlClient
 from .anxcli import AnxClient, past_promises
@@ -77,6 +77,8 @@ def reconcile(manifest, dry_run=False, at=None):
             impact='An unresolved coordination obligation can strand work or lose a follow-up.',
             recommend=recommend,why='The reconciler cannot safely decide acceptance or ownership on behalf of the lead.'),ask=True)
     bus.configure(manifest)
+    if not dry_run:
+        loop_answers.drain(manifest)
     rows=bus.read()
     active=actl.recent(nonterminal=True)
     card_result=client.call('cards','list','--board',manifest.anx.board)
@@ -254,20 +256,30 @@ def reconcile(manifest, dry_run=False, at=None):
             if exc.exit_code != 8:
                 raise
             answers=[]
+        deferred = loop_answers.deferred(manifest)
         known_answers={item.get('ask_id') for item in pending}
-        pending += [item for item in answers if item.get('ask_id') not in known_answers]
+        for item in [item for _, item in deferred] + answers:
+            if item.get('ask_id') not in known_answers:
+                pending.append(item)
+                known_answers.add(item.get('ask_id'))
         for item in pending:
             item.setdefault('received_at', at)
         from . import briefs, questions as _questions
         question_asks = {r['anx_ask_id']: r for r in _questions.load_all(manifest).values() if r.get('anx_ask_id')}
         if pending:
             write_json(pending_path,pending)
+        for received_path, _ in deferred:
+            received_path.unlink(missing_ok=True)  # only after answers.json is durable
         for item in list(pending):
             if any(row.get('id') == 'answer-'+item['ask_id'] for row in bus.read()):
                 pending.remove(item)
                 write_json(pending_path,pending)
                 continue
             subject=item.get('subject_ref') or item.get('subject',{}).get('ref')
+            if loop_answers.receive(manifest, item):
+                pending.remove(item)
+                write_json(pending_path, pending)
+                continue
             if item['ask_id'] in question_asks:
                 # A question's answer: hand it to the question ladder now (this read may have consumed it from the
                 # shared answer stream), never a blocker correlation.

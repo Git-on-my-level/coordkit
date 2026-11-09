@@ -50,17 +50,19 @@ class LoopTests(FakeCase):
         self.assertFalse(self.manifest.paths.bus_log.exists())
         self.assertTrue(any('--met' in c['args'] for c in self.calls()))
 
-    def test_failures_escalate_once_on_third(self):
+    def test_failures_escalate_to_decide_on_third_then_recovery_resets(self):
         self.respond({'tool':'agentctl','contains':['delegate','--wait'], 'exit':11,'stderr':'failed auditor'})
         for count in range(1,5):
             code,out,err = self.invoke()
             self.assertEqual(code,1)
             self.assertEqual(int((self.state/'fails').read_text()),count)
-        asks = self.escalations()  # routed to an agent on the bus, never to the operator
+        asks = [c for c in self.calls() if c['tool'] == 'anx' and 'ask' in c['args']]
         self.assertEqual(len(asks),1)
-        text = asks[0]['args'][1]
-        self.assertTrue(text.startswith('coordkit loop_failure: Restore the loop-audit card, which keeps failing?'))
-        self.assertIn('[card:loop-audit]',text)
+        args = asks[0]['args']
+        self.assertIn('Restore the loop-audit card, which keeps failing?', args)
+        self.assertEqual(args[args.index('--subject-ref') + 1], 'card:loop-audit')
+        self.assertIn('--again', args)
+        self.assertEqual(self.escalations(), [])
         self.respond()
         self.assertEqual(self.invoke()[0],0)
         self.assertEqual(int((self.state/'fails').read_text()),0)
