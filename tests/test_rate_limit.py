@@ -80,7 +80,9 @@ class RateLimitRecoveryTests(FakeCase):
 
     def test_recovery_reacquires_a_lapsed_lease_before_restoring_the_watcher(self):
         plan = self.plan()
-        throttled = {'state': 'running', 'liveness': 'unreachable', 'updated_at': stamp(3 * 3600),
+        # The watcher died (unreachable) while the run was throttled; the evidence
+        # itself is fresh, so recovery must keep the run and reacquire the lease.
+        throttled = {'state': 'running', 'liveness': 'unreachable', 'updated_at': stamp(30),
                      'rate_limit': {'retry_after_ms': 2500}}
         self.respond({'tool': 'anx', 'contains': ['renew'], 'exit': 13,
                       'json': {'ok': False, 'error': {'code': 'lease_held'}}},
