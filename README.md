@@ -167,7 +167,12 @@ Apply uses this sequence:
    heartbeat key. Include every extra waiter, monitor, watcher and background shell:
    they die with the old session. Persistent waiters continue consuming after each
    match, flush and fsync deliveries to regular receiver logs before committing
-   the cursor (at least once: a crash in between can replay a delivery), and stay armed until explicitly
+   the cursor. Before each append, they check the last 1 MiB of the receiver log
+   for complete records with the same message ID, skipping delivered IDs and
+   advancing the cursor. This makes delivery effectively once across a crash
+   between receiver fsync and cursor commit, provided the record remains in that
+   bounded tail. Append to the same readable receiver log across restarts; pipes and terminals
+   cannot provide persistent deduplication. Waiters stay armed until explicitly
    stopped by the operator. This is a durable log receiver, not injection into Claude.
    A second consumer on the same lane cursor refuses; verification requires the
    exact PID, start time, session and cursor-owner record. Each launch intent, PID/start time, output log,

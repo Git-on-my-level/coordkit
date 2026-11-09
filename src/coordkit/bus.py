@@ -470,16 +470,55 @@ def _main(argv, *, site_local=False, origin='coordkit'):
     return dispatch(o)
 
 
+WAIT_RECEIVER_TAIL_BYTES = 1024 * 1024
+WAIT_RECEIVER_HEADER = re.compile(r'^(\S+) (?:\S+ \S+→\S+: |\S+ \S+→\S+ \[[^\]\n]+\] )')
+
+
+def wait_receiver_ids(fd):
+    """Recover complete deliveries from a bounded tail of the actual stdout file."""
+    # stdout is usually write-only. Reopen for reading rather than seeking or
+    # reading its descriptor: /dev/fd on macOS shares the writer's file offset.
+    if sys.platform == 'darwin':
+        path = os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b'\0', 1)[0])
+    else:
+        path = f'/proc/self/fd/{fd}'
+    with open(path, 'rb') as receiver:
+        actual, expected = os.fstat(receiver.fileno()), os.fstat(fd)
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            raise OSError('wait receiver changed while reopening its log')
+        offset = max(0, actual.st_size - WAIT_RECEIVER_TAIL_BYTES)
+        receiver.seek(max(0, offset - 1))
+        boundary = not offset or receiver.read(1) == b'\n'
+        receiver.seek(offset)
+        data = receiver.read(WAIT_RECEIVER_TAIL_BYTES)
+        rows = data.split(b'\n')[:-1]
+    if not boundary:
+        rows = rows[1:]
+    # Full deliveries may contain prose on subsequent lines. A word matching an
+    # ID there is not evidence that the corresponding message was delivered.
+    ids = {match[1] for row in rows
+           if (match := WAIT_RECEIVER_HEADER.match(row.decode('utf-8', errors='replace')))}
+    return ids, bool(data and not data.endswith(b'\n'))
+
+
 def deliver_wait_hits(hits, full):
-    """Publish before acknowledging: a crash before cursor commit may duplicate, never lose."""
-    for row in hits:
-        print(line(row, full=full))
-    sys.stdout.flush()
+    """Recover receiver IDs before appending; always sync before cursor commit."""
     try:
         fd = sys.stdout.fileno()
     except (io.UnsupportedOperation, AttributeError):
-        return  # In-memory/test receivers have no kernel durability boundary.
-    if stat.S_ISREG(os.fstat(fd).st_mode):
+        fd = None  # In-memory/test receivers have no kernel durability boundary.
+    regular = fd is not None and stat.S_ISREG(os.fstat(fd).st_mode)
+    sys.stdout.flush()
+    delivered, partial = wait_receiver_ids(fd) if regular else (set(), False)
+    for row in hits:
+        if row['id'] not in delivered:
+            if partial:
+                print()  # A torn prior write must not swallow the next record's ID.
+                partial = False
+            print(line(row, full=full))
+            delivered.add(row['id'])
+    sys.stdout.flush()
+    if regular:
         os.fsync(fd)  # A failed receiver sync must leave the cursor unchanged.
 
 
@@ -882,11 +921,14 @@ def dispatch(o):
             total, indexed = read_from(start)
             if o.own_asks:
                 own_asks.extend(r['id'] for _, r in indexed if r['frm'] == o.to and r.get('kind') == 'ask')
-            hits = [r for _, r in indexed if r['frm'] != o.to and
+            hits = [(index, r) for index, r in indexed if r['frm'] != o.to and
                     (((r.get('orig_kind') or r.get('kind')) in kinds and for_lane(r, o.to))
                      or r.get('re') in own_asks)]
-            if hits:
-                deliver_wait_hits(hits, o.full)
+            for index, row in hits:
+                deliver_wait_hits([row], o.full)
+                # Limit crash recovery to the last delivery, even for a batch
+                # whose output would exceed the bounded receiver tail.
+                set_cursor(o.to, 'wait', index + 1)
             set_cursor(o.to, 'wait', total)
             if hits and not o.persistent:
                 return
