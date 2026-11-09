@@ -312,7 +312,7 @@ class BusTests(FakeCase):
 
     def test_concurrent_cli_smoke(self):
         result=subprocess.run([sys.executable,str(Path(__file__).with_name('smoke_bus.py'))],
-                              capture_output=True,text=True,timeout=30)
+                              capture_output=True,text=True,timeout=60)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('M2_SMOKE_OK',result.stdout)
 

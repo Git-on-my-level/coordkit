@@ -50,6 +50,7 @@ effort = "low"
         self.original = self.file.read_bytes()
         for target, kwargs in (
             ('coordkit.lanemove.claude_resume.processes', dict(return_value={})),
+            ('coordkit.actl.AgentctlClient.lane_subscriptions', dict(return_value=[])),
             ('coordkit.lanemove.claude_resume.holder_present', dict(return_value=False)),
             ('coordkit.routing.probe_identity', dict(side_effect=lambda record: record)),
             ('os.kill', dict(side_effect=AssertionError('lane move must not signal'))),
@@ -121,10 +122,10 @@ effort = "low"
         self.assertTrue({'goal', 'open_prs', 'lanes_in_flight', 'bus_name', 'next_steps',
                          'background_shells', 're_arms'} <= state.keys())
         self.assertEqual(state['re_arms'][0]['argv'][-3:], ['--to', 'worker', '--own-asks'])
-        state.update(goal='Finish the release', open_prs=[17], lanes_in_flight=[{'exec_id': 'exec-example'}],
+        state.update(goal='Finish the release', open_prs=[17], lanes_in_flight=[],
                      next_steps=['Check the canary'])
         for kind in ('bus-waiter', 'monitor', 'watcher', 'background-shell'):
-            argv = ['bus', 'wait', '--to', 'other', '--kinds', 'answer,state'] if kind == 'bus-waiter' else ['check-'+kind]
+            argv = ['bus', 'wait', '--persistent', '--to', 'other', '--kinds', 'answer,state'] if kind == 'bus-waiter' else ['check-'+kind]
             state['re_arms'].append(dict(name='extra-'+kind, kind=kind, argv=argv))
         state['background_shells'] = [dict(pid=22, rearm='extra-background-shell')]
         write_json(path, state)
@@ -134,7 +135,7 @@ effort = "low"
         self.assertEqual(recorded['re_arms'], state['re_arms'])
         self.assertEqual(recorded['goal'], state['goal'])
         self.assertEqual(recorded['waiters'][-1], dict(name='extra-bus-waiter',
-                                                     flags=['--to', 'other', '--kinds', 'answer,state']))
+                                                     flags=['--persistent', '--to', 'other', '--kinds', 'answer,state']))
         self.assertIn('"Exit and stop tasks" (stop background shells)', printed)
         self.assertEqual(read_json(path)['background_shells'], state['background_shells'])
 
@@ -209,7 +210,7 @@ effort = "low"
         entries += [dict(name=kind, kind=kind, argv=['fake-'+kind])
                     for kind in ('monitor', 'watcher', 'background-shell')]
         entries.append(dict(name='other-waiter', kind='bus-waiter',
-                            argv=['bus', 'wait', '--to', 'other', '--kinds', 'answer,state']))
+                            argv=['bus', 'wait', '--persistent', '--to', 'other', '--kinds', 'answer,state']))
         processes, commands = {}, []
         def spawn(argv, **kwargs):
             self.assertEqual(self.plan()['rearm_outcomes'][entries[len(commands)]['name']]['status'], 'intent')
@@ -220,12 +221,13 @@ effort = "low"
                 cursor = self.manifest.paths.bus_log.parent/'state/cursors'/(argv[argv.index('--to')+1]+'.wait')
                 cursor.parent.mkdir(parents=True, exist_ok=True)
                 cursor.write_text('0')
+                write_json(cursor.with_suffix('.wait.owner.json'), dict(pid=pid, started='started', session_id='session-one'))
             return Mock(pid=pid)
         status = subprocess.CompletedProcess([], 0, json.dumps(dict(event='arm', owner='201:timer')), '')
         with patch.object(lanemove.subprocess, 'Popen', side_effect=spawn), patch.object(
                 claude_resume, 'start_time', return_value='started'), patch.object(
                 claude_resume, 'processes', return_value=processes), patch.object(
-                lanemove.subprocess, 'run', return_value=status):
+                lanemove, 'verifier_output', return_value=status.stdout):
             self.assertTrue(lanemove.rearm_all(self.manifest, plan))
             self.assertTrue(lanemove.rearm_all(self.manifest, plan))
             processes.pop(203)  # A lane-wide hook cannot hide a missing watcher.
@@ -259,9 +261,10 @@ effort = "low"
         status = subprocess.CompletedProcess([], 0, json.dumps(dict(event='arm', owner='201:timer')), '')
         with patch.object(lanemove.subprocess, 'Popen') as spawn, patch.object(
                 claude_resume, 'processes', return_value=snapshot), patch.object(
-                lanemove.subprocess, 'run', return_value=status):
+                lanemove, 'verifier_output', return_value=status.stdout):
             self.assertFalse(lanemove.rearm_all(self.manifest, plan, no_rearm=True))
             cursor.write_text('0')
+            write_json(cursor.with_suffix('.wait.owner.json'), dict(pid=200, started='manual', session_id='session-one'))
             self.assertTrue(lanemove.rearm_all(self.manifest, plan, no_rearm=True))
         spawn.assert_not_called()
         with patch.object(lanemove, 'rearmed', return_value=True), patch.object(
@@ -280,11 +283,12 @@ effort = "low"
         cursor = self.manifest.paths.bus_log.parent/'state/cursors/worker.wait'
         cursor.parent.mkdir(parents=True, exist_ok=True)
         cursor.write_text('0')
+        write_json(cursor.with_suffix('.wait.owner.json'), dict(pid=200, started='manual', session_id='session-one'))
         snapshot = {e['pid']: dict(started=e['started'], argv=shlex.join(e['argv'])) for e in state['re_arms']}
         status = subprocess.CompletedProcess([], 0, json.dumps(dict(event='arm', owner='201:manual')), '')
         with patch.object(lanemove.subprocess, 'Popen') as spawn, patch.object(
                 claude_resume, 'processes', return_value=snapshot), patch.object(
-                lanemove.subprocess, 'run', return_value=status):
+                lanemove, 'verifier_output', return_value=status.stdout):
             self.assertTrue(lanemove.rearm_all(self.manifest, plan, no_rearm=True))
         spawn.assert_not_called()
         self.assertTrue(all(o['manual_recovery_at'] for o in self.plan()['rearm_outcomes'].values()))
@@ -314,7 +318,7 @@ effort = "low"
     def test_real_rearm_children_arm_wait_cursor_heartbeat_and_monitor(self):
         plan = self.rearm_fixture()
         entries = plan['move_state']['re_arms']
-        entries[0]['argv'] += ['--timeout', '0.25', '--poll', '0.03']
+        entries[0]['argv'] += ['--timeout', '0.1', '--poll', '0.03']
         finish, status = self.root/'finish', self.root/'heartbeat.json'
         binary = self.root/'agent-heartbeat'
         binary.write_text('#!'+sys.executable+'\n'+f'''
@@ -341,7 +345,7 @@ else:
             if kwargs.get('start_new_session'):
                 children.append(child)
             return child
-        # Give the waiter an own ask whose non-wake-kind reply will end it naturally.
+        # Persistent consumers must retain a receiver after the first reply.
         bus.configure(self.manifest)
         bus.append([dict(id='mine', ts='2026-01-01T00:00:00Z', frm='worker', to='other', kind='ask', text='help')])
         try:
@@ -356,7 +360,15 @@ else:
                 bus.configure(self.manifest)
                 bus.append([dict(id='reply', ts='2026-01-01T00:00:01Z', frm='other', to='worker',
                                  kind='fyi', re='mine', text='reply under another kind')])
-                self.assertEqual(children[0].wait(timeout=5), 0)
+                deadline = time.monotonic()+3
+                log = Path(plan['rearm_outcomes']['worker']['log'])
+                while 'reply under another kind' not in log.read_text() and time.monotonic() < deadline:
+                    time.sleep(.03)
+                self.assertIsNone(children[0].poll())
+                bus.append([dict(id='second', ts='2026-01-01T00:00:02Z', frm='other', to='worker',
+                                 kind='ask', text='second work item')])
+                self.assertEqual(children[0].wait(timeout=10), 3)
+                self.assertIn('second work item', log.read_text())
         finally:
             finish.touch()
             for child in children:
@@ -427,7 +439,7 @@ else:
         self.assertEqual(self.plan()['after_reading']['usage']['input_tokens'], 100)
         final = [r for r in self.rows() if r['kind'] == 'state' and r.get('subject') == 'lane-move']
         self.assertEqual(final[0]['state'], 'DONE')
-        self.assertIn('session=session-one', final[0]['text'])
+        self.assertNotIn(str(self.source), final[0]['text'])
         self.assertTrue(any(r['id'] == plan['id'] and r['kind'] == 'handoff' for r in self.rows()))
         count = len(self.rows())
         self.invoke('--apply')
@@ -566,6 +578,9 @@ else:
         with self.assertRaisesRegex(lanemove.Refusal, 'rearm_timeout'):
             self.invoke('--apply')
         cursor.touch()
+        with self.assertRaisesRegex(lanemove.Refusal, 'rearm_timeout'):
+            self.invoke('--apply')
+        self.hook()
         self.invoke('--apply')
 
     def test_cli_routes_plan_and_shadow_refuses(self):
@@ -699,3 +714,139 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
         with self.assertRaisesRegex(lanemove.Refusal, 'move_manifest_mismatch'):
             lanemove.main(['worker', '--to-config', str(self.target), '--apply'], load(other))
         self.assertFalse(self.rows())
+
+    def test_resume_rejects_old_waiter_even_when_its_cursor_is_fresh(self):
+        self.frozen()
+        plan = self.plan()
+        plan['resume_requested_at'] = time.time()-1
+        cursor = self.manifest.paths.bus_log.parent/'state/cursors/worker.wait'
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        cursor.touch()
+        with patch.object(claude_resume, 'processes', return_value={
+                77: dict(started='old', argv='coordkit bus wait --to worker')}):
+            self.assertFalse(lanemove.rearmed(self.manifest, plan))
+        self.hook(plan)
+        self.assertTrue(lanemove.rearmed(self.manifest, plan))
+
+    def test_existing_waiter_refuses_spawn_and_pid_reuse_cannot_verify(self):
+        plan = self.rearm_fixture()
+        entry = plan['move_state']['re_arms'][0]
+        current = {77: dict(started='old', argv=shlex.join(entry['argv']))}
+        with patch.object(claude_resume, 'processes', return_value=current), patch.object(
+                lanemove.subprocess, 'Popen') as spawn, self.assertRaisesRegex(lanemove.Refusal, 'duplicate_waiter'):
+            lanemove.rearm_all(self.manifest, plan)
+        spawn.assert_not_called()
+        self.assertFalse(lanemove.verify_rearm(self.manifest, plan, entry,
+                                             dict(pid=77, started='reused', requested_at=0), current))
+
+    def test_held_cursor_refuses_waiter_even_without_process_snapshot(self):
+        plan = self.rearm_fixture()
+        entry = plan['move_state']['re_arms'][0]
+        lock = self.manifest.paths.bus_log.parent/'state/cursors/worker.wait.lock'
+        with lanemove.locked(lock), patch.object(lanemove.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(lanemove.Refusal, 'move_locked'):
+                lanemove.rearm_all(self.manifest, plan)
+        spawn.assert_not_called()
+
+    def test_bus_refs_only_expose_summary_and_private_receipts_stay_0600(self):
+        from coordkit.refs import ref_file
+        self.manifest.mcp.ref_roots = [str(self.manifest.paths.root)]
+        plan = lanemove.prepare(self.manifest, 'worker', str(self.target))
+        self.assertFalse(lanemove.exposed(self.manifest, Path(plan['plan_file'])))
+        plan['holders'] = {'77': dict(argv='example-command private-value')}
+        plan['move_state'] = dict(re_arms=[dict(env={'EXAMPLE_VALUE': 'private-value'})])
+        Path(plan['plan_file']).chmod(0o644)
+        lanemove.save(plan)
+        with contextlib.redirect_stdout(io.StringIO()):
+            lanemove.publish(self.manifest, plan, 'check', 'handoff', 'Redacted move summary')
+        row = self.rows()[-1]
+        public = ref_file(self.manifest, row).read_text()
+        self.assertNotIn('private-value', public)
+        self.assertNotIn(plan['plan_file'], json.dumps(row))
+        self.assertNotIn('argv', public)
+        self.assertNotIn('env', public)
+        self.assertEqual(Path(plan['plan_file']).stat().st_mode & 0o777, 0o600)
+        with self.assertRaisesRegex(ValueError, 'outside'):
+            ref_file(self.manifest, dict(ref=plan['plan_file']))
+
+    def test_receipt_scan_and_receipt_bytes_fail_closed_at_caps(self):
+        self.invoke('--plan')
+        with patch.object(lanemove, 'MAX_RECEIPTS', 0), self.assertRaisesRegex(
+                lanemove.Refusal, 'receipt_scan_limit'):
+            self.invoke('--plan')
+        with patch.object(lanemove, 'MAX_RECEIPT_BYTES', 1), self.assertRaisesRegex(
+                lanemove.Refusal, 'receipt_size_limit'):
+            self.invoke('--plan')
+
+    def test_subscription_inventory_covers_inflight_and_recreates_on_new_host(self):
+        plan = self.rearm_fixture()
+        path = Path(plan['move_state_file'])
+        state = read_json(path)
+        state['lanes_in_flight'] = [dict(exec_id='exec-example')]
+        write_json(path, state)
+        with self.assertRaisesRegex(lanemove.Refusal, 'subscription_inventory_required'):
+            lanemove.final_state(self.manifest, plan)
+        old = dict(execution_id='exec-example', subscription_id='sub-old', source_host='old-host',
+                   target='/old/events.ndjson', expires_at='2020-01-01T00:00:00Z', kinds=['terminal', 'attention'])
+        state['subscriptions'] = [old]
+        write_json(path, state)
+        lanemove.final_state(self.manifest, plan)
+        fresh = dict(old, source_host='new-host', target=str(self.manifest.paths.events),
+                     subscription_id='sub-new', expires_at='2999-01-01T00:00:00Z', state='active')
+        with patch.object(lanemove.socket, 'gethostname', return_value='new-host'), patch.object(
+                lanemove.AgentctlClient, 'subscribe', return_value=dict(id='sub-new')) as create, patch.object(
+                lanemove.AgentctlClient, 'lane_subscriptions', return_value=[fresh]):
+            self.assertTrue(lanemove.rearm_subscriptions(self.manifest, plan, False))
+            self.assertTrue(lanemove.rearm_subscriptions(self.manifest, plan, False))
+            create.assert_called_once_with('exec-example', kinds=['terminal', 'attention'])
+        with patch.object(lanemove.socket, 'gethostname', return_value='new-host'), patch.object(
+                lanemove.AgentctlClient, 'lane_subscriptions', return_value=[old]):
+            self.assertFalse(lanemove.rearm_subscriptions(self.manifest, plan, False))
+
+    def test_slow_verifier_finishes_without_signals_or_duplicate_launch(self):
+        self.invoke('--plan')
+        plan = self.plan()
+        outcome = dict(pid=991)
+        entry = dict(verify_argv=[sys.executable, '-c', 'import time; time.sleep(2.2); print("ready")'])
+        actual, children = subprocess.Popen, []
+        def spawn(*args, **kwargs):
+            child = actual(*args, **kwargs)
+            children.append(child)
+            return child
+        with patch.object(lanemove.subprocess, 'Popen', side_effect=spawn), patch.dict(
+                os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]/'src')):
+            try:
+                self.assertIsNone(lanemove.verifier_output(plan, entry, outcome))
+                self.assertIsNone(lanemove.verifier_output(plan, entry, outcome))
+                self.assertEqual(len(children), 1)
+                children[0].wait(timeout=15)
+                self.assertEqual(lanemove.verifier_output(plan, entry, outcome), 'ready')
+            finally:
+                for child in children:
+                    child.wait(timeout=15)
+
+    def test_paused_legacy_receipt_discards_cursor_based_resume_verification(self):
+        self.invoke('--plan')
+        plan = self.plan()
+        plan.update(version=1, resume_verified_at=time.time())
+        lanemove.save(plan)
+        self.invoke('--plan')
+        self.assertEqual(self.plan()['version'], 2)
+        self.assertNotIn('resume_verified_at', self.plan())
+
+    def test_legacy_one_shot_inventory_cannot_spawn_from_a_paused_receipt(self):
+        plan = self.rearm_fixture()
+        state = plan['move_state']
+        state.pop('subscriptions')
+        state['re_arms'][0]['argv'].remove('--persistent')
+        write_json(Path(plan['move_state_file']), state)
+        with patch.object(lanemove.subprocess, 'Popen') as spawn, self.assertRaisesRegex(
+                lanemove.Refusal, 'invalid_bus_waiter'):
+            lanemove.rearm_all(self.manifest, plan)
+        spawn.assert_not_called()
+
+    def test_broadened_ref_roots_cannot_hide_an_existing_private_move(self):
+        self.invoke('--plan')
+        self.manifest.mcp.ref_roots = [str(self.manifest.paths.root)]
+        with self.assertRaisesRegex(lanemove.Refusal, 'exposed_legacy_receipts'):
+            lanemove.prepare(self.manifest, 'worker', str(self.target))

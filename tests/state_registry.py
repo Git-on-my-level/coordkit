@@ -229,7 +229,7 @@ row('wake.py', 'state/wakes/scan.json|writer:scan', 'scan of rows written outsid
 row('mcp_install.py', 'mcp-service.json|mcp/stdout.log|mcp/stderr.log|writer:main', 'explicit mcp install', 'mcp uninstall or lifecycle down', 'persistent service; token remains private until operator removes it', 'secret validation and manager failure')
 row('lifecycle.py', 'mcp-service.json', 'MCP installation receipt', 'explicit uninstall or down', 'persistent managed service', 'doctor loaded-job drift')
 row('selfupdate.py', 'mcp-service.json', 'registered managed MCP service', 'explicit uninstall', 'update only reconciles owned jobs', 'service manager failure restores active release pointer')
-row('identity.py', 'state|questions|sessions.json', 'explicit session binding lookup', 'read-only snapshot', 'bounded transcript prefix for delivery', 'unknown identity produces no delivery')
+row('identity.py', 'state|questions|sessions.json|projects', 'explicit session binding lookup', 'read-only snapshot', 'bounded transcript prefix for delivery', 'unknown identity produces no delivery')
 row('routing.py', 'state|addressed|register.json|register.lock|hooks|sessions.json|projects|.json|.jsonl|writer:store_identity', 'first local post/wait/ack, roster observation within 24h, or registered hook heartbeat', 'explicit retire or manual removal; locks release; retained local rows can be observed again after removal', 'observation writes once per missing entry; heartbeat refresh throttled by heartbeat_every; observed provenance persists without extending liveness', 'deaf sweep as for any registered name; optional metadata fails open; identity-only caches never gain observed routing')
 row('state.py', 'writer:write_json', 'atomic JSON replacement', 'rename or failed-temp cleanup', 'bounded caller operation; new files private', 'caller receives write or serialization failure')
 row('state.py', 'writer:_replace_json|writer:update_json', 'hashed settings transformation under sibling lock', 'replace and receipt finalization or one re-merge then conflict', 'two attempts; kernel releases the lock on exit', 'settings_update_conflict preserves the latest edit')
@@ -271,5 +271,19 @@ row('lanemove.py', 'plan:before_reading|plan:manifest_input_sha256|.json|.jsonl|
 row('lanemove.py', '.log|.move-state.json|.rearm-|plan:holders|plan:move_state|plan:move_state_file|plan:rearm_outcomes|plan:resume_verified_at|state:observed_holders|state:waiters|writer:move_state|writer:final_state',
     'freeze writes editable restart inventory and records process identities; final-state seals recipes before copy',
     'quiesce waits for recorded descendants; re-arm records intent, process identity and verification per recipe',
-    'command timeout bounds polls; waiter and heartbeat argv bound child lifetime; uncertain spawn never repeats',
+    'command timeout bounds polls; persistent waiter lifetime belongs to operator; uncertain spawn never repeats',
     'unconfirmed or incomplete inventory refuses; surviving children block; missing re-arm evidence leaves attention receipt')
+
+row('lanemove.py', 'private-lane-moves|.local/state/coordkit/private-lane-moves|plan:subscription_outcomes|plan:version|lane-move-summaries|.verify-|id|pid|.wait.lock|.wait.owner.json|writer:private_json|writer:publish',
+    'explicit move writes private receipts outside ref roots and publishes allowlisted summary refs',
+    'done retains private audit; subscription and verifier intents never repeat uncertain creation',
+    '128 receipts and 1 MiB each; command deadline polls without signalling slow children; callbacks expire after 72h',
+    'overlapping roots, duplicate cursor owners, incomplete callbacks or readiness leave move incomplete')
+row('bus.py', '.wait.owner.json|writer:_main', 'exclusive lane waiter acquires nonblocking cursor lock',
+    'kernel releases ownership on process exit; next owner replaces identity note',
+    'note is evidence only with matching PID/start time and fresh cursor; persistent timeout 0 is operator-managed',
+    'duplicate waiters refuse without consuming; stale notes never establish process liveness')
+row('rearmcheck.py', 'writer:main', 'readiness wrapper runs recorded argv without a killing timeout',
+    'writes PID and exit result on normal completion; caller collects on next poll',
+    'caller deadline bounds observation only; an unresolved verifier intent requires inspection',
+    'failed or absent result never verifies readiness or triggers another launch')

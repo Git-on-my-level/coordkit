@@ -84,6 +84,7 @@ BUS_OPS = (
         Arg('--full', action='store_true', help='complete message bodies'),
         Arg('--to', help='lane to wait for (required unless --signal)'),
         Arg('--kinds', default=WAKE_KINDS),
+        Arg('--persistent', action='store_true', help='keep consuming after matches; --timeout 0 runs until operator exit'),
         Arg('--own-asks', action='store_true', help='also wake on any kind of reply (--re) to this lane\'s own asks'),
         Arg('--signal', help='wait for a kind=signal post with this signal name (text is never matched)'),
         Arg('--from', dest='frm', help='with --signal/--subject: only from this poster'),

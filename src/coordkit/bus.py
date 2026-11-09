@@ -451,7 +451,16 @@ def _main(argv, *, site_local=False, origin='coordkit'):
             lock_path = cursor_path(who, o.cmd).with_suffix('.'+o.cmd+'.lock')
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open('a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if o.cmd == 'wait' else 0))
+            except BlockingIOError:
+                raise ManifestError('duplicate_waiter: lane cursor already owned') from None
+            if o.cmd == 'wait':
+                from .adapters.claude_resume import start_time
+                from .state import write_json
+                write_json(cursor_path(o.to, 'wait').with_suffix('.wait.owner.json'),
+                           dict(pid=os.getpid(), started=start_time(os.getpid()),
+                                session_id=os.environ.get('CLAUDE_CODE_SESSION_ID', '')))
             return dispatch(o)
     return dispatch(o)
 
@@ -783,6 +792,7 @@ def dispatch(o):
             print(f"refused: --state {','.join(sorted(bad))} is not one of {'/'.join(STATES)}", file=sys.stderr)
             sys.exit(2)
         cut = since(o.since) or now()
+        delivered = collections.deque(maxlen=4096)
         deadline = time.time() + o.timeout * 60
         while True:
             latest = {}
@@ -791,12 +801,15 @@ def dispatch(o):
                         and (not o.frm or r['frm'] == o.frm)):
                     latest[r['frm']] = r
             hits = sorted((r for r in latest.values() if r.get('state') in accept
-                           and parse_ts(r['ts']) >= cut), key=lambda r: r['ts'])
+                           and parse_ts(r['ts']) >= cut and r['id'] not in delivered), key=lambda r: r['ts'])
             if hits:
                 r = hits[0]
-                print(f"BUS_STATE {o.subject} {r['state']} from={r['frm']} ts={r['ts']} id={r.get('id', '')}")
-                sys.exit(4 if r['state'] == 'FAILED' and accept != {'FAILED'} else 0)  # only a FAILED-only wait succeeds on it
-            if time.time() >= deadline:
+                print(f"BUS_STATE {o.subject} {r['state']} from={r['frm']} ts={r['ts']} id={r.get('id', '')}", flush=True)
+                if o.persistent:
+                    delivered.append(r['id'])
+                else:
+                    sys.exit(4 if r['state'] == 'FAILED' and accept != {'FAILED'} else 0)  # only a FAILED-only wait succeeds on it
+            if not (o.persistent and o.timeout == 0) and time.time() >= deadline:
                 print(f"BUS_WAIT timeout subject={o.subject} states={','.join(sorted(accept))}"); sys.exit(3)
             time.sleep(o.poll)
     elif o.cmd == 'inbox' and o.unread:
@@ -814,8 +827,10 @@ def dispatch(o):
             for _, r in indexed:
                 if (r.get('kind') == 'signal' and r.get('signal') == o.signal and (not o.frm or r['frm'] == o.frm)
                         and not (cut and parse_ts(r['ts']) < cut)):
-                    print(f"BUS_SIGNAL {o.signal} from={r['frm']} ts={r['ts']} id={r.get('id', '')}"); return
-            if time.time() >= deadline:
+                    print(f"BUS_SIGNAL {o.signal} from={r['frm']} ts={r['ts']} id={r.get('id', '')}", flush=True)
+                    if not o.persistent:
+                        return
+            if not (o.persistent and o.timeout == 0) and time.time() >= deadline:
                 print(f'BUS_WAIT timeout signal={o.signal}'); sys.exit(3)
             time.sleep(o.poll)
             total, indexed = read_from(total) if total else read_from(0)
@@ -828,21 +843,27 @@ def dispatch(o):
         start = get_cursor(o.to, 'wait', None)
         if start is None: start = read_from(10 ** 12)[0]  # first wait: only messages from now on
         deadline = time.time() + o.timeout * 60
-        own_asks = {r['id'] for r in read() if r['frm'] == o.to and r.get('kind') == 'ask'} if o.own_asks else set()
+        own_asks = collections.deque(maxlen=4096)
+        if o.own_asks:
+            # Seed only a bounded physical tail; the live set is capped as well.
+            from .usage import tail_lines
+            rows = [r for _, r in parse_lines(tail_lines(BUS, 1024 * 1024))] if BUS.exists() else []
+            own_asks.extend(r['id'] for r in rows if r['frm'] == o.to and r.get('kind') == 'ask')
         while True:
             total, indexed = read_from(start)
             if o.own_asks:
-                own_asks.update(r['id'] for _, r in indexed if r['frm'] == o.to and r.get('kind') == 'ask')
+                own_asks.extend(r['id'] for _, r in indexed if r['frm'] == o.to and r.get('kind') == 'ask')
             hits = [r for _, r in indexed if r['frm'] != o.to and
                     (((r.get('orig_kind') or r.get('kind')) in kinds and for_lane(r, o.to))
                      or r.get('re') in own_asks)]
             if hits:
                 set_cursor(o.to, 'wait', total)
-                for r in hits: print(line(r, full=o.full))
-                return
+                for r in hits: print(line(r, full=o.full), flush=True)
+                if not o.persistent:
+                    return
             start = total
             set_cursor(o.to, 'wait', total)
-            if time.time() >= deadline:
+            if not (o.persistent and o.timeout == 0) and time.time() >= deadline:
                 print(f'BUS_WAIT timeout {o.to} kinds={",".join(sorted(kinds))}'); sys.exit(3)
             time.sleep(o.poll)
     elif o.cmd in ('inbox', 'tail'):

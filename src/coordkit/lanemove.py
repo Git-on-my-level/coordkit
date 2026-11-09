@@ -4,6 +4,8 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+from itertools import islice
+import socket
 import json
 import os
 from pathlib import Path
@@ -15,7 +17,8 @@ import tempfile
 import time
 import tomllib
 
-from . import addressed, bus, lane, obligations, routing, usage
+from . import bus, lane, obligations, routing, usage
+from .actl import AgentctlClient
 from .adapters import claude_resume
 from .manifest import UsageLane, load
 from .process import ToolError
@@ -33,12 +36,42 @@ class Refusal(ToolError):
         super().__init__('lane-move', 9, detail, reason)
 
 
+MAX_RECEIPTS = 128
+MAX_MOVE_ENTRIES = 2048
+_VERIFIER_CHILDREN = {}
+MAX_RECEIPT_BYTES = 1024 * 1024
+
+
+def exposed(manifest, path):
+    # Use the same glob-capable ancestor policy as structured ref readers.
+    return any(parent.match(str(manifest.path(root)))
+               for parent in (path.resolve(), *path.resolve().parents) for root in manifest.mcp.ref_roots)
+
+
 def home(manifest):
-    return manifest.paths.root/'state'/'lane-moves'
+    path = manifest.paths.root/'state'/'lane-moves'
+    if exposed(manifest, path):
+        if path.exists() and next(path.iterdir(), None) is not None:
+            raise Refusal('exposed_legacy_receipts', 'move existing private artifacts outside ref roots first')
+        key = hashlib.sha256(str(manifest.file.resolve()).encode()).hexdigest()[:20]
+        path = Path.home()/'.local/state/coordkit/private-lane-moves'/key
+    if exposed(manifest, path):
+        raise Refusal('private_receipts_overlap_ref_roots')
+    return path
+
+
+def private_json(manifest, path, value):
+    if exposed(manifest, path):
+        raise Refusal('private_receipts_overlap_ref_roots')
+    if path.exists():
+        path.chmod(0o600)
+    write_json(path, value)
+    path.chmod(0o600)
 
 
 def save(plan):
-    write_json(Path(plan['plan_file']), plan)
+    manifest = load(Path(plan['manifest']))
+    private_json(manifest, Path(plan['plan_file']), plan)
 
 
 @contextlib.contextmanager
@@ -74,10 +107,16 @@ def reading(manifest, target):
 def publish(manifest, plan, suffix, kind, text, *, to='all', **fields):
     """Use bus --id replay semantics; synthetic posts never impersonate the lane."""
     rid = plan['id'] + ('-' + suffix if suffix else '')
+    projected = suffix if suffix in PHASES else plan['phase']
+    completed = list(dict.fromkeys([*plan['completed'], *([projected] if projected in PHASES else [])]))
+    summary = manifest.path(manifest.mcp.ref_roots[0])/'lane-move-summaries'/(plan['id']+'.json')
+    # An allowlist projection: never serialize env, argv, paths, holders or identities here.
+    write_json(summary, dict(id=plan['id'], lane=plan['name'], phase=projected,
+                             completed=completed, attention=plan.get('attention')))
     args = ['post', '--from', 'coordkit', '--to', to, '--kind', kind,
-            '--topic', 'lane-move', '--id', rid, '--force', '--ref', plan['plan_file']]
+            '--topic', 'lane-move', '--id', rid, '--force', '--ref', str(summary)]
     if kind == 'handoff':
-        args += ['--evidence', plan['plan_file']]
+        args += ['--evidence', str(summary)]
     for key, value in fields.items():
         args += ['--' + key.replace('_', '-'), value]
     result = bus.main(args + [text], manifest)
@@ -90,10 +129,10 @@ def phase(manifest, plan, name):
     # Projection first: a crash before saving retries exactly the same bus/event IDs.
     publish(manifest, plan, name, 'fyi', f"Lane {plan['name']} move {name}; receipt {plan['id']}.")
     eid = plan['id'] + '-' + name
-    rows = (manifest.paths.events.read_text().splitlines() if manifest.paths.events.exists() else [])
+    rows = usage.tail_lines(manifest.paths.events, 1024 * 1024) if manifest.paths.events.exists() else []
     if not any(json.loads(row).get('id') == eid for row in rows):
         lane.event(manifest, dict(id=eid, kind='lane-move', label=plan['name'], phase=name,
-                                  plan_file=plan['plan_file']))
+                                  move_id=plan['id']))
     if name not in plan['completed']:
         plan['completed'].append(name)
     plan['phase'] = name
@@ -119,8 +158,24 @@ def lane_for(manifest, name):
 
 
 def prepare(manifest, name, destination):
-    plans = [value for path in home(manifest).glob('*.json')
-             if isinstance(value := read_json(path), dict) and 'plan_file' in value]
+    # Fail closed beyond the scan budget: never overlook an older unfinished move.
+    directory = home(manifest)
+    candidates = list(islice(directory.iterdir(), MAX_MOVE_ENTRIES + 1)) if directory.exists() else []
+    if len(candidates) > MAX_MOVE_ENTRIES:
+        raise Refusal('receipt_directory_limit', 'archive completed move artifacts')
+    paths = [p for p in candidates if re.fullmatch(r'lane-move-.+-[0-9]+\.json', p.name)]
+    if len(paths) > MAX_RECEIPTS:
+        raise Refusal('receipt_scan_limit', 'archive completed receipts outside the move directory')
+    plans = []
+    for path in paths:
+        if path.stat().st_size > MAX_RECEIPT_BYTES:
+            raise Refusal('receipt_size_limit', str(path))
+        value = read_json(path)
+        if isinstance(value, dict) and 'plan_file' in value:
+            if exposed(manifest, path):
+                raise Refusal('private_receipts_overlap_ref_roots')
+            path.chmod(0o600)
+            plans.append(value)
     active = [p for p in plans if p['name'] == name and 'done' not in p['completed']]
     if len(active) > 1:
         raise Refusal('multiple_moves', name)
@@ -129,6 +184,10 @@ def prepare(manifest, name, destination):
             raise Refusal('move_manifest_mismatch', active[0]['plan_file'])
         if active[0]['after']['config_dir'] != destination:
             raise Refusal('move_in_progress', active[0]['plan_file'])
+        if active[0].get('version', 1) < 2:
+            active[0]['version'] = 2
+            active[0].pop('resume_verified_at', None)
+            save(active[0])
         return active[0]
     current = lane_for(manifest, name)
     # Repeating a completed command is a no-op, even after the destination grew.
@@ -148,7 +207,7 @@ def prepare(manifest, name, destination):
     if not source.is_file() or source.is_symlink():
         raise Refusal('session_file_missing_or_symlink', str(source))
     rid = f'lane-move-{name}-{time.time_ns()}'
-    plan = dict(version=1, id=rid, name=name, manifest=str(manifest.file),
+    plan = dict(version=2, id=rid, name=name, manifest=str(manifest.file),
                 plan_file=str(home(manifest)/(rid+'.json')), phase='planned', completed=[],
                 declared_before=asdict(current), before=asdict(before), after=asdict(after),
                 source=str(source), destination=str(usage.transcript_dir(after)/source.name),
@@ -190,12 +249,13 @@ def move_state(manifest, plan):
     tracked_holders(manifest, plan, snapshot)
     if not path.exists():
         command = [sys.executable, '-m', 'coordkit.cli', '--manifest', str(manifest.file), 'bus']
-        write_json(path, dict(goal='', open_prs=[], lanes_in_flight=[], bus_name=plan['name'], next_steps=[],
+        private_json(manifest, path, dict(goal='', open_prs=[], lanes_in_flight=[], bus_name=plan['name'], next_steps=[],
                              session_id=plan['before']['session_id'], transcript=plan['source'],
                              inventory_complete=False, background_shells=[],
+                             subscriptions=AgentctlClient(manifest).lane_subscriptions(),
                              waiters=[dict(name=plan['name'], flags=['--to', plan['name'], '--own-asks'])],
                              re_arms=[dict(name=plan['name'], kind='bus-waiter',
-                                           argv=command + ['wait', '--to', plan['name'], '--own-asks']),
+                                           argv=command + ['wait', '--persistent', '--timeout', '0', '--to', plan['name'], '--own-asks']),
                                       dict(name='heartbeat', kind='heartbeat', argv=['agent-heartbeat', '50'],
                                            env=dict(AGENT_HEARTBEAT_KEY=plan['before']['session_id']),
                                            verify_argv=['agent-heartbeat', 'status'])]))
@@ -215,7 +275,7 @@ def move_state(manifest, plan):
     save(plan)
     # Keep observed process evidence alongside the lane's explicitly recorded restart recipes.
     state['observed_holders'] = plan['holders']
-    write_json(path, state)
+    private_json(manifest, path, state)
     return state
 
 
@@ -237,7 +297,7 @@ def final_state(manifest, plan):
         if entry.get('verify_argv') is not None and (not isinstance(entry['verify_argv'], list)
                 or not entry['verify_argv'] or not all(isinstance(arg, str) and arg for arg in entry['verify_argv'])):
             raise Refusal('invalid_rearm_verifier', entry['name'])
-        if entry['kind'] == 'bus-waiter' and ('wait' not in entry['argv'] or not any(
+        if entry['kind'] == 'bus-waiter' and ('--persistent' not in entry['argv'] or 'wait' not in entry['argv'] or not any(
                 flag in entry['argv'] and len(entry['argv']) > entry['argv'].index(flag)+1
                 for flag in ('--to', '--signal', '--subject'))):
             raise Refusal('invalid_bus_waiter', entry['name'])
@@ -260,9 +320,25 @@ def final_state(manifest, plan):
                 if str(row.get('origin_parent', row.get('ppid'))) in plan['holders']}
     if not children <= covered:
         raise Refusal('background_shell_inventory_required', ','.join(sorted(children - covered)))
+    subscriptions = state.get('subscriptions')
+    if not isinstance(subscriptions, list) or len(subscriptions) > MAX_RECEIPTS:
+        raise Refusal('subscription_inventory_required')
+    required = {row.get('exec_id') or row.get('execution_id') for row in state.get('lanes_in_flight', [])
+                if isinstance(row, dict)} - {None}
+    recorded = set()
+    for entry in subscriptions:
+        if (not isinstance(entry, dict) or not isinstance(entry.get('execution_id'), str)
+                or not entry['execution_id'] or not entry.get('source_host') or not entry.get('target')
+                or not entry.get('expires_at')):
+            raise Refusal('invalid_subscription_inventory')
+        if entry['execution_id'] in recorded:
+            raise Refusal('duplicate_subscription_inventory')
+        recorded.add(entry['execution_id'])
+    if not required <= recorded:
+        raise Refusal('subscription_inventory_required', ','.join(sorted(required - recorded)))
     state['waiters'] = [dict(name=e['name'], flags=e['argv'][e['argv'].index('wait')+1:])
                         for e in entries if e['kind'] == 'bus-waiter']
-    write_json(Path(plan['move_state_file']), state)
+    private_json(manifest, Path(plan['move_state_file']), state)
     plan['move_state'] = state
     save(plan)
     return state
@@ -427,16 +503,7 @@ def operator_command(target):
 
 def rearmed(manifest, plan):
     name, since = plan['name'], plan['resume_requested_at']
-    # Plain listening() accepts old posts and busy transcripts. Neither proves re-arm.
-    if not addressed.listening(manifest, name)[0]:
-        return False
-    if addressed.listening(manifest, name, waiter_only=True)[0]:
-        if not plan.get('waiter_was_armed', True):
-            return True
-        for base in {manifest.paths.bus_log.parent/'state/cursors', manifest.paths.root/'state/cursors'}:
-            cursor = base/(name_key(name) + '.wait')
-            if cursor.exists() and cursor.stat().st_mtime >= since:
-                return True
+    # Waiters cannot prove a harness resumed: require the exact destination hook/session.
     note = read_json(routing.home(manifest)/'hooks'/f'{name_key(name)}.json', {}) or {}
     return (note.get('name') == name and note.get('session_id') == plan['after']['session_id']
             and note.get('at', 0) >= since
@@ -453,6 +520,30 @@ def rearm_env(plan, entry):
             'CLAUDE_CODE_SESSION_ID': plan['after']['session_id'], **entry.get('env', {})}
 
 
+def verifier_output(plan, entry, outcome):
+    check = outcome.get('verifier')
+    if check is None:
+        prefix = Path(plan['plan_file']).with_suffix('.verify-' + str(outcome['pid']))
+        check = dict(receipt=str(prefix.with_suffix(prefix.suffix+'.json')),
+                     output=str(prefix.with_suffix(prefix.suffix+'.log')), status='intent')
+        outcome['verifier'] = check
+        save(plan)  # A lost spawn never causes another verifier to be launched.
+        child = subprocess.Popen([sys.executable, '-m', 'coordkit.rearmcheck', check['receipt'],
+                                  check['output'], *entry['verify_argv']],
+                                 cwd=plan['after']['cwd'], env=rearm_env(plan, entry),
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _VERIFIER_CHILDREN[check['receipt']] = child
+        check.update(pid=child.pid, status='started')
+        save(plan)
+    child = _VERIFIER_CHILDREN.get(check['receipt'])
+    if child is not None and child.poll() is not None:
+        _VERIFIER_CHILDREN.pop(check['receipt'], None)
+    result = read_json(Path(check['receipt']), {})
+    if result.get('pid') != check.get('pid') or result.get('returncode') != 0:
+        return None
+    return '\n'.join(usage.tail_lines(Path(check['output']), 64 * 1024, complete=False))
+
+
 def verify_rearm(manifest, plan, entry, outcome, snapshot):
     """Verify this entry, never substitute a lane-wide listening() result."""
     pid = outcome.get('pid')
@@ -460,6 +551,8 @@ def verify_rearm(manifest, plan, entry, outcome, snapshot):
     if not pid or not outcome.get('started') or current.get('started') != outcome['started']:
         return False
     if entry['kind'] == 'bus-waiter':
+        if duplicate_waiter(manifest, entry, snapshot, pid):
+            return False
         argv = shlex.split(current.get('argv', ''))
         # A live generic waiter with different flags cannot satisfy the recorded recipe.
         if 'wait' not in argv or argv[argv.index('wait'):] != entry['argv'][entry['argv'].index('wait'):]:
@@ -467,16 +560,18 @@ def verify_rearm(manifest, plan, entry, outcome, snapshot):
         if '--to' in entry['argv'] and not any(flag in entry['argv'] for flag in ('--signal', '--subject')):
             name = entry['argv'][entry['argv'].index('--to')+1]
             cursor = manifest.paths.bus_log.parent/'state/cursors'/(name_key(name)+'.wait')
-            if not cursor.exists() or cursor.stat().st_mtime < outcome['requested_at']:
+            owner = read_json(cursor.with_suffix('.wait.owner.json'), {})
+            if (not cursor.exists() or cursor.stat().st_mtime < outcome['requested_at']
+                    or owner.get('pid') != pid or owner.get('started') != outcome['started']
+                    or owner.get('session_id') != plan['after']['session_id']):
                 return False
     if entry.get('verify_argv'):
-        result = subprocess.run(entry['verify_argv'], cwd=plan['after']['cwd'], env=rearm_env(plan, entry),
-                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2)
-        if result.returncode:
+        output = verifier_output(plan, entry, outcome)
+        if output is None:
             return False
         if entry['kind'] == 'heartbeat':
             try:
-                status = json.loads(result.stdout)
+                status = json.loads(output)
             except ValueError:
                 return False
             if (not isinstance(status, dict) or status.get('event') != 'arm'
@@ -485,14 +580,88 @@ def verify_rearm(manifest, plan, entry, outcome, snapshot):
     return True
 
 
+def duplicate_waiter(manifest, entry, snapshot, expected=None):
+    if entry['kind'] != 'bus-waiter' or '--to' not in entry['argv'] or any(
+            flag in entry['argv'] for flag in ('--signal', '--subject')):
+        return False
+    target = entry['argv'][entry['argv'].index('--to')+1]
+    for pid, row in snapshot.items():
+        try:
+            args = shlex.split(row.get('argv', ''))
+        except ValueError:
+            continue
+        if (pid != expected and 'wait' in args and '--to' in args
+                and args[args.index('--to')+1:args.index('--to')+2] == [target]
+                and ('--manifest' not in args or str(manifest.file) in args)):
+            return True
+    return False
+
+
+def waiter_available(manifest, entry):
+    if entry['kind'] != 'bus-waiter':
+        return
+    if duplicate_waiter(manifest, entry, claude_resume.processes()):
+        raise Refusal('duplicate_waiter', entry['name'])
+    if '--to' in entry['argv'] and not any(f in entry['argv'] for f in ('--signal', '--subject')):
+        target = entry['argv'][entry['argv'].index('--to')+1]
+        path = manifest.paths.bus_log.parent/'state/cursors'/(name_key(target)+'.wait.lock')
+        with locked(path):
+            pass  # Kernel ownership catches old detached consumers, including older binaries.
+
+
+def rearm_subscriptions(manifest, plan, no_rearm):
+    outcomes = plan.setdefault('subscription_outcomes', {})
+    client = AgentctlClient(manifest)
+    complete = True
+    for entry in plan['move_state']['subscriptions']:
+        execution = entry['execution_id']
+        outcome = outcomes.setdefault(execution, {})
+        if not outcome:
+            outcome.update(status='skipped' if no_rearm else 'intent', host=socket.gethostname(),
+                           target=str(manifest.paths.events), requested_at=time.time())
+            save(plan)
+            if not no_rearm:
+                try:
+                    outcome['subscription'] = client.subscribe(execution, kinds=entry.get('kinds', ['terminal', 'attention']))
+                    outcome['status'] = 'created'
+                except ToolError as exc:
+                    outcome.update(status='failed', error=str(exc))
+                save(plan)
+        # Inspect the destination authority, never accept the old host's receipt or expired TTL.
+        fresh = client.lane_subscriptions()
+        created = outcome.get('subscription', {})
+        created = created.get('subscription', created)
+        expected_id = created.get('id')
+        if no_rearm:
+            manual = read_json(Path(plan['move_state_file']), {}).get('subscriptions', [])
+            expected_id = next((e.get('replacement_id') for e in manual if e['execution_id'] == execution), None)
+        verified = bool(expected_id) and any(row.get('subscription_id') == expected_id
+                       and row.get('state') == 'active' and row['execution_id'] == execution
+                       and row['source_host'] == socket.gethostname()
+                       and row['target'] == str(manifest.paths.events)
+                       and usage.timestamp(row['expires_at']) is not None
+                       and usage.timestamp(row['expires_at']).timestamp() > max(outcome['requested_at'], time.time())
+                       and set(entry.get('kinds', ['terminal', 'attention'])) <= set(row.get('kinds', []))
+                       for row in fresh)
+        outcome['verified'] = verified
+        complete = complete and verified
+        save(plan)
+    return complete
+
+
 def rearm_all(manifest, plan, no_rearm=False):
     state = plan.get('move_state')
-    if not state:  # Older, paused receipts acquire the same mandatory inventory.
+    if (not state or 'subscriptions' not in state or any(
+            e['kind'] == 'bus-waiter' and '--persistent' not in e['argv']
+            for e in state.get('re_arms', []))):
+        # Paused older receipts must seal an upgraded inventory before any spawn.
         state = final_state(manifest, plan)
     outcomes = plan.setdefault('rearm_outcomes', {})
     for index, entry in enumerate(state['re_arms']):
         outcome = outcomes.setdefault(entry['name'], {})
         if not outcome:
+            if not no_rearm:
+                waiter_available(manifest, entry)
             outcome.update(status='skipped' if no_rearm else 'intent', requested_at=time.time(),
                            argv=entry['argv'], no_rearm=no_rearm)
             save(plan)  # Never repeat an ambiguous spawn after a crash.
@@ -534,14 +703,13 @@ def rearm_all(manifest, plan, no_rearm=False):
             outcome['status'] = 'verification_pending'
         save(plan)
         complete = verified and complete
-    return complete
+    return rearm_subscriptions(manifest, plan, no_rearm) and complete
 
 
 def resume(manifest, plan):
     target = UsageLane(**plan['after'])
     plan['operator_command'] = operator_command(target)
     if 'resume_requested_at' not in plan:
-        plan['waiter_was_armed'] = addressed.listening(manifest, target.name, waiter_only=True)[0]
         plan['resume_requested_at'] = time.time()
         save(plan)
     print('LANE_MOVE_RESUME ' + plan['operator_command'], flush=True)
@@ -589,7 +757,7 @@ def apply(manifest, plan, timeout, idle, no_rearm=False):
         print('LANE_MOVE_EXIT ' + EXIT_GUIDANCE, flush=True)
         publish(manifest, plan, 'freeze-ask', 'ask',
                 f"Lane {plan['name']}: finish the current turn, take no new work; ack this freeze "
-                f"only after picking up all open obligations and completing {plan['move_state_file']} "
+                'only after picking up all open obligations and completing the private move-state inventory '
                 '(goal, open PRs, lanes/exec IDs, bus name, next steps, every re-arm and background shell). '
                 + EXIT_GUIDANCE,
                 to=plan['name'])
@@ -608,8 +776,7 @@ def apply(manifest, plan, timeout, idle, no_rearm=False):
             phase(manifest, plan, 'quiesce')
             final_state(manifest, plan)
             publish(manifest, plan, 'final-state-post', 'state',
-                    f"Lane {plan['name']} final state: session={plan['before']['session_id']} "
-                    f"transcript={plan['source']} move-state={plan['move_state_file']}", subject='lane-move', state='DONE')
+                    f"Lane {plan['name']} final state recorded; move {plan['id']}.", subject='lane-move', state='DONE')
             phase(manifest, plan, 'final-state')
             quiesce(manifest, plan, timeout, idle)
             phase(manifest, plan, 'stop')
@@ -658,7 +825,7 @@ def apply(manifest, plan, timeout, idle, no_rearm=False):
         plan['after_reading'] = reading(manifest, UsageLane(**plan['after']))
         save(plan)
     publish(manifest, plan, '', 'handoff',
-            f"Lane {plan['name']} moved: {plan['before']['config_dir']} -> {plan['after']['config_dir']}. "
+            f"Lane {plan['name']} moved; receipt {plan['id']}. "
             'Listening verified. Before/after usage, roster/account and observed model are in the receipt.',
             to=manifest.escalation.ask_to)
     phase(manifest, plan, 'done')

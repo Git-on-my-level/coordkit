@@ -103,6 +103,12 @@ mode flags also plans. Inspect the receipt under
 `--apply` to advance it. Repeating the same lane and destination resumes the
 existing move; a different destination refuses until that move is finished.
 Planning never posts to the bus or changes either account or the manifest.
+If that directory overlaps any `mcp.ref_roots`, private receipts instead live under
+`~/.local/state/coordkit/private-lane-moves/<manifest-hash>/`. A configuration that
+also exposes this fallback refuses before writing private state. Plans and inventory
+files are always mode 0600; do not put them in ref roots or copy them onto the bus.
+Existing exposed artifacts refuse migration until the operator relocates them;
+changing ref roots must never silently hide an unfinished receipt.
 
 ```sh
 coordkit lane-move worker --to-config /path/to/new-account --plan
@@ -130,8 +136,11 @@ Apply uses this sequence:
 3. Finalize the move-state file and snapshot it in the receipt. It contains `goal`,
    `open_prs`, `lanes_in_flight` (including execution IDs), `waiters` (each name and
    flags), `bus_name`, `next_steps`, session/transcript paths, `background_shells`,
-   and `re_arms`. Post `kind=state subject=lane-move state=DONE` with its path, session
-   id and source transcript, then verify absence again.
+   `subscriptions`, and `re_arms`. Subscription inventory records execution ID,
+   original subscription ID, source host/authority, host-local event target, kinds,
+   expiry and the renewal TTL (72h). Include every execution in `lanes_in_flight`;
+   missing callbacks refuse finalization. Post a redacted final-state summary,
+   then verify absence again.
 4. Copy the session JSONL into the matching `projects/<encoded-cwd>/` directory
    under the new account. `--apply` authorizes this copy: the original is retained,
    the checksum is receipted before copying, and both copies must match. An
@@ -148,17 +157,32 @@ Apply uses this sequence:
    then reruns `--apply`. Only `resume="headless"` explicitly allows an automatic
    headless resume. Launch intent is saved first; a crash with an uncertain launch
    requires operator inspection and re-arm, never an automatic second launch.
-7. Verify fresh destination resume evidence, then **arm and verify every recorded
+7. Verify a fresh hook note with the exact destination transcript and session;
+   a waiter or cursor refresh never proves resume. Then **arm and verify every recorded
    re-arm entry**. The default recipes start a bus waiter for the lane name with
-   `--own-asks` (any kind of reply linked with `--re` to the lane's own asks, plus
+   `--persistent --timeout 0 --own-asks` (any kind of reply linked with `--re` to the lane's own asks, plus
    normal addressed wake kinds), and `agent-heartbeat 50` with the session's explicit
    heartbeat key. Include every extra waiter, monitor, watcher and background shell:
-   they die with the old session. Each launch intent, PID/start time, output log,
+   they die with the old session. Persistent waiters continue consuming after each
+   match, flush deliveries to the private receipt log, and stay armed until explicitly
+   stopped by the operator. This is a durable log receiver, not injection into Claude.
+   A second consumer on the same lane cursor refuses; verification requires the
+   exact PID, start time, session and cursor-owner record. Each launch intent, PID/start time, output log,
    verification result and error is recorded in `rearm_outcomes`. A generic
    `listening()` result cannot substitute for any entry. Missing evidence posts an
    attention ask and leaves the move resumable; uncertain spawns never repeat.
    `--no-rearm` is the operator exception: skip automatic starts, record each skip,
-   and still verify each manually armed entry.
+   and still verify each manually armed entry. Recreate each inventoried execution
+   subscription through destination agentctl, targeting the destination manifest's
+   event file with a fresh 72h TTL, then verify its new ID, active state, host, target,
+   kinds and expiry. Expired source subscriptions are renewed too. On a cross-host
+   callback transfer, copy the source inventory's `subscriptions` into the destination
+   move-state and use the destination manifest/event path; source-host receipts never prove destination
+   readiness. The execution must be resolvable by the destination agentctl authority;
+   otherwise the move stays incomplete for operator routing/transport repair. This
+   command does not install a cross-host relay or mutate the source host. With
+   `--no-rearm`, record each manually recreated subscription's `replacement_id` in
+   the private inventory; it is checked against destination agentctl as well.
 8. Post a handoff with before/after `usage.collect` readings and roster identity
    in the receipt: configuration directory, account directory name and observed
    model. Account names follow the roster convention; these are not billing or
@@ -166,7 +190,12 @@ Apply uses this sequence:
 
 Phase bus publications use stable `lane-move-NAME-TIMESTAMP-PHASE` IDs; the final
 handoff uses `lane-move-NAME-TIMESTAMP`. Each successful phase also has a
-`lane.event` row. Repeating a finished move is a no-op. Retain the plan, backup and
+`lane.event` row. Bus refs and handoff evidence contain an allowlisted redacted
+summary only: move ID, lane, phase, completed phases and attention code. Private
+paths, raw commands, environment values and process/session identities are excluded.
+Paused version-1 receipts discard the old resume verification and require an
+upgraded persistent-waiter/subscription inventory before any re-arm.
+Repeating a finished move is a no-op. Retain the plan, backup and
 resume log as private audit evidence; no cleanup or rollback runs automatically.
 For rollback, quiesce the resumed lane first and review the backup against any
 later manifest edits before restoring the original entry; the source JSONL is
@@ -179,7 +208,11 @@ the exact command and flags. Optional `env` values apply to that recipe; optiona
 `verify_argv` runs a bounded readiness check in addition to PID/start-time liveness.
 Heartbeat recipes require `verify_argv`, whose JSON status must report `event=arm`
 and the same owner PID. Bus waiters require their exact recorded flags and, for
-lane waiters, a freshly written cursor. Use foreground, bounded commands; move
+lane waiters, a freshly written cursor owned by that process and session. Waiter
+recipes require `--persistent`; an explicit nonzero timeout can bound a test or
+operator-managed run. Readiness checks run once in a receipt-producing child;
+`--timeout` bounds polling without killing a slow verifier. Rerun apply to collect
+its result; an ambiguous verifier intent never launches a duplicate. Use foreground commands; move
 receipts retain each process's output log for the resumed lane/operator to collect.
 Move-state `background_shells` maps each observed child `pid` to a recipe's `rearm`
 name, or an explicit `completed_reason` for a task that needs no restart. Confirm
@@ -191,3 +224,11 @@ normalized `ps -o lstart=` value) to each file entry before rerunning apply. The
 fields may be updated after resume; restart recipes are frozen in the receipt.
 An uncertain automatic spawn requires inspecting the recorded PID/log before any
 manual recovery. Coordkit never stops those processes or retries an ambiguous arm.
+
+Lane-move history scans refuse beyond 2048 directory entries, 128 receipts or a receipt over 1 MiB; archive
+completed receipts outside the move directory before retrying. Usage readings scan
+at most 128 files, 2048 entries per source tree and depth 8, reading a 2 MiB tail per
+file and 16 MiB overall. `usage.truncated=true` marks incomplete readings. These
+are recent-window observations, not lifetime accounting. Own-ask waiter seeding
+uses the last 1 MiB of bus history and retains at most 4096 ask IDs; replies to
+older excluded asks still wake when they match the normal addressed wake kinds.

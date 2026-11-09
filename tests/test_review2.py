@@ -4,6 +4,7 @@ import io
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 from coordkit import bus, cli, lifecycle
 from coordkit.manifest import ManifestError
@@ -62,13 +63,28 @@ class Review2Tests(FakeCase):
     def test_5_concurrent_waiters_deliver_row_once(self):
         bus.configure(self.manifest)
         bus.set_cursor('worker','wait',0)
-        self.quiet(bus.main,['post','--from','lead','--to','worker','--kind','ask','--force','unique-work'],self.manifest)
-        command=[sys.executable,'-m','coordkit.cli','--manifest',str(self.file),'bus','wait','--to','worker','--timeout','0','--poll','0.01']
-        processes=[subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for _ in range(2)]
+        command=[sys.executable,'-m','coordkit.cli','--manifest',str(self.file),'bus','wait',
+                 '--to','worker','--timeout','0.5','--poll','0.01']
+        first=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        processes=[first]
         try:
-            outputs=[p.communicate(timeout=10) for p in processes]
-            self.assertEqual(sorted(p.returncode for p in processes),[0,3])
-            self.assertEqual(sum('unique-work' in out for out,err in outputs),1)
+            # Prove overlap instead of relying on two short-lived processes racing.
+            owner=bus.cursor_path('worker','wait').with_suffix('.wait.owner.json')
+            deadline=time.monotonic()+8
+            while not owner.exists() and time.monotonic()<deadline:
+                time.sleep(.02)
+            self.assertTrue(owner.exists())
+            second=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            processes.append(second)
+            out,err=second.communicate(timeout=10)
+            self.assertEqual(second.returncode,2,err)
+            self.assertIn('duplicate_waiter',err)
+            self.assertEqual(out,'')
+            self.assertEqual(bus.get_cursor('worker','wait',None),0)
+            self.quiet(bus.main,['post','--from','lead','--to','worker','--kind','ask','--force','unique-work'],self.manifest)
+            out,err=first.communicate(timeout=10)
+            self.assertEqual(first.returncode,0,err)
+            self.assertEqual(out.count('unique-work'),1)
         finally:
             for p in processes:
                 if p.poll() is None: p.kill(); p.wait(timeout=5)

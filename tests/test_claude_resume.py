@@ -51,6 +51,10 @@ if os.environ.get('CK_RESUME_REFUSE'):
     print('No conversation found', flush=True)
     sys.exit(8)
 time.sleep(float(os.environ.get('CK_RESUME_HOLD', '0')))
+release = os.environ.get('CK_RESUME_RELEASE')
+deadline = time.monotonic()+30
+while release and not Path(release).exists() and time.monotonic() < deadline:
+    time.sleep(.02)
 Path(os.environ['CK_RESUME_DONE']).write_text('finished')
 ''')
         binary.chmod(0o755)
@@ -139,7 +143,8 @@ claude_resume.start_time = lambda pid: 'test-start'
 builtin.RESUME_REFUSAL_SECONDS = .1
 builtin.ClaudeCode().wake(load(sys.argv[1]), 'worker', [], 'parent-request')
 '''
-        env = dict(os.environ, CK_RESUME_HOLD='1', PYTHONPATH=str(Path(__file__).resolve().parents[1]/'src'))
+        release = self.root/'release-turn'
+        env = dict(os.environ, CK_RESUME_RELEASE=str(release), PYTHONPATH=str(Path(__file__).resolve().parents[1]/'src'))
         parent = subprocess.run([sys.executable, '-c', code, str(self.file)], env=env,
                                 capture_output=True, text=True, timeout=8)
         self.assertEqual(parent.returncode, 0, parent.stderr)
@@ -148,9 +153,9 @@ builtin.ClaudeCode().wake(load(sys.argv[1]), 'worker', [], 'parent-request')
         try:
             os.kill(pid, 0)
         finally:
-            # This bounded fake exits immediately after its completion receipt.
-            # It is a grandchild; do not signal a PID/group after it has exited.
-            self.wait_for(self.done)
+            # Release after the parent-exit assertion, independent of scheduler delays.
+            release.touch()
+            self.wait_for(self.done, timeout=8)
 
     def test_immediate_failure_is_logged_and_pidfile_cleared(self):
         with patch.dict(os.environ, CK_RESUME_REFUSE='1'), patch(
