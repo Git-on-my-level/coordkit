@@ -7,7 +7,7 @@ import os
 import threading
 from unittest.mock import patch
 
-from coordkit import loop
+from coordkit import loop, loop_answers
 from coordkit.manifest import ManifestError, load
 from coordkit.state import read_json, write_json
 from tests.support import BASE, FakeCase
@@ -156,6 +156,42 @@ class LoopEscalationTests(FakeCase):
         self.assertTrue(report['sent'])
         self.assertEqual(list(report['previous_answers']), [first])
         self.assertEqual(self.asks()[-1][self.asks()[-1].index('--details') + 1].count(first + ': Pause deployments'), 1)
+
+    def test_old_answer_provenance_survives_a_different_predecessors_answer(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                (self.state/'escalation.json').unlink(missing_ok=True)
+                self.respond()
+                report = self.record_failure(1000)
+                current = report['ask_id']
+                report.pop('previous_answers')
+                report['previous_answer'] = 'event:older: Pause deployments'
+                report['previous_ask_id'] = current if pending else 'event:middle'
+                if pending:
+                    report['sent'] = False
+                    report.pop('ask_id')
+                write_json(self.state/'escalation.json', report)
+                self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
+                    'items': [{'ask_id': current, 'answer': {'text': 'Keep retrying'}}]}}})
+                if pending:
+                    loop.retry_escalation(self.manifest, 'audit', 'loop-audit', self.state)
+                    saved = read_json(self.state/'escalation.json')
+                else:
+                    saved = self.record_failure(4600)
+                self.assertTrue(saved['sent'])
+                self.assertEqual(set(saved['previous_answers']), {'event:older', current})
+                details = self.asks()[-1][self.asks()[-1].index('--details') + 1]
+                self.assertEqual(details.count('event:older: Pause deployments'), 1)
+                self.assertEqual(details.count(current + ': Keep retrying'), 1)
+
+    def test_unparseable_legacy_context_cannot_overwrite_a_known_ruling(self):
+        report = {'previous_answers': {'event:first': 'event:first: Continue'},
+                  'previous_ask_id': 'event:first', 'previous_answer': 'Earlier ruling without a reference'}
+        answers = loop_answers.retained_answers(report)
+        self.assertEqual(len(answers), 2)
+        self.assertEqual(answers['event:first'], 'event:first: Continue')
+        self.assertIn('Earlier ruling without a reference', answers.values())
+        self.assertEqual(loop_answers.retained_answers(dict(report, previous_answers=answers)), answers)
 
     def test_failed_reminder_retains_payload_and_does_not_advance_timer(self):
         self.record_failure(1000)

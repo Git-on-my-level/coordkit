@@ -1,6 +1,7 @@
 """Correlate direct loop asks across recovery and either shared answer consumer."""
 import contextlib
 import hashlib
+import re
 import sys
 
 from . import bus
@@ -62,6 +63,18 @@ def receive(manifest, item):
 
 def answer_text(answer):
     return str(answer.get('text') or answer.get('outcome') or 'ANX answer received') if isinstance(answer, dict) else str(answer)
+
+
+def retained_answers(report):
+    """Migrate context by its own provenance; the predecessor may have advanced."""
+    answers = dict(report.get('previous_answers') or {})
+    text = report.get('previous_answer')
+    if text and text not in answers.values():
+        ref, separator, _ = text.partition(': ')
+        legacy_key = 'legacy:' + hashlib.sha256(text.encode()).hexdigest()
+        key = ref if separator and re.fullmatch(r'event:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', ref) else legacy_key
+        answers[key if key not in answers else legacy_key] = text
+    return answers
 
 
 def answer_context(manifest, ask_id):

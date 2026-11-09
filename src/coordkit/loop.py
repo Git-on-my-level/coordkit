@@ -187,9 +187,7 @@ def record_failure(manifest, name, settings, handle, state, detail, cycle=None, 
             legacy = report and report.get('sent') and report.get('channel') != 'anx'
             if not report or legacy or (report.get('sent') and time.time() >= report['next_at']):
                 previous = report if report and not legacy else {}
-                answers = previous.get('previous_answers', {})
-                if previous.get('previous_answer'):
-                    answers.setdefault(previous.get('previous_ask_id') or 'legacy', previous['previous_answer'])
+                answers = loop_answers.retained_answers(previous)
                 report = {'sent': False, 'channel': 'anx', 'card': f'card:{handle}',
                           'sent_count': previous.get('sent_count', 0),
                           'previous_ask_id': previous.get('ask_id'),
@@ -221,9 +219,8 @@ def _retry_escalation(manifest, name, handle, state):
         return
     try:
         card = report.get('card') or f'card:{handle}'
-        answers = report.setdefault('previous_answers', {})
-        if report.get('previous_answer'):  # compatibility with earlier string receipts
-            answers.setdefault(report.get('previous_ask_id') or 'legacy', report['previous_answer'])
+        answers = loop_answers.retained_answers(report)
+        report['previous_answers'] = answers
         if report.get('previous_ask_id') and not report.get('ask_id'):
             answer = loop_answers.answer_context(manifest, report['previous_ask_id'])
             if answer:
