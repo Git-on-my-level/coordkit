@@ -49,6 +49,13 @@ def load(path=None):
         raise ManifestError('invalid_hook_deliver')
     return SimpleNamespace(deliver=SimpleNamespace(stop_requires_waiter=requires_waiter, waiter_fresh_seconds=fresh),
                            agents=[SimpleNamespace(**a) for a in raw.get('agents', [])],
-                           lanes=[SimpleNamespace(**lane) for lane in lanes],
+                           lanes=[SimpleNamespace(**dict(lane, config_dir=str(resolve(lane['config_dir'])),
+                                                         cwd=str(resolve(lane['cwd'])), session_id=lane.get('session_id', '')))
+                                  for lane in lanes],
+                           mcp=SimpleNamespace(identity=raw.get('mcp', {}).get('identity') or f'ck-{project["name"]}-mcp'),
+                           escalation=SimpleNamespace(internal_senders=raw.get('escalation', {}).get('internal_senders', [])),
+                           questions=SimpleNamespace(config_dirs=raw.get('questions', {}).get('config_dirs', [])),
                            file=file, mode='live', paths=SimpleNamespace(root=root, bus_log=bus),
-                           addressed=SimpleNamespace(agents=agents, roles=roles, rearm_grace=addressed.get('rearm_grace', '3m')))
+                           addressed=SimpleNamespace(agents=agents, roles=roles, rearm_grace=addressed.get('rearm_grace', '3m'),
+                                                     heartbeat_every=addressed.get('heartbeat_every', '10s'),
+                                                     internal_senders=addressed.get('internal_senders', ['coordkit', 'coordkit-report'])))

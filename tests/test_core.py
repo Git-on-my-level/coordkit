@@ -44,6 +44,14 @@ class ManifestTests(FakeCase):
             with self.subTest(change=change), self.assertRaises(ManifestError):
                 load(self.file)
 
+    def test_mcp_post_as_is_a_list_of_names(self):
+        self.file.write_text(BASE + '\n[mcp]\npost_as = ["relay", "push-lane"]\n')
+        self.assertEqual(load(self.file).mcp.post_as, ['relay', 'push-lane'])
+        for bad in ('"relay"', '["../x"]'):
+            self.file.write_text(BASE + f'\n[mcp]\npost_as = {bad}\n')
+            with self.assertRaises(ManifestError):
+                load(self.file)
+
     def test_retired_responsiveness_table_keeps_installed_manifests_loadable(self):
         self.file.write_text(BASE + '\n[responsiveness]\nenabled = false\ntick = "10s"\nack_deadline = "2m"\n')
         manifest = load(self.file)

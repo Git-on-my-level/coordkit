@@ -214,6 +214,31 @@ class McpToolTests(McpCase):
                     {'to': 'lead-a', 'kind': 'ask', 'text': 'x' * 2001}, {'to': 'lead-a', 'kind': 'ask', 'text': ' '}):
             self.assertTrue(self.tool('post', **bad)[0], bad)
 
+    def test_service_post_does_not_register_inherited_harness_identity(self):
+        from coordkit import routing
+        from coordkit.state import read_json
+        self.enable_writes()
+        self.lease('lead-a')
+        for name in (self.manifest.mcp.identity, 'custom-mcp'):
+            with self.subTest(name=name):
+                self.manifest.mcp.identity = name
+                with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.root/'server-account'),
+                                             'CLAUDE_CODE_SESSION_ID': 'server-session'}):
+                    error, text = self.tool('post', to='lead-a', kind='ask', text='Service request')
+                self.assertFalse(error, text)
+                self.assertEqual(self.rows()[-1]['frm'], name)
+                self.assertNotIn(name, read_json(routing.home(self.manifest)/'register.json', {}))
+
+    def test_post_as_only_an_allowlisted_lane(self):
+        self.enable_writes()
+        self.lease('lead-a')
+        self.assertTrue(self.tool('post', to='lead-a', kind='ask', text='x', **{'as': 'thread-a'})[0])
+        self.manifest.mcp.post_as = ['thread-a']
+        error, text = self.tool('post', to='lead-a', kind='ask', text='From the thread.', **{'as': 'thread-a'})
+        self.assertFalse(error, text)
+        self.assertEqual([r for r in self.rows() if r.get('text') == 'From the thread.'][0]['frm'], 'thread-a')
+        self.assertTrue(self.tool('post', to='lead-a', kind='ask', text='x', **{'as': 'lead-a'})[0])
+
     def test_ack_and_question_answer_act_only_on_operator_rows(self):
         self.enable_writes()
         self.incumbent_row('a1', 'lead-a', self.manifest.mcp.identity)
@@ -770,6 +795,20 @@ class McpReadBatchTests(McpCase):
         self.row('none')
         self.assertTrue(self.tool('ref_read', id='none')[0])
 
+    def test_ref_read_full_reads_the_spilled_text_of_a_capped_row(self):
+        refs = self.manifest.paths.bus_log.parent/'state'/'refs'
+        refs.mkdir(parents=True)
+        spill, attached = refs/'1107-abc123.txt', refs/'brief.md'
+        spill.write_text('whole handoff text\n')
+        attached.write_text('attached brief\n')
+        self.row('capped', text=f'start of handoff … [full: {spill}]', ref=str(spill), spill_ref=str(spill))
+        self.row('both', text=f'start … [full: {spill}]', ref=str(attached), spill_ref=str(spill))
+        self.assertEqual(self.read('ref_read', id='capped')['text'], 'whole handoff text\n')
+        self.assertEqual(self.read('ref_read', id='both')['text'], 'attached brief\n')
+        self.assertEqual(self.read('ref_read', id='both', full=True)['text'], 'whole handoff text\n')
+        self.row('outside', text='cut … [full: /etc/passwd]')
+        self.assertTrue(self.tool('ref_read', id='outside')[0])
+
     def test_ref_read_refuses_traversal_symlinks_and_prefix_siblings(self):
         refs = self.manifest.paths.bus_log.parent/'state'/'refs'
         refs.mkdir(parents=True)
@@ -804,7 +843,7 @@ class McpReadBatchTests(McpCase):
         self.lease('lead-a')
         self.row('active', frm='lead-a', ago=20)
         self.row('reply', frm='lead-a', re='active', ago=10)
-        self.row('retired', frm='worker-ui', kind='state', text='stopped per roster-1105', ago=50)
+        self.row('retired', frm='worker-ui', kind='state', text='stopped per roster-1105', ago=1000)
         self.row('old-state', frm='coordinator', kind='state', text='retired yesterday', ago=100)
         self.row('new-state', frm='coordinator', kind='state', text='RUNNING: stopped worker has recovered', ago=10)
         self.row('recent', frm='observer', re='active', ago=30)
@@ -816,7 +855,7 @@ class McpReadBatchTests(McpCase):
         self.assertEqual(agents['worker-ui']['status'], 'retired')
         self.assertEqual(agents['worker-ui']['last_state'], 'stopped per roster-1105')
         self.assertEqual(agents['relay']['status'], 'relay/human')
-        self.assertEqual(agents['coordinator']['status'], 'idle')
+        self.assertEqual(agents['coordinator']['status'], 'listening')
         self.assertEqual(agents['observer']['status'], 'unregistered')
         self.assertIsNotNone(agents['observer']['last_post_at'])
         self.assertNotIn('gone', agents)
@@ -827,8 +866,8 @@ class McpReadBatchTests(McpCase):
             self.row('resume-' + name, frm=name, kind='msg', text='Back at work', ago=10)
         agents = {r['name']: r for r in self.read('agents_status')['agents']}
         for name in ('lead-a', 'worker-ui'):
-            self.assertEqual(agents[name]['status'], 'idle')
-            self.assertFalse(agents[name]['listening'])
+            self.assertEqual(agents[name]['status'], 'listening')
+            self.assertTrue(agents[name]['listening'])
             self.assertIsNotNone(agents[name]['last_state'], 'keep the prior self-report visible')
 
     def test_roster_live_lease_overrides_retirement_without_new_state(self):
@@ -840,7 +879,7 @@ class McpReadBatchTests(McpCase):
         self.assertEqual(agent['last_state'], 'stopped per roster')
 
     def test_roster_expired_lease_and_other_posters_do_not_override_retirement(self):
-        self.row('stopped', frm='worker-ui', kind='state', text='retired', ago=100)
+        self.row('stopped', frm='worker-ui', kind='state', text='retired', ago=1000)
         self.row('someone-else', frm='lead-a', text='worker-ui is working', ago=10)
         self.lease('worker-ui', heartbeat_ago=1000)
         agent = next(r for r in self.read('agents_status')['agents'] if r['name'] == 'worker-ui')

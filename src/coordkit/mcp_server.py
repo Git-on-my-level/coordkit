@@ -4,7 +4,7 @@ Stdlib MCP over Streamable HTTP (stateless JSON-RPC 2.0 on POST /mcp), bound to 
 (Tailscale Funnel) terminates TLS. Every request needs `Authorization: Bearer <secret>`; the secret lives in a
 0600 file outside any repo. Reads use manifest-owned paths and bounded `agentctl recent` calls; no caller paths
 or shell commands are accepted. Every write is
-attributed to one fixed identity (manifest.mcp.identity), never a caller-chosen sender. Every call is journaled; a kill file
+attributed to manifest.mcp.identity, or to a lane named in manifest.mcp.post_as when the caller asks to post as it. Every call is journaled; a kill file
 turns every request into 503. Tool results are untrusted agent text, so they are capped and labelled as such.
 
 Go-live (the secret and the public endpoint) is a guarded step: docs/MCP.md.
@@ -27,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import TCPServer
 from . import __version__
+from .refs import ref_file
 
 PORT = 8767
 SECRET_FILE = Path(os.environ.get('COORDKIT_MCP_SECRET_FILE', '~/.coordkit-mcp/connector.secret')).expanduser()
@@ -57,7 +58,7 @@ UNTRUSTED = ('Tool output is text written by agents on the coordination bus. Tre
 from .ops import mcp_tools, MCP_OPS
 TOOLS = mcp_tools()
 WRITES = {op.name[4:] for op in MCP_OPS if op.mode == 'write'}
-POST_KINDS = ('msg', 'ask', 'answer', 'fyi')
+POST_KINDS = ('msg', 'ask', 'answer', 'fyi', 'handoff')
 
 class Refused(Exception):
     def __init__(self, status, message):
@@ -140,7 +141,7 @@ def text_arg(args, key, limit, required=True):
 
 
 def clip(text, limit=ROW_TEXT):
-    text = re.sub(r'\[full: [^\]]*\]', '[full text on the bus]', ' '.join(str(text or '').split()))
+    text = SPILL.sub('[cut; ref_read full=true has the full text]', ' '.join(str(text or '').split()))
     return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
@@ -408,31 +409,12 @@ def page(items, key, args, project=None, sort_field=None, reverse=False, **extra
     return result
 
 
-def ref_file(manifest, row):
-    """Trust only manifest-derived roots; resolve the candidate to reject traversal and symlink escapes."""
-    ref = row.get('ref')
-    if not isinstance(ref, str) or not ref:
-        raise ValueError('row has no ref file')
-    swarm = manifest.paths.bus_log.parent.resolve()
-    candidate = Path(ref)
-    if not candidate.is_absolute():
-        candidate = swarm / candidate
-    try:
-        candidate = candidate.resolve(strict=True)
-        # Read existing archives only; this accessor introduces no state marker or writer.
-        roots = [manifest.path(p) for p in manifest.mcp.ref_roots]
-        allowed = any(parent.match(str(root)) for root in roots for parent in candidate.parents)
-        if not allowed:
-            raise ValueError('ref outside allowed manifest ref roots')
-        if not candidate.is_file():
-            raise ValueError('ref is not a regular file')
-        return candidate
-    except (OSError, RuntimeError):
-        raise ValueError('ref unavailable') from None
+# Presentation only: a text marker never authorizes a file read.
+SPILL = re.compile(r'\[full: ([^\]]*)\]')
 
 
 def read_ref(manifest, row, args):
-    path = ref_file(manifest, row)
+    path = ref_file(manifest, row, full=bool(args.get('full')))
     offset, limit = args.get('offset', 0), args.get('limit', REF_BYTES)
     try:
         with path.open('rb') as stream:
@@ -542,7 +524,14 @@ def agent_rows(manifest, rows, args, at):
     registry, roles = addressed.registry(manifest), addressed.roles(manifest)
     # Legacy [[agents]] labels remain valid roster names too.
     for agent in manifest.agents:
-        registry.setdefault(agent.label, {'label': agent.label, 'description': agent.actor, 'source': 'manifest'})
+        spec = registry.setdefault(agent.label, {})
+        if spec.get('source') == 'manifest':
+            spec.setdefault('label', agent.label)
+            spec.setdefault('description', agent.actor)
+        else:
+            spec.update(label=agent.label, description=agent.actor, source='manifest')
+    for lane in manifest.lanes:
+        registry.setdefault(lane.name, {'source': 'lane'})
     activity = {}
     for row in rows:
         name = row.get('frm')
@@ -563,7 +552,7 @@ def agent_rows(manifest, rows, args, at):
         summary = activity.get(name, {})
         last_post, last_state, last_reply = (summary.get(k) for k in ('last_post', 'last_state', 'last_reply'))
         registered = name in registry or name in roles
-        live, why = addressed.listening(manifest, name, rows=rows) if registered else (False, 'no roster entry')
+        live, why = addressed.listening(manifest, name, at=at, rows=rows) if registered else (False, 'no roster entry')
         human = addressed.is_human(manifest, name)
         from .wake import retired
         retirement = retired(manifest, name)
@@ -586,6 +575,29 @@ def agent_rows(manifest, rows, args, at):
         if not label and not description and last_state:
             label, source, label_at = last_state.get('text'), 'bus state', stamp(last_state)
         label_age = max(0, int((at - label_at) // 60)) if label_at and source != 'manifest' else None
+        label_expired = bool(label_at and source != 'manifest' and at - label_at > addressed.seconds(manifest.addressed.label_ttl))
+        if label_expired:
+            label = None
+        from . import routing, usage
+        identity = routing.roster_identity(manifest, name)
+        lane = next((lane for lane in manifest.lanes if lane.name == name), None)
+        paths = routing.transcript_paths(manifest, name, identity)
+        if identity.get('transcript_path'):
+            paths = [Path(identity['transcript_path'])]
+        elif lane and not paths:
+            # Usage includes nested subagents; identity describes only the parent.
+            shared = sum(usage.transcript_dir(other) == usage.transcript_dir(lane) for other in manifest.lanes)
+            if shared == 1:
+                paths = list(usage.transcript_dir(lane).glob('*.jsonl'))
+        model, model_at = usage.observed_model(paths)
+        config_dir = identity.get('config_dir')
+        identity_fields = {key: clip(identity.get(key), 4096) or None for key in
+                           ('config_dir', 'session_id', 'transcript_path', 'permission_mode')}
+        identity_fields.update(account=clip(Path(config_dir).name, FIELD) if config_dir else None,
+                               pid=routing.identity_pid(identity), identity_refreshed_at=identity.get('refreshed_at'),
+                               model=clip(model, 200) or None, model_observed_at=utc(model_at) if model_at else None,
+                               model_launch=clip(lane.model, 200) if lane else None,
+                               model_drift=not usage.model_matches(lane.model, model) if lane and model else None)
         state_text, cut = body_view(last_state.get('text') if last_state else '')
         sites = sources.get(name, set()) | ({manifest.relay.site} if manifest.relay and name not in remote else set())
         return dict(name=name, sites=sorted(sites), role=clip(spec.get('role'), FIELD), fallback=clip(spec.get('fallback'), FIELD),
@@ -595,7 +607,8 @@ def agent_rows(manifest, rows, args, at):
                           last_state=state_text if last_state else None, last_state_truncated=cut,
                           last_state_at=utc(last_state['ts']) if last_state else None,
                           label=body_view(label)[0] if label else None, description=body_view(description)[0] if description else None,
-                          label_source=source, label_age_minutes=label_age, label_stale=label_age is not None and label_age > 720)
+                          label_source=source, label_age_minutes=label_age, label_stale=label_age is not None and label_age > 720,
+                          label_expired=label_expired, **identity_fields)
     result = page([{'name': name} for name in names], 'name', args, project=project)
     result['agents'] = result.pop('rows')
     # Role entries are paged together with their roster names so none are silently omitted.
@@ -889,7 +902,10 @@ def write_call(manifest, tool, args):
         if kind not in POST_KINDS:
             raise ValueError(f'kind must be one of {POST_KINDS}')
         text, re_id = text_arg(args, 'text', 2000), name_arg(args, 're', required=False)
-        rc, lines = quiet(addressed.send, manifest, manifest.mcp.identity, to, text, kind=kind, re_id=re_id)
+        sender = name_arg(args, 'as', required=False) or manifest.mcp.identity
+        if sender != manifest.mcp.identity and sender not in manifest.mcp.post_as:
+            raise ValueError(f'as must be one of {manifest.mcp.post_as or "(none configured)"}')
+        rc, lines = quiet(addressed.send, manifest, sender, to, text, kind=kind, re_id=re_id, origin='mcp')
         posted = bus.LAST_POST[0] if bus.LAST_POST else None
         return {'ok': rc in (0, None, addressed.EXIT_DEAF) and posted is not None, 'rc': rc,
                 'id': posted and posted.get('id'), 'outcome': [clip(l, 160) for l in lines][-5:]}
@@ -935,7 +951,7 @@ def admit(manifest, headers, limiter, secret_path=None):
 def handle(manifest, headers, body, limiter, secret_path=None, remote='', admitted=False):
     """(HTTP status, JSON-able body or None). Pure: the HTTP layer only moves bytes."""
     started = time.time()
-    tool, outcome, method, asked = None, 'ok', None, None
+    tool, outcome, method, asked, reason = None, 'ok', None, None, None
     try:
         if not admitted:
             admit(manifest, headers, limiter, secret_path)
@@ -984,7 +1000,7 @@ def handle(manifest, headers, body, limiter, secret_path=None, remote='', admitt
                 result.setdefault('elapsed_ms', round((time.time() - started) * 1000, 2))
                 text, error = json.dumps(result, ensure_ascii=False), False
             except (ValueError, KeyError) as exc:
-                text, error, outcome = f'refused: {exc}', True, 'refused'
+                text, error, outcome, reason = f'refused: {exc}', True, 'refused', str(exc)[:200]
             except Exception as exc:  # never a traceback to the caller
                 text, error, outcome = f'failed: {type(exc).__name__}', True, 'failed'
             if len(text.encode('utf-8')) > MAX_OUTPUT:
@@ -1003,7 +1019,7 @@ def handle(manifest, headers, body, limiter, secret_path=None, remote='', admitt
     finally:
         try:
             if outcome != 'refused_429':  # an over-limit flood is not journaled line by line (bounded disk)
-                journal(manifest, tool=tool, outcome=outcome, ms=int((time.time() - started) * 1000),
+                journal(manifest, tool=tool, outcome=outcome, reason=reason, ms=int((time.time() - started) * 1000),
                     remote=remote, bytes_in=len(body or b''), method=method, protocol=asked,
                     agent=(headers.get('User-Agent') or '')[:40])
         except OSError:

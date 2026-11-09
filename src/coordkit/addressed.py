@@ -155,6 +155,30 @@ def listening(manifest, name, at=None, probe=None, rows=None, *, waiter_only=Fal
     evidence = activity_evidence(manifest, name, at)
     if evidence:
         return True, evidence
+    from .routing import waiter_evidence
+    waiting = waiter_evidence(manifest, name, at)
+    if waiting[0]:
+        return waiting
+    if rows is None:
+        from . import bus
+        rows = bus.read_path(manifest.paths.bus_log)
+    latest = None
+    for row in rows:
+        if row.get('frm') != name or row.get('copy_of') or row.get('question'):
+            continue
+        # Synthetic question rows, connector posts and relay-applied traffic
+        # cannot prove that the sender is a local listener.
+        if row.get('origin') == 'mcp' or str(row.get('origin', '')).startswith('relay:'):
+            continue
+        try:
+            posted = parse_ts(row['ts']).timestamp()
+        except (ValueError, TypeError, KeyError):
+            continue
+        if 0 <= at - posted <= seconds(cfg(manifest).activity_ttl):
+            latest = max(latest or posted, posted)
+    # MCP service posts carry no evidence that an agent session can hear us.
+    if latest is not None and name != manifest.mcp.identity:
+        return True, f'posted {int(at - latest)}s ago'
     if lease and open_ids:
         return False, f'delivery_unconfirmed {",".join(open_ids[:3])}'
     if cfg(manifest).incumbent_waiters and name in (probe or PROBE)():
@@ -627,7 +651,7 @@ def _sweep(manifest, rows=None, at=None, probe=None, dry_run=False, out=print):
 
 # -- CLI --------------------------------------------------------------------------------------------
 
-def send(manifest, frm, to, text, kind='ask', urgent=False, re_id=None, topic='general', extra=()):
+def send(manifest, frm, to, text, kind='ask', urgent=False, re_id=None, topic='general', extra=(), *, origin='coordkit'):
     from . import bus
     manifest.writable()
     argv = ['post', '--from', frm, '--to', to, '--kind', kind, '--topic', topic,
@@ -635,7 +659,7 @@ def send(manifest, frm, to, text, kind='ask', urgent=False, re_id=None, topic='g
     if re_id:
         argv += ['--re', re_id]
     bus.LAST_POST = None
-    bus.main(argv + [text], manifest)
+    bus.main(argv + [text], manifest, origin=origin)
     outcome = (bus.LAST_POST or (None, None))[1]
     if to != 'all' and outcome is None and target_kind(manifest, to) is None:
         print(f'NOT_REGISTERED {to}: no waiter lease can be checked; register it in [addressed.agents]', file=sys.stderr)

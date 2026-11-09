@@ -152,6 +152,8 @@ class Obligations:
 class Addressed:
     # Listening evidence: a waiter lease, recent hook, or a busy bound transcript.
     lease_ttl: str = "90s"            # a lease not renewed for this long has lapsed
+    activity_ttl: str = "15m"         # local post/ack listening evidence
+    label_ttl: str = "24h"            # non-manifest roster labels expire
     busy_window: str = "10m"          # recent mtime of a transcript bound to this bus name
     heartbeat_every: str = "10s"      # waiter poll/renew interval
     iteration_deadline: str = "2m"    # hard deadline per waiter iteration (SIGALRM)
@@ -299,7 +301,7 @@ def _table(cls, data, section, required=()):
         if key not in data or data[key] == "":
             raise ManifestError(f"missing_key: {section}.{key}")
     # Dataclass annotations are postponed; these schema field names carry uniform types.
-    lists = {"flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders"}
+    lists = {"flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as"}
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects"}
     booleans = {"stop_requires_waiter", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
     integers = {"waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
@@ -322,6 +324,8 @@ class Mcp:
     projects: dict[str, str] = field(default_factory=dict)
     train_state_dir: str = ""
     identity: str = ""
+    # Lane names a connector caller may post as (behind the same bearer secret); empty keeps the fixed identity.
+    post_as: list[str] = field(default_factory=list)
     train_pattern: str = ""
     ref_roots: list[str] = field(default_factory=list)
 
@@ -469,7 +473,7 @@ def load(path: str | Path | None = None) -> Manifest:
     for section, keys in (("agentctl", ("timeout",)), ("lane", ("lease_ttl", "hung_after")), ("loop", ("default_cadence", "progress_budget", "max_age")),
                           ("reconciler", ("ruling_ask_after", "stale_lease_grace", "blocker_ask_after", "answer_max_age", "state_max_age")),
                           ("merge", ("max_hold_age",)), ("obligations", ("ack_after", "alert_after", "realert_after", "ask_deadline", "urgent_deadline")), ("wait", ("stale_alert_after",)),
-                          ("addressed", ("lease_ttl", "busy_window", "heartbeat_every", "iteration_deadline", "rearm_grace", "urgent_deadline",
+                          ("addressed", ("lease_ttl", "busy_window", "activity_ttl", "label_ttl", "heartbeat_every", "iteration_deadline", "rearm_grace", "urgent_deadline",
                                          "normal_deadline", "realert_after", "confirm_timeout", "deaf_backlog")),
                           ("questions", ("urgent_deadline", "normal_deadline", "modal_min_age", "notification_idle"))):
         for key in keys:
@@ -511,6 +515,8 @@ def load(path: str | Path | None = None) -> Manifest:
     mcp.identity = mcp.identity or f"ck-{project.name}-mcp"
     if not name_ok(mcp.identity):
         raise ManifestError("invalid_value: mcp.identity")
+    if any(not name_ok(name) for name in mcp.post_as):
+        raise ManifestError("invalid_value: mcp.post_as")
     try:
         re.compile(mcp.train_pattern)
     except re.error as exc:

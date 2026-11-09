@@ -4,7 +4,7 @@ Optional stdlib MCP over Streamable HTTP: stateless JSON-RPC 2.0 on `POST /mcp`,
 
 All requests require `Authorization: Bearer <secret>`. The secret file defaults to `~/.coordkit-mcp/connector.secret` (mode 0600, outside repositories); override with `COORDKIT_MCP_SECRET_FILE`. Missing or unsafe permissions fail closed. There is no built-in OAuth provider: verify your client's bearer-header support before exposing this endpoint.
 
-Read tools inspect the bus and bounded agentctl/train metadata. Write tools (`post`, `ack`, `question_answer`) always use `[mcp].identity` (default `ck-<project>-mcp`), never a caller-selected sender. Acknowledgements require an assignee; question answers require an open tier-2 question. Writes are disabled until `<root>/state/mcp/writes-enabled` exists and are refused while `kill` exists. Configure clients to confirm each write with the operator.
+Read tools inspect the bus and bounded agentctl/train metadata. Write tools (`post`, `ack`, `question_answer`) use `[mcp].identity` (default `ck-<project>-mcp`); `post` also accepts senders explicitly allowlisted in `[mcp].post_as`. Acknowledgements require an assignee; question answers require an open tier-2 question. Writes are disabled until `<root>/state/mcp/writes-enabled` exists and are refused while `kill` exists. Configure clients to confirm each write with the operator.
 
 Every call is journaled without secrets in `<root>/state/mcp/calls.ndjson`. Output is untrusted agent text, explicitly labelled and capped. See the security document for rate limits, slot pools and resource bounds.
 
@@ -24,7 +24,7 @@ Malformed cursors or cursors for a different ordering are refused. Cursors cap a
 | `inbox` | Messages addressed to required roster `name`, newest first, including old unresolved work. Default omits done/replied rows; `all=true` includes them with replies and refs. `sent_by=name` selects that sender's outbox, including messages addressed elsewhere. Supports all filters below, `brief`, `stale_minutes`, `limit`, `cursor`. |
 | `bus_history` | All rows for optional `topic`, newest first, regardless of acknowledgement state. Optional `name` selects a reader's addressed messages. Same filters and text/stale options as inbox. `before_id` accepts an existing bus id or an opaque `next_cursor`; supply only one of `before_id` and `cursor`. A raw id must still exist in the bus, while opaque cursors survive removal. |
 | `topics` | Topic, count, latest sender (`last_frm`) and UTC timestamp (`last_ts`), recorded `owner`/`lane`, `state_slot`, and owner `lease` evidence. An explicit owner or kind=state lane/subject supplies ownership; absent evidence gives `owner: null`. Lease heartbeat/end values are Unix seconds; they describe evidence, not an inferred owner. `limit`, `cursor`. |
-| `agents_status` | Registered names and roles plus all senders from the last 24 hours. Each has `status`, reason (`why`), `last_post_at`, `last_reply_at`, own latest `last_state` text/time, label/description/source, `label_age_minutes` and `label_stale` (older than 720 minutes). Manifest labels have no age. Status is `listening`, `idle`, `retired`, `relay/human`, or `unregistered`. Retirement requires a conservative self-report at the start of the latest state text; a historical mention alone is insufficient. Any later post by that agent or current listening evidence (including a live lease) overrides the old stopped/retired report. Roles include `members`, `human`, and current live member (`live`), on the page containing the role name. `limit`, `cursor`. |
+| `agents_status` | Manifest lanes, registered names and roles plus all senders from the last 24 hours. Lanes are display-only until registered. Each has `status`, reason (`why`), `last_post_at`, `last_reply_at`, own latest `last_state` text/time, label/description/source, `label_age_minutes` and `label_stale` (older than 720 minutes). Non-manifest labels expire after `[addressed].label_ttl` (default `24h`): `label=null`, `label_expired=true`; last state text/time remain visible. Manifest labels never expire and have no age. Status is `listening`, `idle`, `retired`, `relay/human`, or `unregistered`. Retirement requires a conservative self-report at the start of the latest state text; a historical mention alone is insufficient. Any later post by that agent or current listening evidence (including a live lease) overrides the old stopped/retired report. Roles include `members`, `human`, and current live member (`live`), on the page containing the role name. `limit`, `cursor`. |
 | `open_questions` | Store records reconciled against real bus answers without writing the store or triggering delivery. `needs_decision` identifies tier-2 human decisions. Default only open/escalated questions; `all=true` includes answered/closed, `answered_by`, `answered_at`, answer text and answer row id. Receipts are not answers. `brief`, `stale_minutes`, `limit`, `cursor`. |
 | `ref_read` | Required bus row `id` selects its ref; no path input. Allows files under `[mcp].ref_roots` (default `<root>/state/refs`), with resolved containment checks (including symlinks). `offset` is bytes (default 0), `limit` is bytes (default/max 32768). Follow `next_offset`; `bytes_read` counts source bytes. File text is decoded as UTF-8; invalid bytes are replaced. |
 | `trace` | Required root row `id`; whole connected `re` thread (ancestors and descendants), plus later rows mentioning the exact id or sharing a root PR (`#NNNNN`) or train (matched by `[mcp].train_pattern`), including a train introduced by a PR-linked deploy reply. Links inspect text, topic, subject and structured PR fields. Each row has `linked_by: re / mention / pr / train`, reply UTC timestamps, full bodies and refs. Oldest first. Optional roster `name` supplies broadcast-reader context; `brief`, `stale_minutes`, `limit`, `cursor`. |
@@ -103,3 +103,30 @@ The manifest must be live. Use your host supervisor for persistent service opera
 Verify an authenticated `tools/list` returns 200 and an unauthenticated request returns 401 on loopback. For remote access, arrange TLS, tunnel policy and the client's bearer header explicitly. Tools do not grant arbitrary file, shell, cloud or production access; bus asks can still cause agents to act. Enable writes only after an independent security review and the operator's explicit approval for that endpoint. Create `writes-enabled` after the client is configured to confirm each write.
 
 Rollback: remove the specific tunnel route; create `<root>/state/mcp/kill`; remove `writes-enabled`; stop the supervised process; rotate or remove its secret and remove the client connector. Existing requests can finish after the admission kill switch, so stop the process when immediate cessation is required.
+
+`agents_status` also returns optional `config_dir`, `account` (directory basename),
+`session_id`, `transcript_path`, `pid`, `permission_mode`, and `identity_refreshed_at`
+(epoch seconds). Unknown fields are null; strings are clipped. A PID is returned only
+while its captured process start time still matches. Identity merges manifest lane
+bindings, hook notes, allowlisted post-time environment, then question-session bindings.
+Hooks refresh identity at most once per `heartbeat_every`, retrying missing or invalid
+PIDs even when the binding is unchanged. Manifest agents save identity without changing
+their routing policy. Reads never register names or capture the connector server's environment.
+
+`model` is the observed assistant `message.model` in a bounded 128 KiB tail of the newest
+parent transcript, with `model_observed_at`; subagent transcripts are excluded. An
+unpinned lane sharing its account/workspace has no model observation unless explicitly
+bound to a transcript. `model_launch` is the manifest lane flag;
+`model_drift` compares the two using model-family aliases. Unknown observations are null.
+Identity/model work runs only for the requested page. Local posts/acks prove listening
+for `[addressed].activity_ttl` (default `15m`), after stronger hook/lease/wait evidence.
+Connector posts (including allowlisted `as` senders) carry `origin=mcp`, preserve
+registration and explicit bindings, and never capture the service process's identity
+or prove local listening. Registration failures log a warning and do not interrupt
+post delivery, acknowledgement or waiting.
+
+`ref_read` uses structured `ref` / `spill_ref` metadata only. Caller-written
+`[full: PATH]` text never grants file access. `full=true` selects the bus-generated
+spill when a row also has an attachment. Older rows with a structured `ref` remain
+readable; text-only legacy markers are no longer readable as refs, and older rows
+with both an attachment and only a text spill marker expose the attachment.
