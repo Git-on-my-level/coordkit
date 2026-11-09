@@ -306,6 +306,16 @@ class AnswerConsumptionTests(FakeCase):
             self.assertEqual(AnxClient(self.manifest).call('await', '--answers')['answers'], [])
         self.assertEqual(len(self.rows()), 1)
 
+    def test_stale_agent_close_cannot_replace_the_operator_settlement(self):
+        from coordkit import questions
+        stale = self.question()
+        self.respond(self.listing())
+        self.consume()
+        questions.close(self.manifest, stale, 'worker', 'A stale conflicting answer')
+        record = questions.load_all(self.manifest)['q-123abc']
+        self.assertEqual(record['answer'], 'Repair it now')
+        self.assertEqual(record['answered_by'], self.manifest.questions.human_actor)
+
     def test_shadow_pass_does_not_poll_or_ack(self):
         self.manifest.mode = 'shadow'
         with self.assertRaises(ManifestError):

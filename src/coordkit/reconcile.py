@@ -547,11 +547,12 @@ def main(argv,manifest):
                 fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
                 path=directory/'answers.json'
                 pending=read_json(path,[])
+                answer_ref = loop_answers.reference(args.answer_id)
                 for item in pending:
-                    if item['ask_id'] == args.answer_id:
+                    if loop_answers.reference(item['ask_id']) == answer_ref:
                         AnxClient(manifest).note(item.get('subject_ref') or manifest.escalation.card,
                             f'Abandoned answer {args.answer_id}: {args.reason}')
-                write_json(path,[item for item in pending if item['ask_id'] != args.answer_id])
+                write_json(path,[item for item in pending if loop_answers.reference(item['ask_id']) != answer_ref])
             return 0
         if args.dry_run:
             return reconcile(manifest,True)

@@ -1034,12 +1034,18 @@ def notify_once(manifest, qid, line):
 def close(manifest, record, by, text, answer_id=None):
     """Record the answer; close once the asker has it. Undelivered answers stay `answered` and the
     sweep retries delivery (the asker's re-armed waiter also picks up the decision row)."""
-    if record['state'] == 'closed':
+    def accept(records):
+        current = records.get(record['qid'])
+        if current is None or current['state'] not in ('open', 'escalated'):
+            return None
+        current.update(state='answered', answered_by=by, answer=text[:500], answer_id=answer_id,
+                       answered_at=now(), claim=None)
+        return dict(current)
+    record = update(manifest, accept)
+    if record is None:
         return 'already'
     if record.get('anx_ask_id') and by not in (cfg(manifest).human_actor, 'anx') and manifest.mode == 'live':  # 'anx': already gone there
         withdraw_anx(manifest, record, by)
-    mark(manifest, record['qid'], state='answered', answered_by=by, answer=text[:500], answer_id=answer_id,
-         answered_at=now(), claim=None)
     how = deliver(manifest, record, text, answer_id)
     if how in ('relay', 'shadow', 'undelivered'):
         return how
@@ -1063,19 +1069,10 @@ def withdraw_anx(manifest, record, by):
 
 
 def accept_anx_delivery(manifest, qid, text, answer_id):
-    """Record this response only if the question is still awaiting an answer."""
-    def accept(records):
-        current = records.get(qid)
-        if current is None or current['state'] not in ('open', 'escalated'):
-            return None
-        current.update(state='answered', answered_by=cfg(manifest).human_actor,
-                       answer=text[:500], answer_id=answer_id, answered_at=now(), claim=None)
-        return dict(current)
-    record = update(manifest, accept)
+    """The same atomic settlement contract applies to every answering actor."""
+    record = load_all(manifest).get(qid)
     if record is not None:
-        how = deliver(manifest, record, text, answer_id)
-        if how not in ('relay', 'shadow', 'undelivered'):
-            finish(manifest, record, how)
+        return close(manifest, record, cfg(manifest).human_actor, text, answer_id)
 
 
 def relay_anx_answer(manifest, record, answer):
