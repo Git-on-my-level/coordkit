@@ -90,10 +90,13 @@ def ask_reference(result):
     """Normalize supported current and compatibility ask response envelopes."""
     if not isinstance(result, dict):
         return None
-    if isinstance(result.get('body'), dict):
-        result = result['body']
-    ask = result.get('ask') if isinstance(result.get('ask'), dict) else {}
-    return result.get('ask_id') or result.get('id') or ask.get('id') or result.get('event_ref')
+    for candidate in (result, result.get('body')):
+        if isinstance(candidate, dict):
+            ask = candidate.get('ask') if isinstance(candidate.get('ask'), dict) else {}
+            ref = candidate.get('ask_id') or candidate.get('id') or ask.get('id') or candidate.get('event_ref')
+            if ref:
+                return ref
+    return None
 
 
 def past_promises(orient):
