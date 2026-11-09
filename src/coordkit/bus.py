@@ -921,7 +921,11 @@ def dispatch(o):
         while True:
             total, indexed = read_from(start)
             if o.own_asks:
-                own_asks.extend(r['id'] for _, r in indexed if r['frm'] == o.to and r.get('kind') == 'ask')
+                # The restart seed already holds this tail. Appending those ids again
+                # evicts older asks that are behind the cursor and cannot be reread.
+                for _, r in indexed:
+                    if r['frm'] == o.to and r.get('kind') == 'ask' and r['id'] not in own_asks:
+                        own_asks.append(r['id'])
             hits = [(index, r) for index, r in indexed if r['frm'] != o.to and
                     (((r.get('orig_kind') or r.get('kind')) in kinds and for_lane(r, o.to))
                      or r.get('re') in own_asks)]

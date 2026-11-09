@@ -826,6 +826,52 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
                 with self.assertRaisesRegex(lanemove.Refusal, 'inflight_inventory_required'):
                     lanemove.final_state(self.manifest, plan)
 
+    def test_phase_skips_malformed_event_rows(self):
+        self.invoke('--plan')
+        plan = self.plan()
+        events = self.manifest.paths.events
+        events.parent.mkdir(parents=True, exist_ok=True)
+        events.write_text('{"id":"other"}\n{not json\n[]\n')
+        with contextlib.redirect_stdout(io.StringIO()):
+            lanemove.phase(self.manifest, plan, 'freeze')
+            lanemove.phase(self.manifest, self.plan(), 'freeze')
+        seen = []
+        for line in events.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                seen.append(row.get('id'))
+        self.assertEqual(seen.count(plan['id'] + '-freeze'), 1)
+
+    def test_resume_verification_does_not_consume_the_rearm_budget(self):
+        self.frozen()
+        with self.assertRaisesRegex(lanemove.Refusal, 'rearm_timeout'):
+            self.invoke('--apply')
+        clock = {'now': 0.0}
+
+        def monotonic():
+            return clock['now']
+
+        def sleep(seconds):
+            clock['now'] += seconds
+
+        def resumed(manifest, plan):
+            return clock['now'] >= 50
+
+        def arms(manifest, plan, no_rearm=False, entries=None):
+            return clock['now'] >= 70
+
+        with patch('coordkit.lanemove.time.monotonic', monotonic), patch(
+                'coordkit.lanemove.time.sleep', sleep), patch.object(
+                lanemove, 'rearmed', side_effect=resumed), patch.object(
+                lanemove, 'rearm_all', side_effect=arms):
+            self.assertEqual(lanemove.apply(load(self.file), self.plan(), 60, 0), 0)
+        self.assertGreaterEqual(clock['now'], 70)
+        self.assertLess(clock['now'], 110)
+        self.assertIn('done', self.plan()['completed'])
+
     def test_publication_refs_preserve_phase_attention_and_handoff_evidence(self):
         # Later phases and replays must not change the evidence of an older row.
         from coordkit.refs import ref_file

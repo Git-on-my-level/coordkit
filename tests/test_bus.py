@@ -157,6 +157,24 @@ class BusTests(FakeCase):
                          kind='fyi', re=other, text='not my ask')])
         self.invoke('wait', '--to', 'lead', '--own-asks', '--kinds', 'ask', '--timeout', '0', code=3)
 
+    def test_restarted_own_ask_seed_keeps_ids_that_overlap_the_cursor(self):
+        # A cursor inside the seeded tail must not append those ask ids twice.
+        # The capped deque would otherwise drop the oldest asks behind the cursor.
+        self.manifest.bus.mirror = False
+        bus.configure(self.manifest)
+        path = self.manifest.paths.bus_log
+        path.parent.mkdir(parents=True, exist_ok=True)
+        asks = [json.dumps(dict(id=f'ask-{index:04d}', ts='2026-01-01T00:00:00+00:00', frm='lead',
+                                to='worker', kind='ask', topic='general', text='a', v=1),
+                           separators=(',', ':')) for index in range(4097)]
+        reply = json.dumps(dict(id='late-fyi', ts='2026-01-01T00:00:01+00:00', frm='worker',
+                                to='elsewhere', kind='fyi', re='ask-0001', topic='general',
+                                text='late', v=1), separators=(',', ':'))
+        path.write_text('\n'.join([*asks, reply]) + '\n')
+        bus.set_cursor('lead', 'wait', 4096)
+        self.assertIn('late-fyi', self.invoke('wait', '--to', 'lead', '--own-asks',
+                                              '--kinds', 'ask', '--timeout', '0')[0])
+
     def test_text_spill_and_ref_refusal(self):
         self.post(text='x'*1000,to='worker')
         self.assertTrue(all(len(r['text'])<=400 for r in self.rows()))

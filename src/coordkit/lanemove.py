@@ -138,7 +138,16 @@ def phase(manifest, plan, name):
     publish(manifest, plan, name, 'fyi', f"Lane {plan['name']} move {name}; receipt {plan['id']}.")
     eid = plan['id'] + '-' + name
     rows = usage.tail_lines(manifest.paths.events, 1024 * 1024) if manifest.paths.events.exists() else []
-    if not any(json.loads(row).get('id') == eid for row in rows):
+    recorded = False
+    for row in rows:
+        try:
+            parsed = json.loads(row)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and parsed.get('id') == eid:
+            recorded = True
+            break
+    if not recorded:
         lane.event(manifest, dict(id=eid, kind='lane-move', label=plan['name'], phase=name,
                                   move_id=plan['id']))
     if name not in plan['completed']:
@@ -922,6 +931,8 @@ def apply(manifest, plan, timeout, idle, no_rearm=False):
         if time.monotonic() >= deadline:
             attention(manifest, plan, 'rearm_timeout')
         time.sleep(min(1, max(0, deadline - time.monotonic())))
+    # Resume verification and re-arm each get a full --timeout budget.
+    deadline = time.monotonic() + timeout
     while not rearm_all(manifest, plan, no_rearm):
         if time.monotonic() >= deadline:
             attention(manifest, plan, 'rearm_entries_timeout')
