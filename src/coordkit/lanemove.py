@@ -112,10 +112,15 @@ def publish(manifest, plan, suffix, kind, text, *, to='all', **fields):
     rid = plan['id'] + ('-' + suffix if suffix else '')
     projected = suffix if suffix in PHASES else plan['phase']
     completed = list(dict.fromkeys([*plan['completed'], *([projected] if projected in PHASES else [])]))
-    summary = manifest.path(manifest.mcp.ref_roots[0])/'lane-move-summaries'/(plan['id']+'.json')
+    summary = manifest.path(manifest.mcp.ref_roots[0])/'lane-move-summaries'/(rid+'.json')
     # An allowlist projection: never serialize env, argv, paths, holders or identities here.
-    write_json(summary, dict(id=plan['id'], lane=plan['name'], phase=projected,
-                             completed=completed, attention=plan.get('attention')))
+    value = dict(id=plan['id'], lane=plan['name'], phase=projected,
+                 completed=completed, attention=plan.get('attention'))
+    try:
+        atomic_bytes(summary, (json.dumps(value) + '\n').encode(), exclusive=True)
+    except FileExistsError:
+        # A replay must retain the original projection, even after the plan advances.
+        pass
     args = ['post', '--from', 'coordkit', '--to', to, '--kind', kind,
             '--topic', 'lane-move', '--id', rid, '--force', '--ref', str(summary)]
     if kind == 'handoff':
@@ -354,8 +359,17 @@ def final_state(manifest, plan):
     subscriptions = state.get('subscriptions')
     if not isinstance(subscriptions, list) or len(subscriptions) > MAX_RECEIPTS:
         raise Refusal('subscription_inventory_required')
-    required = {row.get('exec_id') or row.get('execution_id') for row in state.get('lanes_in_flight', [])
-                if isinstance(row, dict)} - {None}
+    inflight = state.get('lanes_in_flight')
+    if not isinstance(inflight, list):
+        raise Refusal('inflight_inventory_required', plan['move_state_file'])
+    required = set()
+    for index, row in enumerate(inflight):
+        execution = (row.get('exec_id') or row.get('execution_id')) if isinstance(row, dict) else None
+        if not isinstance(execution, str) or not execution.strip():
+            label = row.get('name') if isinstance(row, dict) else None
+            raise Refusal('inflight_execution_id_required',
+                          f"{label or f'lanes_in_flight[{index}]'}: missing nonempty exec_id or execution_id")
+        required.add(execution)
     recorded = set()
     for entry in subscriptions:
         if (not isinstance(entry, dict) or not isinstance(entry.get('execution_id'), str)

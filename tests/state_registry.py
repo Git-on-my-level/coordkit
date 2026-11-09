@@ -275,8 +275,8 @@ row('lanemove.py', '.log|.move-state.json|.rearm-|plan:holders|plan:move_state|p
     'unconfirmed or incomplete inventory refuses; surviving children block; missing re-arm evidence leaves attention receipt')
 
 row('lanemove.py', 'private-lane-moves|.local/state/coordkit/private-lane-moves|plan:subscription_outcomes|plan:version|lane-move-summaries|.verify-|id|pid|.wait.lock|.wait.owner.json|writer:private_json|writer:publish',
-    'explicit move writes private receipts outside ref roots and publishes allowlisted summary refs',
-    'done retains private audit; subscription and verifier intents never repeat uncertain creation',
+    'explicit move writes private receipts outside ref roots and atomically creates one allowlisted summary per publication ID',
+    'done retains private audit and immutable summaries; replays reuse original summary content; subscription and verifier intents never repeat uncertain creation',
     '128 receipts and 1 MiB each; command deadline polls without signalling slow children; callbacks expire after 72h',
     'overlapping roots, duplicate cursor owners, incomplete callbacks or readiness leave move incomplete')
 row('bus.py', '.wait.owner.json|writer:_main', 'exclusive lane waiter acquires nonblocking cursor lock',

@@ -798,6 +798,74 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
                 lanemove.Refusal, 'receipt_size_limit'):
             self.invoke('--plan')
 
+    def test_inflight_inventory_requires_an_execution_id_before_move_can_finish(self):
+        # An omitted or malformed ID must never make a lane's callback optional.
+        plan = self.frozen()
+        path = Path(plan['move_state_file'])
+        state = read_json(path)
+        for entry in (dict(name='child'), dict(name='child', exec_id=''),
+                      dict(name='child', execution_id=' '), dict(name='child', exec_id=42),
+                      dict(name='child', execution_id=[]), 'child', None):
+            with self.subTest(entry=entry):
+                state['lanes_in_flight'] = [entry]
+                write_json(path, state)
+                with self.assertRaisesRegex(lanemove.Refusal, 'inflight_execution_id_required') as error:
+                    self.complete()
+                self.assertIn('child' if isinstance(entry, dict) else 'lanes_in_flight[0]', error.exception.detail)
+                self.assertNotIn('done', self.plan()['completed'])
+                self.assertEqual(self.file.read_bytes(), self.original)
+
+    def test_inflight_inventory_must_be_a_list(self):
+        plan = self.frozen()
+        path = Path(plan['move_state_file'])
+        state = read_json(path)
+        for value in (None, {}, 'child'):
+            with self.subTest(value=value):
+                state['lanes_in_flight'] = value
+                write_json(path, state)
+                with self.assertRaisesRegex(lanemove.Refusal, 'inflight_inventory_required'):
+                    lanemove.final_state(self.manifest, plan)
+
+    def test_publication_refs_preserve_phase_attention_and_handoff_evidence(self):
+        # Later phases and replays must not change the evidence of an older row.
+        from coordkit.refs import ref_file
+        plan = self.frozen()
+        with contextlib.redirect_stdout(io.StringIO()):
+            lanemove.phase(self.manifest, plan, 'freeze')
+            with self.assertRaisesRegex(lanemove.Refusal, 'example_pause'):
+                lanemove.attention(self.manifest, plan, 'example_pause')
+        earlier = [(row, ref_file(self.manifest, row).read_bytes()) for row in self.rows() if row.get('ref')]
+        self.complete()
+        with contextlib.redirect_stdout(io.StringIO()):
+            lanemove.phase(self.manifest, self.plan(), 'freeze')
+        for row, original in earlier:
+            self.assertEqual(ref_file(self.manifest, row).read_bytes(), original)
+        rows = {row['id']: row for row in self.rows() if row.get('ref') and not row.get('copy_of')}
+        self.assertEqual(len({row['ref'] for row in rows.values()}), len(rows))
+        freeze = read_json(ref_file(self.manifest, rows[plan['id']+'-freeze']))
+        self.assertEqual(freeze['phase'], 'freeze')
+        self.assertNotIn('done', freeze['completed'])
+        done = read_json(ref_file(self.manifest, rows[plan['id']+'-done']))
+        self.assertEqual(done['phase'], 'done')
+        self.assertNotEqual(rows[plan['id']]['ref'], rows[plan['id']+'-done']['ref'])
+
+    def test_publication_reuses_atomic_summary_after_bus_failure(self):
+        plan = self.frozen()
+        with patch.object(lanemove.bus, 'main', return_value=1), self.assertRaisesRegex(
+                lanemove.Refusal, 'publication_failed'):
+            lanemove.publish(self.manifest, plan, 'freeze', 'fyi', 'Frozen')
+        directory = self.manifest.path(self.manifest.mcp.ref_roots[0])/'lane-move-summaries'
+        summary = directory/(plan['id']+'-freeze.json')
+        original = summary.read_bytes()
+        plan['completed'].append('done')
+        with patch.object(lanemove.os, 'link', wraps=os.link) as link:
+            with contextlib.redirect_stdout(io.StringIO()):
+                lanemove.publish(self.manifest, plan, 'freeze', 'fyi', 'Frozen')
+        self.assertEqual(link.call_args.args[1], summary)
+        self.assertEqual(summary.read_bytes(), original)
+        self.assertEqual(self.rows()[-1]['ref'], str(summary))
+        self.assertFalse(list(directory.glob('.lane-move-*')))
+
     def test_subscription_inventory_covers_inflight_and_recreates_on_new_host(self):
         plan = self.rearm_fixture()
         path = Path(plan['move_state_file'])
@@ -809,8 +877,11 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
         old = dict(execution_id='exec-example', subscription_id='sub-old', source_host='old-host',
                    target='/old/events.ndjson', expires_at='2020-01-01T00:00:00Z', kinds=['terminal', 'attention'])
         state['subscriptions'] = [old]
-        write_json(path, state)
-        lanemove.final_state(self.manifest, plan)
+        for key in ('exec_id', 'execution_id'):
+            with self.subTest(key=key):
+                state['lanes_in_flight'] = [{key: 'exec-example'}]
+                write_json(path, state)
+                lanemove.final_state(self.manifest, plan)
         fresh = dict(old, source_host='new-host', target=str(self.manifest.paths.events),
                      subscription_id='sub-new', expires_at='2999-01-01T00:00:00Z', state='active')
         with patch.object(lanemove.socket, 'gethostname', return_value='new-host'), patch.object(
