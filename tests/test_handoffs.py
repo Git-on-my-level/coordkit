@@ -5,10 +5,12 @@ import io
 import subprocess
 import time
 import os
+from unittest.mock import patch
 
 from coordkit import addressed, bus, mcp_server, obligations
 from coordkit.manifest import ManifestError, load
 from coordkit.refs import ref_file
+from coordkit.process import ToolError
 from tests.support import FakeCase
 
 
@@ -17,12 +19,21 @@ class HandoffTests(FakeCase):
         super().setUp()
         self.repo = self.root / 'repository'
         self.repo.mkdir()
-        self.git('init', '-q')
+        self.git('init', '-q', '-b', 'main')
+        (self.repo / 'base.txt').write_text('base\n')
+        self.git('add', 'base.txt')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base')
+        self.base = self.git('rev-parse', 'HEAD').strip()
         self.path = self.repo / 'handoffs' / 'worker--task.md'
         self.path.parent.mkdir()
         self.path.write_text('Review this work.\n')
         self.git('add', 'handoffs')
         self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture')
+        self.remote = self.root / 'remote.git'
+        result = subprocess.run(['git', 'clone', '--bare', str(self.repo), str(self.remote)],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.git('remote', 'add', 'origin', str(self.remote))
         self.manifest.handoffs.repos = {'sample': str(self.repo)}
         self.manifest.handoffs.required = True
         self.manifest.bus.mirror = False
@@ -35,7 +46,13 @@ class HandoffTests(FakeCase):
 
     def reference(self, path=None):
         path = path or self.path
-        return f'repo:sample:{path.relative_to(self.repo).as_posix()}@sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}'
+        commit = self.git('rev-parse', 'HEAD').strip()
+        return f'repo:sample:{path.relative_to(self.repo).as_posix()}@{commit}#sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}'
+
+    def commit_and_push(self):
+        self.git('add', 'handoffs')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'update')
+        self.git('push', 'origin', 'main')
 
     def invoke(self, *args, code=0):
         out, err = io.StringIO(), io.StringIO()
@@ -59,7 +76,7 @@ class HandoffTests(FakeCase):
         row = self.rows()[0]
         self.assertEqual(row['ref'], self.ref)
         self.assertEqual(row['evidence'], self.ref)
-        self.assertEqual(ref_file(self.manifest, row), self.path)
+        self.assertEqual(ref_file(self.manifest, row).read_bytes(), self.path.read_bytes())
         self.assertEqual(len(obligations.open_obligations(self.manifest, self.rows(), time.time())), 1)
         self.invoke('ack', row['id'], '--from', 'lead')
         self.assertEqual(obligations.open_obligations(self.manifest, self.rows(), time.time()), [])
@@ -71,7 +88,8 @@ class HandoffTests(FakeCase):
                    ['--ref', self.ref.replace('handoffs/', '../handoffs/')],
                    ['--ref', self.ref.replace('handoffs/', '/handoffs/')],
                    ['--ref', self.ref.replace('worker--', 'someone--')],
-                   ['--ref', self.ref.replace('@sha256:', '@sha256:BAD')]]
+                   ['--ref', self.ref.replace('#sha256:', '#sha256:BAD')],
+                   ['--ref', self.ref.replace('@' + self.git('rev-parse', 'HEAD').strip(), '@deadbeef')]]
         for args in invalid:
             with self.subTest(args=args):
                 self.post(*args, '--force', code=2)
@@ -109,12 +127,14 @@ class HandoffTests(FakeCase):
     def test_symlink_escape_and_unapproved_directory_refused(self):
         link = self.path.with_name('worker--link.md')
         link.symlink_to(self.path)
-        self.post('--evidence', self.reference(link), code=2)
+        self.commit_and_push()
+        self.assertIn('symlinks are refused', self.post('--evidence', self.reference(link), code=2))
         external = self.root / 'external'
         external.write_text('external')
         link.unlink()
         link.symlink_to(external)
-        self.post('--evidence', self.reference(link), code=2)
+        self.commit_and_push()
+        self.assertIn('symlinks are refused', self.post('--evidence', self.reference(link), code=2))
         other = self.repo / 'worker--outside.md'
         other.write_text('Outside handoffs directory')
         self.post('--evidence', self.reference(other), code=2)
@@ -137,9 +157,11 @@ class HandoffTests(FakeCase):
         self.assertEqual(obligations.open_obligations(self.manifest, self.rows(), time.time()), [])
 
     def test_digest_change_bounces_claim_before_claim_row(self):
-        self.post('--ref', self.ref)
+        legacy = self.ref.split('@')[0] + '@sha256:' + self.ref.split('#sha256:')[1]
+        self.post('--ref', legacy)
         original = self.rows()[0]
         self.path.write_text('Overwritten')
+        self.commit_and_push()
         self.invoke('post', '--kind', 'claim', '--from', 'lead', '--to', 'worker',
                     '--re', original['id'], 'Picking up', code=2)
         self.assertIn('sha256 mismatch', self.rows()[-1]['handoff_bounce'])
@@ -181,7 +203,7 @@ class HandoffTests(FakeCase):
     def test_connector_ack_uses_same_probe_and_bystander_cannot_bounce(self):
         self.post('--ref', self.ref)
         original = self.rows()[0]
-        self.path.unlink()
+        self.manifest.handoffs.repos['sample'] = str(self.root / 'missing-consumer')
         with self.assertRaises(ManifestError):
             self.invoke('ack', original['id'], '--from', 'bystander', code=2)
         self.assertEqual(len(self.rows()), 1)
@@ -223,7 +245,8 @@ class HandoffTests(FakeCase):
                              'directories=["handoffs"]\nmax_bytes=262144\n')
         self.assertEqual(load(self.file).handoffs.repos, {'sample': 'repository'})
         for config in ('required=true', 'repos={sample=2}', 'directories=["../outside"]',
-                       'max_bytes=0', 'directories="handoffs"'):
+                       'max_bytes=0', 'directories="handoffs"', 'remote="--all"',
+                       'fetch_timeout_seconds=0', 'fetch_timeout_seconds=121'):
             with self.subTest(config=config):
                 self.file.write_text(base + '\n[handoffs]\n' + config + '\n')
                 with self.assertRaises(ManifestError):
@@ -232,7 +255,7 @@ class HandoffTests(FakeCase):
     def test_reply_and_direct_answer_probe_before_publishing(self):
         self.post('--ref', self.ref)
         original = self.rows()[0]
-        self.path.unlink()
+        self.manifest.handoffs.repos['sample'] = str(self.root / 'missing-consumer')
         self.invoke('reply', original['id'], '--from', 'lead', 'Received', code=2)
         self.invoke('post', '--from', 'lead', '--to', 'worker', '--kind', 'answer',
                     '--re', original['id'], 'Received', code=2)
@@ -276,7 +299,7 @@ class HandoffTests(FakeCase):
         from coordkit.handoffs import check_pickup
         self.post('--ref', self.ref)
         snapshot = self.rows()
-        self.path.unlink()
+        self.manifest.handoffs.repos['sample'] = str(self.root / 'missing-consumer')
         for _ in range(2):
             self.assertFalse(check_pickup(self.manifest, snapshot[0], 'lead', snapshot))
         self.assertEqual(len(self.rows()), 2)
@@ -287,3 +310,71 @@ class HandoffTests(FakeCase):
         self.invoke('ack', original['id'], '--from', 'lead', '--owner', 'reviewer')
         self.invoke('ack', original['id'], '--from', 'reviewer')
         self.assertEqual(obligations.open_obligations(self.manifest, self.rows(), time.time()), [])
+
+    def test_stale_dirty_consumer_fetches_pinned_commit_without_checkout_changes(self):
+        from pathlib import Path
+        consumer = self.root / 'consumer'
+        consumer.mkdir()
+        def git(*args, check=True):
+            result = subprocess.run(['git', '-C', str(consumer), *args], capture_output=True, timeout=10)
+            if check:
+                self.assertEqual(result.returncode, 0, result.stderr)
+            return result
+        git('init', '-q', '-b', 'stale-local')
+        git('remote', 'add', 'origin', str(self.remote))
+        git('fetch', '-q', 'origin', self.base)
+        git('checkout', '-q', self.base)
+        git('switch', '-qc', 'consumer-local')
+        commit = self.ref.split('@')[1].split('#')[0]
+        self.assertNotEqual(git('cat-file', '-e', commit, check=False).returncode, 0)
+        (consumer / 'base.txt').write_text('dirty local changes\n')
+        (consumer / 'untracked.txt').write_text('keep me\n')
+        git('status', '--porcelain')
+        index = (consumer / '.git/index').read_bytes()
+        fetch_head = (consumer / '.git/FETCH_HEAD').read_bytes()
+        head = git('rev-parse', 'HEAD').stdout
+        branch = git('symbolic-ref', 'HEAD').stdout
+        # Posting also reads objects: even the poster's HEAD need not contain the file.
+        self.git('checkout', '-q', '--detach', self.base)
+        self.assertFalse(self.path.exists())
+        self.post('--ref', self.ref)
+        original = self.rows()[0]
+        self.manifest.handoffs.repos['sample'] = str(consumer)
+        self.invoke('ack', original['id'], '--from', 'lead')
+        self.assertEqual(git('cat-file', '-e', commit).returncode, 0)
+        self.assertEqual(git('rev-parse', 'HEAD').stdout, head)
+        self.assertEqual(git('symbolic-ref', 'HEAD').stdout, branch)
+        self.assertEqual((consumer / '.git/index').read_bytes(), index)
+        self.assertEqual((consumer / '.git/FETCH_HEAD').read_bytes(), fetch_head)
+        self.assertEqual((consumer / 'base.txt').read_text(), 'dirty local changes\n')
+        self.assertEqual((consumer / 'untracked.txt').read_text(), 'keep me\n')
+        self.assertFalse((consumer / 'handoffs/worker--task.md').exists())
+        self.assertEqual(ref_file(self.manifest, original).read_text(), 'Review this work.\n')
+        self.assertEqual(mcp_server.read_ref(self.manifest, original, {})['text'], 'Review this work.\n')
+
+    def test_legacy_form_uses_remote_default_tip_not_local_head_or_files(self):
+        legacy = self.ref.split('@')[0] + '@sha256:' + self.ref.split('#sha256:')[1]
+        self.git('checkout', '-q', '--detach', self.base)
+        self.assertFalse(self.path.exists())
+        self.post('--ref', legacy)
+        original = self.rows()[0]
+        self.invoke('ack', original['id'], '--from', 'lead')
+        self.assertEqual(ref_file(self.manifest, original).read_text(), 'Review this work.\n')
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+        self.assertFalse(self.path.exists())
+
+    def test_fetch_timeout_and_remote_failure_bounce(self):
+        self.post('--ref', self.ref)
+        original = self.rows()[0]
+        self.manifest.handoffs.fetch_timeout_seconds = 3
+        with patch('coordkit.git_objects.run', side_effect=ToolError('git', 6, 'timeout', 'tool_timeout')) as run:
+            self.invoke('ack', original['id'], '--from', 'lead', code=2)
+            self.assertEqual(run.call_args.kwargs['timeout'], 3)
+        self.assertIn('fetch failed or timed out', self.rows()[-1]['handoff_bounce'])
+
+    def test_configured_remote_is_used_for_pickup(self):
+        self.post('--ref', self.ref)
+        original = self.rows()[0]
+        self.git('remote', 'rename', 'origin', 'archive')
+        self.manifest.handoffs.remote = 'archive'
+        self.invoke('ack', original['id'], '--from', 'lead')

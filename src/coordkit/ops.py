@@ -54,7 +54,7 @@ BUS_OPS = (
         Arg('--needs', help='kind=blocker: what would unblock it, one line (mandatory)'),
         Arg('--rollback', help='kind=decision: how to undo it (or pass --irreversible)'),
         Arg('--irreversible', action='store_true', help='kind=decision: there is no rollback'),
-        Arg('--evidence', help='kind=handoff: repo:NAME:PATH@sha256:DIGEST (or legacy evidence when not required)'),
+        Arg('--evidence', help='kind=handoff: repo:NAME:PATH@COMMIT#sha256:DIGEST (legacy @sha256:DIGEST uses remote default tip)'),
         Arg('--degrade-handoff', help='visible reason for using a machine-local handoff; never portable authority'),
         Arg('--re', help='id of the ask/ruling this replies to'),
         Arg('--force', action='store_true', help='post to a recipient the bus has never seen'),

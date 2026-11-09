@@ -14,7 +14,7 @@ def ref_file(manifest, row, full=False):
         raise ValueError('row has no ref file')
     if ref.startswith('repo:'):
         from .handoffs import repo_file
-        return repo_file(manifest, ref, row.get('frm'))
+        return repo_file(manifest, ref, row.get('frm'), fetch=True)
     swarm = manifest.paths.bus_log.parent.resolve()
     candidate = Path(ref)
     if not candidate.is_absolute():

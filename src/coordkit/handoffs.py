@@ -7,8 +7,10 @@ import subprocess
 import sys
 
 from .errors import ManifestError
+from .git_objects import descriptor_blob, RepoBlob
 
 REPO_REF = re.compile(r'repo:([A-Za-z0-9][A-Za-z0-9_.-]*):(.+)@sha256:([0-9a-f]{64})')
+PINNED_REF = re.compile(r'repo:([A-Za-z0-9][A-Za-z0-9_.-]*):(.+)@([0-9a-f]{40}|[0-9a-f]{64})#sha256:([0-9a-f]{64})')
 
 
 def relative(value):
@@ -24,17 +26,25 @@ def validate_config(config):
         raise ManifestError('invalid_value: handoffs.repos names must be plain names')
     if config.required and not config.repos:
         raise ManifestError('invalid_value: handoffs.required needs handoffs.repos')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', config.remote):
+        raise ManifestError('invalid_value: handoffs.remote must name a configured Git remote')
+    if not 1 <= config.fetch_timeout_seconds <= 120:
+        raise ManifestError('invalid_value: handoffs.fetch_timeout_seconds must be 1..120')
 
 
 def stored_ref(value):
     return value if value.startswith('repo:') else str(Path(value).expanduser().resolve())
 
 
-def repo_file(manifest, value, writer=None):
-    match = REPO_REF.fullmatch(value)
+def repo_file(manifest, value, writer=None, *, fetch=False):
+    match = PINNED_REF.fullmatch(value) or REPO_REF.fullmatch(value)
     if not match:
-        raise ValueError('expected repo:NAME:PATH@sha256:<64 lowercase hex digits>')
-    name, path, digest = match.groups()
+        raise ValueError('expected repo:NAME:PATH@COMMIT#sha256:DIGEST (or legacy @sha256:DIGEST)')
+    if len(match.groups()) == 4:
+        name, path, commit, digest = match.groups()
+    else:
+        name, path, digest = match.groups()
+        commit = None
     config = manifest.handoffs
     if name not in config.repos or not relative(path):
         raise ValueError('unknown repository or non-relative handoff path')
@@ -43,28 +53,11 @@ def repo_file(manifest, value, writer=None):
     if writer is not None and not PurePosixPath(path).name.startswith(writer + '--'):
         raise ValueError('handoff filename must start with poster identity followed by --')
     root = manifest.path(config.repos[name])
-    candidate = root / path
     try:
-        if not candidate.resolve(strict=True).is_relative_to(root):
-            raise ValueError('handoff path escapes repository root')
-        # Reject symlinks even within the root: Git records the link, not its target's bytes.
-        if any(p.is_symlink() for p in (candidate, *candidate.parents) if p != root and p.is_relative_to(root)):
-            raise ValueError('handoff path must not contain symlinks')
-        if not candidate.is_file():
-            raise ValueError('handoff must be a regular file')
-        with candidate.open('rb') as stream:
-            data = stream.read(config.max_bytes + 1)
-        if len(data) > config.max_bytes:
-            raise ValueError('handoff exceeds max_bytes; use a transport branch and commit SHA')
+        data = descriptor_blob(root, path, commit, config, fetch=fetch)
         if hashlib.sha256(data).hexdigest() != digest:
             raise ValueError('handoff sha256 mismatch')
-        result = subprocess.run(['git', '-C', str(root), 'rev-parse', '--verify', 'HEAD:' + path],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
-        blob = subprocess.run(['git', '-C', str(root), 'hash-object', '--stdin'], input=data,
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
-        if result.returncode or blob.returncode or result.stdout != blob.stdout:
-            raise ValueError('handoff must be committed at HEAD with the named digest')
-        return candidate
+        return RepoBlob(value, data)
     except (OSError, RuntimeError, subprocess.TimeoutExpired):
         raise ValueError('handoff unavailable on this host') from None
 
@@ -80,7 +73,7 @@ def validate_post(manifest, options):
     reason = getattr(options, 'degrade_handoff', None)
     if reason is not None and not reason.strip():
         raise ValueError('--degrade-handoff needs a visible reason')
-    refs = [value for value in (options.ref, options.evidence) if value]
+    refs = list(dict.fromkeys(value for value in (options.ref, options.evidence) if value))
     roots = [manifest.path(p) for p in manifest.handoffs.repos.values()] or [manifest.file.parent]
     portable = False
     for value in refs:
@@ -95,7 +88,7 @@ def validate_post(manifest, options):
             if options.kind == 'handoff' and manifest.handoffs.required and not reason:
                 raise ValueError('handoff paths need repo-relative authority and sha256')
     if options.kind == 'handoff' and manifest.handoffs.required and not portable and not reason:
-        raise ValueError('handoff needs --ref or --evidence repo:NAME:PATH@sha256:DIGEST')
+        raise ValueError('handoff needs --ref or --evidence repo:NAME:PATH@COMMIT#sha256:DIGEST')
     if reason:
         print(f'WARNING: DEGRADED HANDOFF: {reason}', file=sys.stderr)
     return reason
@@ -150,10 +143,10 @@ def check_pickup(manifest, work, reader, rows):
     try:
         # Automatic long-text spills are local display detail, not handoff authority.
         ref = work.get('ref') if work.get('ref') != work.get('spill_ref') else None
-        refs = [v for v in (ref, work.get('evidence')) if v]
+        refs = list(dict.fromkeys(v for v in (ref, work.get('evidence')) if v))
         for value in refs:
             if value.startswith('repo:'):
-                repo_file(manifest, value, work['frm'])
+                repo_file(manifest, value, work['frm'], fetch=True)
             elif path_like(value):
                 # Legacy/degraded rows still have to be readable by the consumer.
                 digest = local_digest(manifest, value)

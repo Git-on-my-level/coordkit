@@ -50,6 +50,11 @@ REGISTRY = []
 def row(module, names, enter, exit, max_age, escalation):
     REGISTRY.extend((module,name,enter,exit,max_age,escalation) for name in names.split('|'))
 
+row('git_objects.py', 'refs/coordkit/handoffs/', 'legacy unpinned descriptor fetch',
+    'next default-tip fetch replaces this private ref; no checkout/index/HEAD/FETCH_HEAD updates',
+    'one persistent default-tip ref per configured remote; fetch timeout is bounded',
+    'missing objects or fetch failures bounce pickup to poster')
+
 row('manifest.py', 'lead.json', 'lead adopt', 'next adoption', 'persistent identity, no blocking latch', 'doctor identity check')
 row('actl.py', 'request.json|writer:delegate', 'delegate request', 'execution receipt', 'bounded tool timeout', 'loop failures or lane alarm')
 row('extract.py', '.tmp|writer:commit', 'transcript extraction', 'atomic checkpoint replacement', 'one cycle max_age', 'loop failure ask')
