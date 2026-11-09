@@ -46,6 +46,7 @@ class Paths:
     bus_log: Path
     events: Path
     out_dir: Path
+    machine_state: Path | None = None
 
 
 @dataclass
@@ -437,7 +438,7 @@ def load(path: str | Path | None = None) -> Manifest:
     anx.lead_actor = anx.lead_actor or f"ck-{project.name}-lead"
     anx.agent_prefix = anx.agent_prefix or f"ck-{project.name}"
     paths_raw = raw.get("paths", {})
-    if not isinstance(paths_raw, dict) or set(paths_raw) - {"root", "bus_log", "events", "out_dir"}:
+    if not isinstance(paths_raw, dict) or set(paths_raw) - {"root", "bus_log", "events", "out_dir", "machine_state"}:
         raise ManifestError("invalid_value: paths")
     def resolve(value):
         if not isinstance(value, str) or not value:
@@ -446,6 +447,8 @@ def load(path: str | Path | None = None) -> Manifest:
     root = resolve(paths_raw.get("root", ".coordkit"))
     paths = Paths(root, *[resolve(paths_raw[k]) if k in paths_raw else root / d for k, d in
                          (("bus_log", "bus.jsonl"), ("events", "events.ndjson"), ("out_dir", "runs"))])
+    if "machine_state" in paths_raw:
+        paths.machine_state = resolve(paths_raw["machine_state"])
     question_data = raw.get("questions")
     if isinstance(question_data, dict) and "cl2ctl" in question_data:
         question_data = dict(question_data)

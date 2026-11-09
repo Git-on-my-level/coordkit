@@ -341,7 +341,8 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
     """One hourly FYI; consume the shared queue under the same lock writers take."""
     if at - state.get('lead_digest_at', 0) < DIGEST_EVERY:
         return
-    from . import approvals, questions
+    from . import approvals, questions, machine
+    machine_lines = machine.lines(manifest)
     rows = questions.recent_rows(manifest) if rows is None else rows
     questions.reconcile_defaults(manifest, rows, at)
     opened = questions.open_questions(manifest, at)
@@ -352,9 +353,10 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
     with path.open('a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         items = digest_items(stream)
-        if not items and not backlog and not pending and not dead and not opened and not missing:
+        if not items and not backlog and not pending and not dead and not opened and not missing and not machine_lines:
             return
         lines = [f"- {i.get('event')}: {i.get('text', '')[:200]}" for i in items[-12:]]
+        lines.extend(machine_lines)
         lines += ['- ' + i['text'] for i in missing[:12]]
         lines += [f"- {r['qid']}: unanswered, no default ({r.get('reasks', 0)} re-asks)" for r in unanswered[:12]]
         if opened:

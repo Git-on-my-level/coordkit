@@ -206,7 +206,11 @@ class ProcessDefaultsTests(AddressedCase):
             questions.create(self.manifest, 'worker-ui', 'Use cache?', default='Use cache')
             questions.create(self.manifest, 'worker-ui', 'Use cache?', default='Use cache')
         self.assertEqual(route.call_count, 1)
-        self.assertEqual(questions.load_all(self.manifest)[record['qid']]['state'], 'closed')
+        stored = questions.load_all(self.manifest)[record['qid']]
+        self.assertEqual(stored['state'], 'answered')
+        self.assertTrue(stored['auto_default_applied'])
+        decision = next(r for r in self.rows() if r.get('id') == stored['answer_id'])
+        self.assertEqual((decision['kind'], decision['rollback']), ('decision', questions.DEFAULT_ROLLBACK))
 
     def test_manifest_limits_are_configurable_and_positive(self):
         self.file.write_text(self.file.read_text() + '\n[questions]\nauto_default_reasks = 3\nauto_default_after = "2h"\n')

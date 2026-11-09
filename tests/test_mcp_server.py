@@ -233,10 +233,11 @@ class McpToolTests(McpCase):
         # The fsynced append is the post outcome. Delivery/mirroring can fail
         # afterward; reporting a preflight failure invites duplicate retries.
         self.enable_writes()
-        for index, (stage, failure) in enumerate((('after_post', SystemExit(1)), ('after_post', RuntimeError('delivery failed')),
-                                                ('project_pending', SystemExit(1)))):
+        for stage, failure in (('after_post', SystemExit(1)), ('after_post', RuntimeError('delivery failed')),
+                               ('project_pending', SystemExit(1))):
             module = addressed if stage == 'after_post' else bus
-            message = f'Durable request {index}'
+            # Bare retry counts normalize into one ask; each failure stage needs distinct information.
+            message = f'Durable {stage} request {type(failure).__name__}'
             with self.subTest(stage=stage, failure=type(failure).__name__), \
                     patch.object(module, stage, side_effect=failure):
                 error, text = self.tool('post', to='worker-ui', kind='ask', text=message)

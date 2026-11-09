@@ -565,6 +565,8 @@ def dispatch(o):
         if o.subject and not SUBJECT.match(o.subject):
             print(f'refused: --subject {o.subject!r} must be one token (letters, digits, _.:#/@+-)', file=sys.stderr)
             sys.exit(2)
+        if o.default and o.kind != 'ask':
+            print('refused: --default is only for --kind ask', file=sys.stderr); sys.exit(2)
         if o.kind == 'decision':
             if not (o.re or o.subject):
                 print('refused: a decision needs --re <ask/blocker id> or --subject', file=sys.stderr); sys.exit(2)

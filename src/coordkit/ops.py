@@ -270,7 +270,7 @@ def mcp_call(manifest, args):
 
 
 COMMANDS = {
-    'accounts': 'accounts', 'relay': 'relay', 'bus': 'bus', 'sweep': 'addressed', 'mcp-serve': 'mcp_server', 'deliver': 'deliver',
+    'stock': 'stock', 'accounts': 'accounts', 'relay': 'relay', 'bus': 'bus', 'sweep': 'addressed', 'mcp-serve': 'mcp_server', 'deliver': 'deliver',
     'lane': 'lane', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
     'obligations': 'obligations', 'review': 'review', 'question': 'questions',
     'init': 'lifecycle', 'up': 'lifecycle', 'down': 'lifecycle', 'doctor': 'lifecycle', 'lead': 'lifecycle',
@@ -286,6 +286,22 @@ def markdown():
     for op in OPERATIONS:
         arguments = ', '.join('/'.join(a.flags) for a in op.args)
         lines.append(f"| `{op.name}` | {op.mode} | {', '.join(sorted(op.surfaces))} | {arguments} |")
+    lines += ['', '## Status snapshots and machine lines', '',
+              '`coordkit stock` compares counts and oldest-item timestamps, recording the snapshot atomically in',
+              '`<root>/state/stock-last.json`. Changed lines show the current age and `verified_at` in UTC.',
+              '`coordkit stock --full` prints every kind, retaining the count/oldest/threshold table.',
+              'Reconciliation always receives the complete stock dictionary for threshold checks.',
+              'A reconciliation dry run reads the snapshot without creating a snapshot or lock file.', '',
+              'Both stock output and the hourly lead digest echo the last 20 matching lines, verbatim,',
+              'from `<root>/state/machine/*.lines` (files sorted by path, lines in file order). Accepted prefixes:',
+              '`FLAG_DUE_SOON`, `FLAG_OVERDUE_COUNT`, `FLAG_DARK_OVER_14D`, `QUIET_PRS_OVER_14D`,',
+              '`APPROVED_NOT_OWNED`, `OPEN_COUNTS`. coordkit only consumes these lines; it never produces FLAG lines.',
+              'Producers own replacement/removal and freshness; unreadable files contribute no lines.',
+              'Files are decoded as UTF-8 with invalid bytes replaced so malformed producer text cannot stop delivery.', '',
+              'Optionally set `[paths].machine_state = "../swarm/state"` (relative to the manifest,',
+              'or an absolute path) to bridge an external producer state directory in live or shadow mode.',
+              'The bridge reads `machine/*.lines`, `lane-watch/machine/*.lines`, and `quiet-prs.lines`',
+              'without writing to the producer directory. Shadow observations keep their local snapshot.']
     return '\n'.join(lines) + '\n'
 
 
@@ -299,6 +315,7 @@ def main(argv, manifest=None):
 # in their adapters until those entry points can be retired independently.
 CLI_ARGS = {
     'accounts': (Arg('--json', action='store_true'),),
+    'stock': (Arg('--full', action='store_true'),),
     'init': (Arg('project'), Arg('--profile', choices=('minimal','anx'), default='minimal'),
              Arg('--workspace',default='anx'), Arg('--board'), Arg('--git-repo')),
     'retire': (Arg('lane'), Arg('--to')),

@@ -52,3 +52,119 @@ class StockTests(FakeCase):
                      {'tool':'agentctl','contains':['status','exec-other'],'json':{'ok':True,'result':{'delegation':{'request_key':'other-1'}}}},
                      {'tool':'agentctl','contains':['status','exec-ours'],'json':{'ok':True,'result':{'delegation':{'request_key':'ck-sample-w'}}}})
         self.assertEqual(stock.stock(self.manifest)['dead_letters']['count'], 1)
+
+    def test_report_diffs_against_last_snapshot_with_verified_at(self):
+        from unittest.mock import patch
+        sample = {'asks': {'count': 1, 'oldest': 60, 'oldest_at': 9940, 'threshold': 10, 'age_unknown': False}}
+        def report(at):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = stock.report(self.manifest, at=at)
+            return result, out.getvalue()
+        with patch.object(stock, 'stock', return_value=sample):
+            result, text = report(10000)
+            self.assertEqual(result, sample)
+            self.assertIn('verified_at=1970-01-01T02:46:40+00:00', text)
+            self.assertEqual(report(10060)[1], '')
+            sample['asks'].update(count=0, oldest=0, oldest_at=None)
+            self.assertIn('asks count=0', report(10120)[1])
+        import json
+        snapshot = json.loads((self.manifest.paths.root/'state/stock-last.json').read_text())
+        self.assertEqual(snapshot, {'asks': {'count': 0, 'oldest_at': None}})
+        self.assertEqual(list((self.manifest.paths.root/'state').glob('*.tmp')), [])
+
+    def test_report_full_flag_reproduces_legacy_table(self):
+        from unittest.mock import patch
+        sample = {'asks': {'count': 1, 'oldest': 60, 'oldest_at': 9940, 'threshold': 10, 'age_unknown': False},
+                  'holds': {'count': 2, 'oldest': 90, 'oldest_at': 9910, 'threshold': 3, 'age_unknown': True}}
+        with patch.object(stock, 'stock', return_value=sample), contextlib.redirect_stdout(io.StringIO()) as out:
+            stock.report(self.manifest, at=10000)
+            out.seek(0); out.truncate()
+            self.assertEqual(stock.main(['--full'], self.manifest), 0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual([line.split(' verified_at=')[0] for line in lines],
+                         ['STATUS stock asks count=1 oldest=60s threshold=10',
+                          'STATUS stock holds count=2 oldest=90s threshold=3 age=unknown'])
+
+    def test_machine_lines_echoed_into_status_and_digest(self):
+        from unittest.mock import patch
+        from coordkit import addressed, machine
+        path = self.manifest.paths.root/'state/machine'
+        path.mkdir(parents=True)
+        local = path/'flags.lines'
+        local.write_text('FLAG_OVERDUE_COUNT n=3\nFLAG_DUE_SOON n=1\nFLAG_DARK_OVER_14D n=2\n'
+                         'APPROVED_NOT_OWNED a1 31m from=worker\nIGNORE this\nFLAG_DUE_SOONISH no\n')
+        external = self.root/'producer-state'
+        (external/'lane-watch/machine').mkdir(parents=True)
+        (external/'lane-watch/machine/open-counts.lines').write_text('OPEN_COUNTS lead=2 worker=1\n')
+        (external/'quiet-prs.lines').write_text('QUIET_PRS_OVER_14D n=1 ids=#123 drafts=0\n')
+        self.file.write_text(self.file.read_text() + '\n[paths]\nmachine_state = "producer-state"\n')
+        self.manifest = load(self.file)
+        expected = machine.lines(self.manifest)
+        self.assertEqual(len(expected), 6)
+        before = {p: p.read_bytes() for p in [local, *external.rglob('*.lines')]}
+        for mode in ('live', 'shadow'):
+            self.manifest.mode = mode
+            with self.subTest(mode=mode), patch.object(stock, 'stock', return_value={}), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                stock.report(self.manifest, at=10000)
+            self.assertEqual(out.getvalue().splitlines(), expected)
+            with patch.object(bus, 'main') as post, patch.object(addressed, 'to_relay_file') as relay:
+                state = {}
+                addressed.flush_lead_digest(self.manifest, state, 10000, out=lambda *_: None)
+            text = post.call_args.args[0][-1] if mode == 'live' else relay.call_args.args[1]
+            self.assertTrue(all(line in text.splitlines() for line in expected))
+            self.assertEqual(state['lead_digest_at'], 10000)
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        local.write_text(''.join(f'FLAG_DARK_OVER_14D n={i}\n' for i in range(30)))
+        self.assertEqual(len(machine.lines(self.manifest)), 20)
+        self.assertNotIn('FLAG_DARK_OVER_14D n=0', machine.lines(self.manifest))
+
+    def test_unchanged_stock_stays_quiet_as_age_grows_and_changed_oldest_prints_current_age(self):
+        import json
+        path = self.manifest.paths.bus_log
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {'id': 'a1', 'kind': 'ask', 'frm': 'worker', 'to': 'lead', 'topic': 'test',
+               'text': 'Which fixture?', 'ts': '1970-01-01T00:00:00Z', 'origin': 'coordkit'}
+        path.write_text(json.dumps(row) + '\n')
+        def report(at):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = stock.report(self.manifest, at=at, since=0)
+            return result, out.getvalue()
+        first, text = report(10000)
+        self.assertIn('asks count=1 oldest=10000s', text)
+        second, text = report(10060)
+        self.assertEqual(second['asks']['oldest'], first['asks']['oldest'] + 60)
+        self.assertEqual(first['asks']['oldest_at'], second['asks']['oldest_at'])
+        self.assertEqual(text, '', 'elapsed age alone must not count as a stock change')
+        row.update(id='a2', ts='1970-01-01T00:02:00Z')
+        path.write_text(json.dumps(row) + '\n')
+        changed, text = report(10180)
+        self.assertEqual(changed['asks']['count'], first['asks']['count'])
+        self.assertEqual(changed['asks']['oldest_at'], 120)
+        self.assertIn('asks count=1 oldest=10060s', text)
+        self.assertIn('verified_at=1970-01-01T02:49:40+00:00', text)
+
+    def test_invalid_utf8_machine_file_does_not_block_status_or_lead_digest(self):
+        from unittest.mock import patch
+        from coordkit import addressed, machine
+        directory = self.manifest.paths.root/'state/machine'
+        directory.mkdir(parents=True)
+        (directory/'bad.lines').write_bytes(b'OPEN_COUNTS worker=1 note=\xff\n')
+        (directory/'good.lines').write_text('APPROVED_NOT_OWNED a1 31m from=worker\n')
+        # A producer path that cannot be opened must not hide the valid files either.
+        (directory/'unreadable.lines').mkdir()
+        expected = ['OPEN_COUNTS worker=1 note=\ufffd', 'APPROVED_NOT_OWNED a1 31m from=worker']
+        self.assertEqual(machine.lines(self.manifest), expected)
+        for mode in ('live', 'shadow'):
+            self.manifest.mode = mode
+            with self.subTest(mode=mode), patch.object(stock, 'stock', return_value={}), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                stock.report(self.manifest, at=10000)
+            self.assertEqual(out.getvalue().splitlines(), expected)
+            with patch.object(bus, 'main') as post, patch.object(addressed, 'to_relay_file') as relay:
+                state = {}
+                addressed.flush_lead_digest(self.manifest, state, 10000, out=lambda *_: None)
+            text = post.call_args.args[0][-1] if mode == 'live' else relay.call_args.args[1]
+            self.assertTrue(all(line in text.splitlines() for line in expected))
+            self.assertEqual(state['lead_digest_at'], 10000)

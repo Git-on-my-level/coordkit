@@ -31,7 +31,7 @@ def shadow_allowed(command, argv):
         sub=next((arg for arg in tokens if arg in ('post','ack','wait','inbox','harvest','open-rulings','open-blockers','state','tail','stats')), '')
         return (sub not in ('post','ack') and not any(a in tokens for a in ('--unread','--mark','--new-only'))
                 and not (sub == 'wait' and '--to' in tokens))
-    if command == 'accounts':
+    if command in ('accounts', 'stock'):
         return True
     if command == 'sweep':
         # Shadow sweeps write local dedupe state and relay output, never the shadowed bus.

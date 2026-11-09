@@ -22,20 +22,34 @@ is bounded at 5s (`perl alarm`).
 `bus post --kind ask` and machine escalations share the durable question projection.
 Use `--key KEY` for a stable explicit key; otherwise the key hashes normalized
 sender, recipient (the declared role before member selection), topic and text.
-Whitespace and case changes do not create a question. Identical repeats increment
+Case, whitespace, clock times, q-ids and bare counts do not create a question.
+PR numbers (`#123`) and UPPER_SNAKE flag keys remain distinct. Captured harness
+questions also include session, options, recommendation and default in their
+fingerprint. Identical repeats increment
 `reasks` on the original and return its receipt without appending another ask or
 waking again, including with `--force`. Publication `--id` retries remain idempotent
 and do not count as re-asks. Changed text or default under an explicit key supersedes
 the old open question. A transcript sweep observing the same tool call is not a
 new authored re-ask.
 
-An ask can carry `--default "Use the cached result"`. At the second unanswered
+An ask can carry `--default "Use the cached result"`. For bus asks, at the second unanswered
 re-ask, or one hour of age, coordkit first appends an `answer` row referencing the
 original ask, then closes its question. Its text is
-`auto-default applied after N unanswered re-asks: <default>`. A real bus answer
-takes precedence. No default is inferred from a recommendation. Without an explicit
-default the question stays open, stops pickup reminders, and appears once as
-"unanswered, no default" in the hourly digest. Every hourly digest also summarizes
+`auto-default applied after N unanswered re-asks: <default>`.
+Harness captures use the same explicit-default policy and publisher: two authored
+re-asks or two missed waiting windows apply the default as a `decision`, then use
+normal answer delivery and withdraw any outstanding ANX ask. A tier-1 deadline
+counts once; a successfully filed tier-2 ask starts its own urgent/normal window.
+Repeated sweeps, refused briefs and ANX outage retries never simulate a waiting
+cycle. The one-hour age fallback applies to bus asks only. Both answer forms
+reference the original ask, preserve full text in a ref when needed and carry a
+rollback directing a correcting answer or a new ask with changed information.
+`QUESTION_DEFAULTED` and `QUESTIONS ... defaulted=N` expose applied ladder defaults.
+A real bus answer takes precedence. No default is inferred from a recommendation. Without an explicit
+default the question stays open and appears once as
+"unanswered, no default" in the hourly digest after its cycle/age limit. Bus pickup
+reminders then stop; harness questions keep their escalation path. Every hourly
+digest also summarizes
 the open count, oldest age/ID and a bounded question list. New information permits
 a fresh ask; identical repeats after auto-default keep returning the resolution.
 
@@ -48,7 +62,11 @@ auto_default_reasks = 2
 auto_default_after = "1h"
 ```
 
-Both limits must be positive. MCP `post` accepts optional `key`, `default` and
+Both limits must be positive. `auto_default_reasks` is the shared threshold for
+authored re-asks and missed ladder windows; there is no second cycle knob.
+Defaults apply without a global enable switch; `--no-auto-default` (or
+`create(..., no_auto_default=True)`) opts out per item. MCP `post` accepts optional
+`key`, `default` and
 `no_auto_default`; `open_questions` exposes default, re-ask count and resolution
 metadata. Bus asks stay on the bus/digest path rather than entering the harness
 ANX ladder. Closed records retain their dedupe evidence for seven days. Capture
