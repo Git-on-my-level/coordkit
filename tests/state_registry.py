@@ -383,3 +383,9 @@ row('answers.py', 'reconcile/unread-answers|consume.lock|*.json|.json|status.jso
     'bus fsync then per-answer read acknowledgement; pending receipts retry after failure',
     'snapshot bounded to ten pages and 2000 items; scope includes workspace actor and server; receipts retained',
     'doctor warns on unread delivery or polling failures; no automatic execution or STOP changes')
+
+row('questions.py', 'writer:accept_anx_delivery',
+    'exact response delivery atomically checks the current question state under the store lock',
+    'waiting question becomes answered before acknowledgement; settled questions remain unchanged',
+    'pending runtime delivery follows the existing question delivery ladder',
+    'bus or store failure leaves the requester response unread and retained')

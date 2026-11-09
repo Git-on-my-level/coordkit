@@ -261,6 +261,51 @@ class AnswerConsumptionTests(FakeCase):
         self.assertFalse(pending.exists())
         self.assertEqual(len(self.rows()), 1)
 
+    def test_legacy_string_reply_is_visible_when_exact_ack_id_is_missing(self):
+        self.item['answer'] = 'Keep retrying while investigating'
+        self.respond(self.listing())
+        self.consume()
+        self.assertFalse(self.reads())
+        self.assertIn('pending=1', answers.health(self.manifest))
+
+    def test_concurrent_question_settlement_is_preserved(self):
+        from coordkit import questions
+        self.question()
+        self.respond(self.listing())
+        original = answers.bus.main
+        def settle_then_return(*args):
+            original(*args)
+            questions.mark(self.manifest, 'q-123abc', state='closed', closed_at=time.time(),
+                           answer='An agent already settled this', answered_by='worker')
+        with patch.object(answers.bus, 'main', side_effect=settle_then_return):
+            self.consume()
+        record = questions.load_all(self.manifest)['q-123abc']
+        self.assertEqual(record['answer'], 'An agent already settled this')
+        self.assertEqual(record['answered_by'], 'worker')
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_loop_answer_provenance_survives_inbox_outage(self):
+        from coordkit import loop_answers
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        self.respond(self.listing())
+        self.consume()
+        with patch.object(answers.AnxClient, 'call', side_effect=AssertionError('must use local answer provenance')):
+            text = loop_answers.answer_context(self.manifest, self.item['ask_id'])
+        self.assertIn('Repair it now', text)
+
+    def test_alternate_shared_reply_identifiers_preserve_correlation(self):
+        from coordkit import loop_answers
+        from coordkit.anxcli import AnxClient
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        self.respond(self.listing())
+        self.consume()
+        for field in ('event_ref', 'id'):
+            item = dict(self.item)
+            item[field] = item.pop('ask_id').removeprefix('event:')
+            self.respond({'tool': 'anx', 'contains': ['await'], 'json': {'ok': True, 'result': {'answers': [item]}}})
+            self.assertEqual(AnxClient(self.manifest).call('await', '--answers')['answers'], [])
+        self.assertEqual(len(self.rows()), 1)
+
     def test_shadow_pass_does_not_poll_or_ack(self):
         self.manifest.mode = 'shadow'
         with self.assertRaises(ManifestError):

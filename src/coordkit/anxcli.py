@@ -32,6 +32,9 @@ class AnxClient:
             from .answers import already_delivered
             remaining = []
             for item in result.get('answers', []):
+                ask_id = item.get('ask_id') or item.get('event_ref') or item.get('id')
+                if isinstance(ask_id, str):
+                    item = dict(item, ask_id=loop_answers.reference(ask_id))
                 if already_delivered(self.manifest, item):
                     continue
                 remaining.append(item)

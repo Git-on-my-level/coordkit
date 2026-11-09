@@ -1062,6 +1062,22 @@ def withdraw_anx(manifest, record, by):
         addressed.to_relay_file(manifest, f'QUESTION anx_withdraw_failed {record["qid"]} {ref}: {exc}'[:300])
 
 
+def accept_anx_delivery(manifest, qid, text, answer_id):
+    """Record this response only if the question is still awaiting an answer."""
+    def accept(records):
+        current = records.get(qid)
+        if current is None or current['state'] not in ('open', 'escalated'):
+            return None
+        current.update(state='answered', answered_by=cfg(manifest).human_actor,
+                       answer=text[:500], answer_id=answer_id, answered_at=now(), claim=None)
+        return dict(current)
+    record = update(manifest, accept)
+    if record is not None:
+        how = deliver(manifest, record, text, answer_id)
+        if how not in ('relay', 'shadow', 'undelivered'):
+            finish(manifest, record, how)
+
+
 def relay_anx_answer(manifest, record, answer):
     if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')):
         from .answers import question_answer

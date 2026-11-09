@@ -48,6 +48,7 @@ def receive(manifest, item):
     ask_id = item.get('ask_id') or item.get('event_ref') or item.get('id')
     if not isinstance(ask_id, str) or not ask_id:
         return False
+    item = dict(item, ask_id=reference(ask_id))
     from .answers import queued
     if queued(manifest, item):
         return True  # full reply already retained by the requester-scoped consumer

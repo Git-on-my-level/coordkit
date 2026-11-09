@@ -119,6 +119,8 @@ def delivered(row, subject, owner, text):
 
 def stage(manifest, item):
     item = dict(item, ask_id=reference(item['ask_id']))
+    if isinstance(item.get('answer'), str):
+        item['answer'] = {'text': item['answer']}
     path = receipt_path(manifest, item)
     existing = read_json(path, {})
     if existing.get('phase') == 'read' or existing.get('item', {}).get('answer') != item['answer']:
@@ -127,6 +129,8 @@ def stage(manifest, item):
 
 
 def queued(manifest, item):
+    if not isinstance(item, dict) or not isinstance(item.get('ask_id'), str) or not isinstance(item.get('answer'), dict):
+        return False
     return receipt_path(manifest, item).is_file()
 
 
@@ -158,11 +162,17 @@ def process(manifest, path, client):
             row = next((r for r in bus.read() if r.get('id') == row_id), None)
         if not row or not delivered(row, subject, owner, text):
             raise ValueError('answer delivery missing or conflicts with a prior response')
-        if question is not None and question['state'] in ('open', 'escalated'):
-            from .questions import close
+        if question is not None:
+            from .questions import accept_anx_delivery
             # Retire the question's default/escalation ladder before suppression
             # or acknowledgement, even when the full inbox cannot be listed.
-            close(manifest, question, manifest.questions.human_actor, text, row_id)
+            accept_anx_delivery(manifest, question['qid'], text, row_id)
+        from .loop_answers import path as loop_ask_path
+        provenance = loop_ask_path(manifest, ask_id)
+        loop_record = read_json(provenance)
+        if loop_record is not None:
+            loop_record['answer'] = answer
+            write_json(provenance, loop_record)
         record.update(phase='delivered', bus_id=row_id)
         write_json(path, record)
         # Acknowledge the exact response, not the latest reply to this ask.
@@ -197,7 +207,7 @@ def consume(manifest):
         status = {'at': time.time(), 'poll_error': None}
         try:
             for item in unread(client):
-                if isinstance(item.get('answer'), dict) and item.get('answer_unread') is not False:
+                if item.get('answer') is not None and item.get('answer_unread') is not False:
                     stage(manifest, item)
         except (ToolError, ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
             status['poll_error'] = getattr(exc, 'category', type(exc).__name__)
