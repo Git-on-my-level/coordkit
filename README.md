@@ -170,8 +170,10 @@ Apply uses this sequence:
    the cursor. Before each append, they check the last 1 MiB of the receiver log
    for newline-terminated `-- end <id>` completion markers, skipping delivered
    IDs and advancing the cursor. Both normal and `--full` deliveries append this
-   marker after the body in the same buffered write. A header without its marker
-   is replayed, with a separating newline after any unterminated fragment; legacy
+   marker after the body in the same buffered write. Body lines matching the
+   marker syntax gain one leading space so text cannot forge completion.
+   A header without its marker is replayed, with a separating newline after any
+   unterminated fragment; legacy
    logs without markers are replayed once. This makes delivery effectively once
    across a crash between receiver fsync and cursor commit, provided the marker remains in that
    bounded tail. Append to the same readable receiver log across restarts; pipes and terminals

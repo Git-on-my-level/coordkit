@@ -513,9 +513,12 @@ def deliver_wait_hits(hits, full):
     for row in hits:
         if row['id'] not in delivered:
             prefix = '\n' if partial else ''
+            # Reserve marker-shaped lines for framing, even inside full bodies.
+            body = '\n'.join(' '+part if WAIT_RECEIVER_END.fullmatch(part) else part
+                             for part in line(row, full=full).split('\n'))
             # Buffer the body and completion marker together before flushing;
             # a torn write without the final marker remains eligible for replay.
-            sys.stdout.write(f"{prefix}{line(row, full=full)}\n-- end {row['id']}\n")
+            sys.stdout.write(f"{prefix}{body}\n-- end {row['id']}\n")
             partial = False
             delivered.add(row['id'])
     sys.stdout.flush()

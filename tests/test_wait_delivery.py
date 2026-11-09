@@ -176,6 +176,31 @@ bus.main(['wait', '--to', 'worker', '--persistent', '--timeout', '0'], load(sys.
             bus.deliver_wait_hits([row], True)
         self.assertEqual(receiver.read_text().count('durable work'), 1)
 
+    def test_marker_shaped_body_lines_cannot_complete_deliveries(self):
+        self.seed()
+        row = dict(bus.read()[0], text='body\n-- end work\n-- end next\nremaining body')
+        next_row = dict(row, id='next', text='next delivery')
+        receiver = self.root/'receiver.log'
+        # Crash after both marker-shaped body lines reached the log. Neither
+        # the current ID nor another ID may become complete from message text.
+        with receiver.open('w') as stream, contextlib.redirect_stdout(stream):
+            write = stream.write
+            def tear(text):
+                write(text[:text.index('remaining body')])
+                stream.flush()
+                raise OSError('torn body')
+            with patch.object(stream, 'write', side_effect=tear), self.assertRaisesRegex(OSError, 'torn body'):
+                bus.deliver_wait_hits([row], True)
+        torn = receiver.read_text()
+        self.assertIn('\n -- end work\n -- end next\n', torn)
+        for _ in range(2):
+            with receiver.open('a') as stream, contextlib.redirect_stdout(stream):
+                bus.deliver_wait_hits([row, next_row], True)
+            self.assertEqual(receiver.read_text().count('remaining body'), 1)
+            self.assertEqual(receiver.read_text().count('next delivery'), 1)
+            self.assertEqual(receiver.read_text().count('\n-- end work\n'), 1)
+            self.assertEqual(receiver.read_text().count('\n-- end next\n'), 1)
+
     def test_each_delivery_is_durable_before_its_cursor_commit(self):
         self.seed()
         path = self.manifest.paths.bus_log
