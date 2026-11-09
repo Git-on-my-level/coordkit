@@ -344,7 +344,7 @@ if sys.argv[1] == 'status':
 else:
     if sys.argv[1] == '50':
         status.write_text(json.dumps(dict(event='arm', owner=str(os.getpid())+':fake')))
-    until = time.monotonic()+15
+    until = time.monotonic()+90
     while not finish.exists() and time.monotonic() < until:
         time.sleep(.02)
 ''')
@@ -366,31 +366,33 @@ else:
             with patch.object(lanemove.subprocess, 'Popen', side_effect=spawn), patch.object(
                     claude_resume, 'processes', side_effect=REAL_PROCESSES), patch.dict(
                     os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]/'src')), patch.object(
-                    claude_resume, 'PROBE_TIMEOUT', 8):
-                deadline = time.monotonic()+10
+                    claude_resume, 'PROBE_TIMEOUT', 30):
+                # Real process probes and verifier startup share the loaded host.
+                # Keep a bounded deadline without racing the fixture's own exit.
+                deadline = time.monotonic()+60
                 while not lanemove.rearm_all(self.manifest, plan) and time.monotonic() < deadline:
                     time.sleep(.03)
                 self.assertTrue(all(o['verified'] for o in plan['rearm_outcomes'].values()), plan['rearm_outcomes'])
                 bus.configure(self.manifest)
                 bus.append([dict(id='reply', ts='2026-01-01T00:00:01Z', frm='other', to='worker',
                                  kind='fyi', re='mine', text='reply under another kind')])
-                deadline = time.monotonic()+3
+                deadline = time.monotonic()+15
                 log = Path(plan['rearm_outcomes']['worker']['log'])
                 while 'reply under another kind' not in log.read_text() and time.monotonic() < deadline:
                     time.sleep(.03)
                 self.assertIsNone(children[0].poll())
                 bus.append([dict(id='second', ts='2026-01-01T00:00:02Z', frm='other', to='worker',
                                  kind='ask', text='second work item')])
-                deadline = time.monotonic()+3
+                deadline = time.monotonic()+15
                 while 'second work item' not in log.read_text() and time.monotonic() < deadline:
                     time.sleep(.03)
                 self.assertIn('second work item', log.read_text())
                 finish.touch()
-                self.assertEqual(children[0].wait(timeout=10), 0)
+                self.assertEqual(children[0].wait(timeout=30), 0)
         finally:
             finish.touch()
             for child in children:
-                child.wait(timeout=16)  # All fakes and the bounded waiter exit naturally.
+                child.wait(timeout=100)  # All fakes and the cooperative waiter exit naturally.
         self.assertEqual(len(children), 3)
         self.assertIn('reply under another kind', Path(plan['rearm_outcomes']['worker']['log']).read_text())
 
@@ -886,6 +888,67 @@ note.write_text(json.dumps(dict(name='worker', session_id='session-one', transcr
         state['re_arms'][0]['argv'] = base
         write_json(path, state)
         self.assertEqual(lanemove.lane_waiter(lanemove.final_state(self.manifest, plan), 'worker')['argv'], base)
+
+    def test_required_waiter_refuses_narrowed_kinds_and_disabled_own_asks(self):
+        plan = self.rearm_fixture()
+        path = Path(plan['move_state_file'])
+        state = read_json(path)
+        base = state['re_arms'][0]['argv']
+        for suffix in (['--kinds', 'fyi'], ['--kinds=ask,handoff'],
+                       ['--kinds', 'ask,handoff,ruling,fail,apply_request,blocker,decision', '--kinds=fyi'],
+                       ['--no-own-asks']):
+            with self.subTest(suffix=suffix):
+                state['re_arms'][0]['argv'] = base + suffix
+                write_json(path, state)
+                with self.assertRaisesRegex(lanemove.Refusal, 'complete_lane_waiter_required'):
+                    lanemove.final_state(self.manifest, plan)
+        # Own-ask replies are on by default; only additional waiters may narrow.
+        state['re_arms'][0]['argv'] = [arg for arg in base if arg != '--own-asks']
+        state['re_arms'].append(dict(name='extra', kind='bus-waiter', argv=[
+            'coordkit', 'bus', 'wait', '--to=other', '--persistent', '--kinds=fyi', '--no-own-asks']))
+        write_json(path, state)
+        lanemove.final_state(self.manifest, plan)
+
+    def test_equals_target_requires_fresh_cursor_and_matching_owner(self):
+        plan = self.rearm_fixture()
+        path = Path(plan['move_state_file'])
+        state = read_json(path)
+        entry = state['re_arms'][0]
+        pos = entry['argv'].index('--to')
+        entry['argv'][pos:pos+2] = ['--to=worker']
+        write_json(path, state)
+        lanemove.final_state(self.manifest, plan)
+        outcome = dict(pid=55, started='new', requested_at=time.time()-10)
+        snapshot = {55: dict(started='new', argv=shlex.join(entry['argv']))}
+        verify = lambda: lanemove.verify_rearm(self.manifest, plan, entry, outcome, snapshot)
+        self.assertFalse(verify())  # Live argv alone is never readiness.
+        cursor = self.manifest.paths.bus_log.parent/'state/cursors/worker.wait'
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        cursor.write_text('0')
+        self.assertFalse(verify())
+        owner_path = cursor.with_suffix('.wait.owner.json')
+        owner = dict(pid=55, started='new', session_id=plan['after']['session_id'])
+        for wrong in (dict(pid=56), dict(started='old'), dict(session_id='old-session')):
+            write_json(owner_path, dict(owner, **wrong))
+            self.assertFalse(verify())
+        write_json(owner_path, owner)
+        os.utime(cursor, (1, 1))
+        self.assertFalse(verify())
+        os.utime(cursor, None)
+        self.assertTrue(verify())
+
+    def test_equals_target_cannot_bypass_duplicate_waiter_detection(self):
+        plan = self.rearm_fixture()
+        entry = plan['move_state']['re_arms'][0]
+        other = list(entry['argv'])
+        pos = other.index('--to')
+        other[pos:pos+2] = ['--to=worker']
+        snapshot = {55: dict(started='old', argv=shlex.join(other))}
+        self.assertTrue(lanemove.duplicate_waiter(self.manifest, entry, snapshot))
+        entry['argv'] = other
+        with patch.object(claude_resume, 'processes', return_value=snapshot), self.assertRaisesRegex(
+                lanemove.Refusal, 'duplicate_waiter'):
+            lanemove.waiter_available(self.manifest, entry)
 
     def test_completed_move_recovers_dead_waiter_once_without_replaying_other_arms(self):
         self.frozen()

@@ -218,7 +218,11 @@ lane waiters, a freshly written cursor owned by that process and session. Waiter
 recipes require `--persistent`. The required waiter addressed to the moved lane
 must be unbounded: use `--timeout 0`, or omit timeout (persistent mode defaults to
 unlimited). Finite timeouts, including equals syntax or later overrides, refuse.
-Other recorded waiters may use an explicit finite timeout. Readiness checks run once in a receipt-producing child;
+It must also cover every default wake kind and accept replies to its own asks
+(enabled by default). Narrowing `--kinds` or passing `--no-own-asks` refuses for
+the required waiter. Additional waiters may filter kinds, disable own-ask replies,
+or use a finite timeout. Both `--to NAME` and `--to=NAME` require the same fresh
+cursor and process/session owner record. Readiness checks run once in a receipt-producing child;
 `--timeout` bounds polling without killing a slow verifier. Rerun apply to collect
 its result; an ambiguous verifier intent never launches a duplicate. Use foreground commands; move
 receipts retain each process's output log for the resumed lane/operator to collect.

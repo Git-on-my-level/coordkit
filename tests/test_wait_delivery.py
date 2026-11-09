@@ -1,5 +1,6 @@
 """A waiter acknowledges only after its receiver is flushed and durable."""
 import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,20 @@ from tests.support import FakeCase
 
 
 class WaitDeliveryTests(FakeCase):
+    def test_own_ask_reply_wakes_by_default(self):
+        self.seed()
+        path = self.manifest.paths.bus_log
+        path.write_text('\n'.join(json.dumps(row) for row in [
+            dict(id='own', frm='worker', to='lead', kind='ask', ts='2026-01-01T00:00:00Z', text='question'),
+            dict(id='reply', frm='lead', to='elsewhere', kind='fyi', re='own',
+                 ts='2026-01-01T00:00:01Z', text='answer to own ask')])+'\n')
+        bus.set_cursor('worker', 'wait', 1)
+        with contextlib.redirect_stdout(io.StringIO()) as receiver, patch.object(
+                claude_resume, 'start_time', return_value='started'):
+            bus.main(['wait', '--to=worker', '--timeout=0'], self.manifest)
+        self.assertIn('answer to own ask', receiver.getvalue())
+        self.assertEqual(bus.get_cursor('worker', 'wait', None), 2)
+
     def seed(self):
         bus.configure(self.manifest)
         path = self.manifest.paths.bus_log

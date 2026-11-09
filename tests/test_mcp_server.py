@@ -18,6 +18,9 @@ class McpCase(AddressedCase):
         self.secret.write_text(SECRET + '\n')
         os.chmod(self.secret, 0o600)
         self.manifest.mcp.train_pattern = r'\btrain-\d+[a-z]+\b'
+        self.clients = self.root/'clients.json'
+        patcher = patch.object(mcp_server, 'CLIENTS_FILE', self.clients)
+        patcher.start(); self.addCleanup(patcher.stop)
         self.limiter = mcp_server.Limiter()
 
     def start_server(self, **limits):
@@ -196,7 +199,7 @@ class McpToolTests(McpCase):
         self.assertTrue(hints['inbox']['readOnlyHint'])
         self.enable_writes()
         kill = mcp_server.home(self.manifest)/'kill'
-        with patch.object(mcp_server, 'admit', lambda *a, **k: None):  # a request admitted just before the kill
+        with patch.object(mcp_server, 'admit', return_value=mcp_server.legacy_client(self.manifest)):  # a request admitted just before the kill
             kill.touch()
             error, text = self.tool('post', to='lead-a', kind='ask', text='hi')
         self.assertTrue(error); self.assertIn('writes are disabled', text)
@@ -1115,3 +1118,481 @@ class McpReadBatchTests(McpCase):
                            ('ref_read', {'id': 'a', 'offset': -1}), ('bus_history', {'has_ref': 1})):
             self.assertTrue(self.tool(tool, **args)[0])
         self.assertEqual(self.manifest.paths.bus_log.exists(), before)
+
+
+class McpClientTests(McpCase):
+    TOKEN = 'c' * 43
+
+    def save_clients(self, **grants):
+        self.clients.write_text(json.dumps({'connector': dict(secret=self.TOKEN, identity='client-agent', **grants)}))
+        self.clients.chmod(0o600)
+
+    def client_tool(self, tool, **arguments):
+        status, reply = self.call('tools/call', {'name': tool, 'arguments': arguments}, token=self.TOKEN)
+        self.assertEqual(status, 200, reply)
+        result = reply['result']
+        return result['isError'], result['content'][0]['text']
+
+    def test_validation_fails_closed_even_with_a_valid_legacy_bearer(self):
+        # A broken permission database must not silently restore legacy powers.
+        for value in ([], {'bad/name': {'secret': self.TOKEN}},
+                      {'connector': {'secret': 'short'}},
+                      {'connector': {'secret': self.TOKEN, 'write': 'false'}},
+                      {'connector': {'secret': self.TOKEN, 'answer': 1}},
+                      {'connector': {'secret': self.TOKEN, 'post_as': 'relay'}},
+                      {'connector': {'secret': self.TOKEN, 'identity': '../bad'}},
+                      {'connector': {'secret': self.TOKEN, 'post_as': ['../bad']}},
+                      {'connector': {'secret': self.TOKEN, 'wrtie': True}}):
+            with self.subTest(value=value):
+                self.clients.write_text(json.dumps(value)); self.clients.chmod(0o600)
+                self.assertEqual(self.call('tools/list')[0], 503)
+        for text in ('{', '{"x":{"secret":"' + self.TOKEN + '","write":false,"write":true}}'):
+            self.clients.write_text(text)
+            self.assertEqual(self.call('tools/list')[0], 503)
+        self.save_clients()
+        self.clients.chmod(0o644)
+        self.assertEqual(self.call('tools/list')[0], 503)
+        self.clients.unlink(); self.clients.symlink_to(self.root/'missing')
+        self.assertEqual(self.call('tools/list')[0], 503)
+
+    def test_conservative_defaults_refuse_all_writes(self):
+        self.save_clients()
+        self.enable_writes()
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+        for tool, args in (('post', dict(to='all', kind='msg', text='hi')),
+                           ('ack', dict(id='anything')), ('question_answer', dict(qid='anything', text='yes'))):
+            with self.subTest(tool=tool):
+                error, text = self.client_tool(tool, **args)
+                self.assertTrue(error); self.assertIn('write permission', text)
+        self.assertEqual(self.rows(), [])
+        self.save_clients(write=True)
+        error, text = self.client_tool('post', to='all', kind='msg', text='x', **{'as': 'thread'})
+        self.assertTrue(error); self.assertIn('as must be one of', text)
+
+    def test_rotation_revocation_and_legacy_migration_are_immediate(self):
+        self.save_clients()
+        self.assertEqual(self.call('tools/list')[0], 200)
+        self.assertEqual(self.journal()[-1]['client'], 'legacy')
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+        self.assertEqual(self.journal()[-1]['client'], 'connector')
+        self.secret.unlink()
+        self.assertEqual(self.call('tools/list')[0], 401)
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+        old = self.TOKEN
+        self.TOKEN = 'r' * 43
+        self.save_clients()
+        self.assertEqual(self.call('tools/list', token=old)[0], 401)
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+        # Keep another entry so a revoked bearer is 401, not an unconfigured server.
+        self.clients.write_text(json.dumps({'other': {'secret': 'z' * 43}}))
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 401)
+
+    def test_named_permissions_take_precedence_over_the_legacy_secret(self):
+        self.TOKEN = SECRET
+        self.save_clients()
+        self.enable_writes()
+        self.assertTrue(self.client_tool('post', to='all', kind='msg', text='x')[0])
+        self.assertEqual(self.journal()[-1]['client'], 'connector')
+
+    def test_identity_and_post_as_are_per_client_not_per_project(self):
+        self.save_clients(write=True, post_as=['thread'])
+        self.manifest.mcp.post_as = ['manifest-only']
+        self.enable_writes()
+        for sender in ('client-agent', 'thread'):
+            error, text = self.client_tool('post', to='all', kind='fyi', text='hello', **{'as': sender})
+            self.assertFalse(error, text)
+            self.assertEqual(self.rows()[-1]['frm'], sender)
+        self.assertTrue(self.client_tool('post', to='all', kind='msg', text='x', **{'as': 'manifest-only'})[0])
+        self.incumbent_row('own', 'worker-ui', 'client-agent')
+        self.incumbent_row('global', 'worker-ui', self.manifest.mcp.identity)
+        error, text = self.client_tool('ack', id='own')
+        self.assertFalse(error, text)
+        self.assertEqual(self.rows()[-1]['frm'], 'client-agent')
+        self.assertTrue(self.client_tool('ack', id='global')[0])
+
+    def test_human_sender_requires_answer_including_default_identity(self):
+        self.manifest.addressed.agents['relay']['human'] = True
+        self.manifest.addressed.roles['coordinator'] = {'members': ['coordinator', 'human-member'], 'human': True}
+        self.enable_writes()
+        for allowed in (False, True):
+            self.save_clients(write=True, answer=allowed, post_as=['relay', 'coordinator', 'human-member'])
+            for sender in ('relay', 'coordinator', 'human-member'):
+                with self.subTest(allowed=allowed, sender=sender):
+                    error, text = self.client_tool('post', to='all', kind='fyi', text='hello', **{'as': sender})
+                    self.assertEqual(error, not allowed, text)
+        self.save_clients(write=True)
+        self.manifest.addressed.agents['client-agent'] = {'human': True}
+        self.assertTrue(self.client_tool('post', to='all', kind='fyi', text='hello')[0])
+
+    def test_answer_and_msg_question_replies_require_answer_permission(self):
+        # msg replies can reconcile a question as answered, so kind alone is insufficient.
+        self.enable_writes()
+        record, _ = questions.create(self.manifest, 'worker-ui', 'May we proceed?', session_id='q')
+        qid = record['qid']
+        for state in ('open', 'escalated'):
+            questions.mark(self.manifest, qid, tier=2, state=state)
+            for allowed in (False, True):
+                self.save_clients(write=True, answer=allowed)
+                for args in (dict(kind='answer'), dict(kind='msg', re=qid)):
+                    error, text = self.client_tool('post', to='all', text='yes', **args)
+                    self.assertEqual(error, not allowed, text)
+        self.save_clients(write=True)
+        for args in (dict(kind='msg', re='ordinary-row'), dict(kind='fyi', re=qid)):
+            self.assertFalse(self.client_tool('post', to='all', text='context', **args)[0])
+        questions.mark(self.manifest, qid, state='closed')
+        self.assertFalse(self.client_tool('post', to='all', kind='msg', re=qid, text='context')[0])
+
+    def test_question_answer_grant_and_client_attribution(self):
+        self.enable_writes()
+        record, _ = questions.create(self.manifest, 'worker-ui', 'Proceed?', session_id='q')
+        qid = record['qid']
+        questions.mark(self.manifest, qid, tier=2, state='escalated')
+        self.save_clients(write=True)
+        error, text = self.client_tool('question_answer', qid=qid, text='yes')
+        self.assertTrue(error); self.assertIn('answer permission', text)
+        self.save_clients(write=True, answer=True)
+        error, text = self.client_tool('question_answer', qid=qid, text='yes')
+        self.assertFalse(error, text)
+        self.assertEqual(questions.load_all(self.manifest)[qid]['answered_by'], 'client-agent')
+
+    def test_symlink_safe_gates_and_last_moment_recheck(self):
+        self.save_clients(write=True)
+        self.enable_writes()
+        gate = mcp_server.home(self.manifest)/'writes-enabled'
+        gate.unlink(); gate.symlink_to(self.secret)
+        self.assertFalse(mcp_server.writes_enabled(self.manifest))
+        gate.unlink(); gate.mkdir()
+        self.assertFalse(mcp_server.writes_enabled(self.manifest))
+        gate.rmdir(); gate.touch()
+        kill = gate.with_name('kill'); kill.symlink_to(self.root/'missing')
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 503)
+        self.assertFalse(mcp_server.writes_enabled(self.manifest))
+        kill.unlink()
+        def disable(*args):
+            gate.unlink()
+            return False
+        # The operator can disable writes after admission and the first gate check.
+        with patch.object(addressed, 'is_human', side_effect=disable), patch.object(addressed, 'send') as send:
+            error, text = self.client_tool('post', to='all', kind='msg', text='stop')
+        self.assertTrue(error); self.assertIn('writes are disabled', text)
+        send.assert_not_called()
+
+    def test_journals_are_private_and_attribute_refusals(self):
+        self.save_clients()
+        self.enable_writes()
+        self.client_tool('post', to='all', kind='msg', text='no')
+        self.call('tools/list', token='wrong')
+        path = mcp_server.home(self.manifest)/'calls.ndjson'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual([r['client'] for r in self.journal()], ['connector', 'anonymous'])
+        path.chmod(0o644)
+        with patch.object(mcp_server, 'JOURNAL_MAX', 1):
+            self.call('tools/list', token=self.TOKEN)
+        for file in (path, path.with_suffix('.ndjson.1')):
+            self.assertEqual(file.stat().st_mode & 0o777, 0o600)
+            self.assertTrue(all('client' in json.loads(l) for l in file.read_text().splitlines()))
+
+    def test_real_http_passes_client_and_journals_body_refusals(self):
+        import http.client
+        self.save_clients()
+        self.enable_writes()
+        path = mcp_server.home(self.manifest)/'calls.ndjson'
+        path.write_text(''); path.chmod(0o644)
+        self.secret.unlink()  # named tokens alone can start and serve
+        server = self.start_server()
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        for body, token, expected in ((b'{}', self.TOKEN, 400), (b'{}', 'wrong', 401)):
+            conn = http.client.HTTPConnection(*server.server_address, timeout=3)
+            self.addCleanup(conn.close)
+            conn.request('POST', '/mcp', body=body, headers={'Authorization': 'Bearer ' + token})
+            response = conn.getresponse(); response.read()
+            self.assertEqual(response.status, expected)
+        self.assertEqual([r['client'] for r in self.journal()], ['connector', 'anonymous'])
+        conn = http.client.HTTPConnection(*server.server_address, timeout=3)
+        self.addCleanup(conn.close)
+        conn.request('POST', '/mcp', headers={'Authorization': 'Bearer ' + self.TOKEN, 'Content-Length': 'invalid'})
+        response = conn.getresponse(); response.read()
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.journal()[-1]['client'], 'connector')
+        conn = http.client.HTTPConnection(*server.server_address, timeout=3)
+        self.addCleanup(conn.close)
+        body = json.dumps(dict(jsonrpc='2.0', id=1, method='tools/call',
+                               params=dict(name='post', arguments=dict(to='all', kind='msg', text='denied'))))
+        conn.request('POST', '/mcp', body=body, headers={'Authorization': 'Bearer ' + self.TOKEN})
+        response = conn.getresponse()
+        result = json.loads(response.read())['result']
+        self.assertEqual(response.status, 200)
+        self.assertTrue(result['isError'])
+        self.assertIn('write permission', result['content'][0]['text'])
+        self.assertEqual(self.journal()[-1]['client'], 'connector')
+        self.assertEqual(self.rows(), [])
+
+    def test_clients_helper_prints_secret_once_and_lists_only_grants(self):
+        from coordkit.cli import main
+        import contextlib, io
+        def run(*args):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = main(['mcp-clients', *args, '--clients-file', str(self.clients)])
+            self.assertEqual(rc, 0)
+            return out.getvalue()
+        secret = run('add', 'reader').strip()
+        self.assertGreaterEqual(len(secret), 32)
+        self.assertEqual(self.clients.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.clients.read_text())['reader']['secret'], secret)
+        listing = run('list')
+        self.assertNotIn(secret, listing)
+        self.assertEqual(json.loads(listing), dict(client='reader', identity='reader', write=False, answer=False, post_as=[]))
+        other = run('add', 'writer', '--write', '--answer', '--post-as', 'thread').strip()
+        self.assertNotIn(other, run('list'))
+        self.assertEqual(run('revoke', 'reader'), '')
+        self.assertNotIn('reader', json.loads(self.clients.read_text()))
+        from coordkit.ops import OPERATIONS
+        operation = next(op for op in OPERATIONS if op.name == 'mcp-clients')
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(operation.invoke(None, ['list', '--clients-file', str(self.clients)]), 0)
+        self.assertNotIn(other, out.getvalue())
+
+    def test_selected_project_keeps_token_grants_and_rechecks_both_gates(self):
+        from dataclasses import replace
+        other = replace(self.manifest, paths=replace(self.manifest.paths, root=self.root/'other'),
+                        mcp=replace(self.manifest.mcp, identity='target-mcp', post_as=['target-only']))
+        self.save_clients(write=True, post_as=['thread'])
+        self.enable_writes()
+        gate = mcp_server.home(other)/'writes-enabled'
+        gate.parent.mkdir(parents=True); gate.touch()
+        with patch.object(mcp_server, 'select_project', return_value=other):
+            error, text = self.client_tool('post', to='all', kind='fyi', text='hello')
+            self.assertFalse(error, text)
+            self.assertEqual(self.rows()[-1]['frm'], 'client-agent')
+            self.assertTrue(self.client_tool('post', to='all', kind='msg', text='x', **{'as': 'target-only'})[0])
+            for flag in (gate, mcp_server.home(self.manifest)/'writes-enabled'):
+                def disable(*args):
+                    flag.unlink()
+                    return False
+                with patch.object(addressed, 'is_human', side_effect=disable), patch.object(addressed, 'send') as send:
+                    error, text = self.client_tool('post', to='all', kind='msg', text='stop')
+                self.assertTrue(error); self.assertIn('writes are disabled', text)
+                send.assert_not_called()
+                flag.touch()
+
+    def test_serve_clients_file_flag_is_forwarded(self):
+        with patch.object(mcp_server, 'serve') as serve:
+            mcp_server.main(['--clients-file', str(self.clients)], self.manifest)
+        self.assertEqual(serve.call_args.kwargs, {'clients_path': str(self.clients)})
+
+    def test_clients_helper_environment_override_and_private_new_directory(self):
+        import subprocess
+        from pathlib import Path
+        path = self.root/'private'/'clients.json'
+        env = dict(os.environ, COORDKIT_MCP_CLIENTS_FILE=str(path), PYTHONPATH=str(Path(__file__).resolve().parents[1]/'src'))
+        added = subprocess.run([sys.executable, '-m', 'coordkit.cli', 'mcp-clients', 'add', 'reader'],
+                               env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        secret = added.stdout.strip()
+        self.assertGreaterEqual(len(secret), 32)
+        self.assertEqual(json.loads(path.read_text())['reader']['secret'], secret)
+
+    def test_done_ack_cannot_bypass_question_closing_permission(self):
+        # A done ack emits kind=answer; the question reconciler accepts it as closure.
+        self.enable_writes()
+        self.save_clients(write=True)
+        qid = 'q-ack'
+        questions.update(self.manifest, lambda records: records.update({qid: dict(qid=qid, state='open', asker='worker-ui')}))
+        self.incumbent_row(qid, 'worker-ui', 'client-agent')
+        record = questions.load_all(self.manifest)[qid]
+        for state in ('received', 'blocked'):
+            error, text = self.client_tool('ack', id=qid, state=state)
+            self.assertFalse(error, text)
+            self.assertIsNone(questions.replies(self.manifest, self.rows(), record))
+        before = len(self.rows())
+        error, text = self.client_tool('ack', id=qid, state='done')
+        self.assertTrue(error); self.assertIn('answer permission', text)
+        self.assertEqual(len(self.rows()), before)
+        self.save_clients(write=True, answer=True)
+        error, text = self.client_tool('ack', id=qid, state='done')
+        self.assertFalse(error, text)
+        self.assertEqual(questions.replies(self.manifest, self.rows(), record)['frm'], 'client-agent')
+
+    def test_credential_byte_caps_refuse_before_reading_or_parsing(self):
+        # Admission is pre-auth: oversized local files must never drive large reads.
+        for path, limit in ((self.clients, mcp_server.MAX_CLIENTS_BYTES),
+                            (self.secret, mcp_server.MAX_SECRET_BYTES)):
+            with self.subTest(file=path.name):
+                path.write_bytes(b'x' * (limit + 1)); path.chmod(0o600)
+                with patch.object(mcp_server, 'private_text') as read, patch.object(mcp_server, 'parse_clients') as parse:
+                    self.assertEqual(self.call('tools/list')[0], 503)
+                read.assert_not_called(); parse.assert_not_called()
+                if path == self.clients:
+                    path.unlink()
+        # Exact byte boundaries remain usable, rather than being treated as oversized.
+        self.secret.write_bytes((SECRET + ' ' * (mcp_server.MAX_SECRET_BYTES - len(SECRET))).encode())
+        self.assertEqual(self.call('tools/list')[0], 200)
+        self.save_clients()
+        data = self.clients.read_bytes()
+        self.clients.write_bytes(data + b' ' * (mcp_server.MAX_CLIENTS_BYTES - len(data)))
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+
+    def test_credential_read_stays_bounded_if_file_grows_after_fstat(self):
+        from types import SimpleNamespace
+        self.secret.write_bytes(b'x' * (mcp_server.MAX_SECRET_BYTES + 100))
+        st = self.secret.stat()
+        stale = SimpleNamespace(st_mode=st.st_mode, st_size=1)
+        with patch.object(mcp_server.os, 'fstat', return_value=stale):
+            with self.assertRaises(mcp_server.Refused) as caught:
+                mcp_server.load_secret(self.secret)
+        self.assertEqual(caught.exception.status, 503)
+
+    def test_unchanged_clients_are_parsed_once_across_concurrent_auth_attempts(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.save_clients()
+        def attempt(_):
+            return mcp_server.authenticate(self.manifest, {'Authorization': 'Bearer wrong'}, self.secret)
+        with patch.object(mcp_server, 'parse_clients', wraps=mcp_server.parse_clients) as parse:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                self.assertEqual(list(pool.map(attempt, range(16))), [None] * 16)
+            self.assertEqual(parse.call_count, 1)
+        # Cache hits still check the opened inode's permissions and reject symlinks.
+        self.clients.chmod(0o644)
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 503)
+        self.clients.chmod(0o600)
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+        original = self.root/'clients-original.json'
+        self.clients.rename(original); self.clients.symlink_to(original)
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 503)
+
+    def test_cache_invalidates_on_mtime_size_and_inode_changes(self):
+        self.save_clients()
+        with patch.object(mcp_server, 'parse_clients', wraps=mcp_server.parse_clients) as parse:
+            self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+            original = self.clients.stat()
+            data = self.clients.read_bytes()
+            # Same inode and size: an in-place secret rotation must invalidate the cache.
+            self.TOKEN = 'n' * len(self.TOKEN)
+            self.save_clients()
+            os.utime(self.clients, ns=(original.st_atime_ns, original.st_mtime_ns + 1_000_000))
+            self.assertEqual(self.call('tools/list', token='c' * 43)[0], 401)
+            self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+            self.assertEqual(parse.call_count, 2)
+            # Size changes invalidate even when the old mtime is preserved.
+            st = self.clients.stat()
+            self.clients.write_bytes(self.clients.read_bytes() + b' ')
+            os.utime(self.clients, ns=(st.st_atime_ns, st.st_mtime_ns))
+            self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+            self.assertEqual(parse.call_count, 3)
+            # Atomic replacement invalidates even at the same size and mtime.
+            replacement = self.root/'replacement.json'
+            replacement.write_bytes(data + b' '); replacement.chmod(0o600)
+            os.utime(replacement, ns=(st.st_atime_ns, st.st_mtime_ns))
+            replacement.replace(self.clients)
+            self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 401)
+            self.assertEqual(self.call('tools/list', token='c' * 43)[0], 200)
+            self.assertEqual(parse.call_count, 4)
+            self.clients.unlink()  # revocation must not fall back to cached clients
+            self.assertEqual(self.call('tools/list', token='c' * 43)[0], 401)
+
+    def test_invalid_client_config_is_cached_and_recovers_after_edit(self):
+        for text in ('{', '[' * 1100 + '0' + ']' * 1100):
+            self.clients.write_text(text); self.clients.chmod(0o600)
+            with patch.object(mcp_server, 'parse_clients', wraps=mcp_server.parse_clients) as parse:
+                for _ in range(3):
+                    self.assertEqual(self.call('tools/list')[0], 503)
+                self.assertEqual(parse.call_count, 1)
+                self.save_clients()
+                self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+                self.assertEqual(parse.call_count, 2)
+
+    def test_helper_cannot_mutate_cached_grants_before_durable_publication(self):
+        self.save_clients()
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+        with patch('coordkit.state.write_json', side_effect=OSError('unavailable')):
+            with self.assertRaises(OSError):
+                mcp_server.clients_main(['revoke', 'connector', '--clients-file', str(self.clients)])
+        self.assertEqual(self.call('tools/list', token=self.TOKEN)[0], 200)
+
+    def test_helper_rejects_edits_that_would_exceed_the_clients_byte_cap(self):
+        import contextlib, io
+        self.save_clients()
+        before = self.clients.read_bytes()
+        with patch.object(mcp_server, 'MAX_CLIENTS_BYTES', len(before) + 1), contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaisesRegex(ValueError, 'file too large'):
+                mcp_server.clients_main(['add', 'writer', '--clients-file', str(self.clients)])
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(self.clients.read_bytes(), before)
+
+    def test_ack_as_human_requires_answer_for_every_ack_state(self):
+        # Acks append answer rows too; human voice must be protected on this path.
+        self.enable_writes()
+        self.manifest.addressed.agents['relay']['human'] = True
+        self.manifest.addressed.roles['coordinator'] = {'members': ['coordinator', 'human-member'], 'human': True}
+        for sender in ('relay', 'coordinator', 'human-member'):
+            self.incumbent_row('work-' + sender, 'worker-ui', sender)
+        for allowed in (False, True):
+            for sender in ('relay', 'coordinator', 'human-member'):
+                self.clients.write_text(json.dumps({'connector': dict(secret=self.TOKEN, identity=sender, write=True, answer=allowed)}))
+                self.clients.chmod(0o600)
+                for state in ('received', 'blocked', 'done'):
+                    with self.subTest(answer=allowed, sender=sender, state=state):
+                        before = len(self.rows())
+                        error, text = self.client_tool('ack', id='work-' + sender, state=state, note='operator acknowledgement')
+                        self.assertEqual(error, not allowed, text)
+                        self.assertEqual(len(self.rows()), before + int(allowed))
+                        if allowed:
+                            self.assertEqual(self.rows()[-1]['frm'], sender)
+                        else:
+                            self.assertIn('answer permission', text)
+
+    def test_startup_tightens_all_rotated_journals_without_changing_contents(self):
+        directory = mcp_server.home(self.manifest)
+        directory.mkdir(parents=True)
+        paths = [directory/'calls.ndjson'] + [directory/('calls.ndjson.' + suffix) for suffix in ('1', '2', 'old')]
+        for path in paths:
+            path.write_text('historical audit data\n'); path.chmod(0o444 if path.name.endswith('old') else 0o644)
+        self.start_server()
+        for path in paths:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.read_text(), 'historical audit data\n')
+
+    def test_startup_refuses_rotated_journal_symlink_without_chmodding_target(self):
+        directory = mcp_server.home(self.manifest)
+        directory.mkdir(parents=True)
+        target = self.root/'unrelated.txt'
+        target.write_text('unrelated'); target.chmod(0o644)
+        (directory/'calls.ndjson.1').symlink_to(target)
+        with self.assertRaises(OSError):
+            mcp_server.serve(self.manifest, 0, self.secret)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(target.read_text(), 'unrelated')
+
+    def test_helper_tightens_an_existing_owned_credential_directory(self):
+        import contextlib, io
+        directory = self.root/'credentials'
+        directory.mkdir(mode=0o755); directory.chmod(0o755)
+        path = directory/'clients.json'
+        with contextlib.redirect_stdout(io.StringIO()):
+            mcp_server.clients_main(['add', 'reader', '--clients-file', str(path)])
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_helper_refuses_foreign_owned_directory_before_chmod_or_writes(self):
+        from types import SimpleNamespace
+        directory = self.root/'foreign-credentials'
+        directory.mkdir(mode=0o755); directory.chmod(0o755)
+        with patch.object(mcp_server.os, 'fstat', return_value=SimpleNamespace(st_uid=os.geteuid() + 1)), \
+                patch.object(mcp_server.os, 'fchmod') as chmod:
+            with self.assertRaisesRegex(ValueError, 'owned by the current user'):
+                mcp_server.clients_main(['add', 'reader', '--clients-file', str(directory/'clients.json')])
+        chmod.assert_not_called()
+        self.assertEqual(list(directory.iterdir()), [])
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+
+    def test_helper_refuses_symlink_credential_directory(self):
+        target = self.root/'credential-target'
+        target.mkdir(mode=0o755); target.chmod(0o755)
+        link = self.root/'credential-link'; link.symlink_to(target, target_is_directory=True)
+        with self.assertRaises(OSError):
+            mcp_server.clients_main(['add', 'reader', '--clients-file', str(link/'clients.json')])
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(list(target.iterdir()), [])

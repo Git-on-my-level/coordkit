@@ -85,7 +85,8 @@ BUS_OPS = (
         Arg('--to', help='lane to wait for (required unless --signal)'),
         Arg('--kinds', default=WAKE_KINDS),
         Arg('--persistent', action='store_true', help='keep consuming after matches; --timeout 0 runs until operator exit'),
-        Arg('--own-asks', action='store_true', help='also wake on any kind of reply (--re) to this lane\'s own asks'),
+        Arg('--own-asks', action='store_true', default=True, help='wake on any kind of reply (--re) to this lane\'s own asks (default on)'),
+        Arg('--no-own-asks', dest='own_asks', action='store_false', help='disable own-ask replies for a filtered additional waiter'),
         Arg('--signal', help='wait for a kind=signal post with this signal name (text is never matched)'),
         Arg('--from', dest='frm', help='with --signal/--subject: only from this poster'),
         Arg('--since', help='with --signal/--subject: also accept posts in this window (e.g. 30m); default from now'),
@@ -215,18 +216,18 @@ _TOOLS = [
     read_tool('trace', 'Whole re-connected thread plus later id mentions and root PR/train links, oldest first, paged; linked_by records re/pr/train/mention.',
               dict(ROW_ARGS, id={'type': 'string', 'description': 'Root bus row id to trace; required, no default.'},
                    name=NAME_ARG), ['id']),
-    {'name': 'post', 'description': 'Post a message as the configured MCP identity. Agents act on asks, so be explicit.',
+    {'name': 'post', 'description': 'Post as the client identity or an allowed sender; requires write permission. Human senders, answers and msg replies to open questions require answer permission. Agents act on asks, so be explicit.',
      'inputSchema': {'type': 'object', 'additionalProperties': False, 'required': ['to', 'kind', 'text'],
                      'properties': {'to': {'type': 'string'}, 'kind': {'type': 'string', 'enum': list(POST_KINDS)},
                                     'text': {'type': 'string', 'minLength': 1, 'maxLength': 2000},
                                     're': {'type': 'string', 'description': 'id of the row this replies to'},
-                                    'as': {'type': 'string', 'description': 'Post as this lane (only names in the manifest mcp.post_as list); default the MCP identity.'}}}},
-    {'name': 'ack', 'description': 'Acknowledge a bus row addressed to the configured MCP identity.',
+                                    'as': {'type': 'string', 'description': 'Post as a sender allowed by this token; default the client identity.'}}}},
+    {'name': 'ack', 'description': 'Acknowledge a bus row addressed to the client identity; requires write permission. Human identities and completing an open question also require answer permission.',
      'inputSchema': {'type': 'object', 'additionalProperties': False, 'required': ['id'],
                      'properties': {'id': {'type': 'string'},
                                     'state': {'type': 'string', 'enum': ['received', 'done', 'blocked']},
                                     'note': {'type': 'string', 'maxLength': 500}}}},
-    {'name': 'question_answer', 'description': 'Answer an open agent question (closes it and tells the asker).',
+    {'name': 'question_answer', 'description': 'Answer an open tier-2 agent question (closes it and tells the asker); requires write and answer permissions.',
      'inputSchema': {'type': 'object', 'additionalProperties': False, 'required': ['qid', 'text'],
                      'properties': {'qid': {'type': 'string'}, 'text': {'type': 'string', 'minLength': 1, 'maxLength': 2000}}}},
 ]
@@ -264,14 +265,14 @@ def mcp_call(manifest, args):
 
 
 COMMANDS = {
-    'accounts': 'accounts', 'relay': 'relay', 'bus': 'bus', 'sweep': 'addressed', 'mcp-serve': 'mcp_server', 'deliver': 'deliver',
+    'accounts': 'accounts', 'relay': 'relay', 'bus': 'bus', 'sweep': 'addressed', 'mcp-serve': 'mcp_server', 'mcp-clients': 'mcp_server', 'deliver': 'deliver',
     'lane': 'lane', 'lane-move': 'lanemove', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
     'obligations': 'obligations', 'review': 'review', 'question': 'questions',
     'init': 'lifecycle', 'up': 'lifecycle', 'down': 'lifecycle', 'doctor': 'lifecycle', 'lead': 'lifecycle',
     'ops': 'ops', 'version': 'ops', 'retire': 'wake', 'unretire': 'wake', 'wake-scan': 'wake', 'hooks': 'hooks', 'update': 'selfupdate', 'mcp': 'mcp_install',
 }
-OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down','relay','lane-move') else 'read',
-                                                handler=module+':main') for name,module in COMMANDS.items() if name != 'bus')
+OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down','relay','lane-move','mcp-clients') else 'read',
+                                                handler=module+(':clients_main' if name == 'mcp-clients' else ':main')) for name,module in COMMANDS.items() if name != 'bus')
 
 
 def markdown():
@@ -307,8 +308,10 @@ CLI_ARGS = {
     'wake-scan': (Arg('--dry-run',action='store_true'),),
     'relay': (Arg('action',choices=('run','status','install','uninstall')), Arg('--apply',action='store_true')),
     'hooks': (Arg('action',choices=('install','status','uninstall')), Arg('--settings')),
-    'mcp': (Arg('action',choices=('install','uninstall')),Arg('--secret-file'),Arg('--port',type=int,default=8767)),
-    'mcp-serve': (Arg('--port',type=int,default=8767),Arg('--secret-file')),
+    'mcp': (Arg('action',choices=('install','uninstall')),Arg('--secret-file'),Arg('--clients-file'),Arg('--port',type=int,default=8767)),
+    'mcp-clients': (Arg('action',choices=('add','list','revoke')),Arg('name',nargs='?'),Arg('--clients-file'),
+                    Arg('--write',action='store_true'),Arg('--answer',action='store_true'),Arg('--post-as',action='append',default=[])),
+    'mcp-serve': (Arg('--port',type=int,default=8767),Arg('--secret-file'),Arg('--clients-file')),
     'update': (Arg('--check',action='store_true',group='mode'),Arg('--apply',action='store_true',group='mode'),
                Arg('--rollback',nargs='?',const='',group='mode'),Arg('--reconcile-hooks',action='store_true',group='mode'),
                Arg('--prune',action='store_true',group='mode'),Arg('--keep',type=int,default=2),Arg('--adopt',action='store_true')),

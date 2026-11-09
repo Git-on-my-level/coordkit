@@ -282,22 +282,30 @@ def move_state(manifest, plan):
     return state
 
 
-def lane_waiter(state, name):
-    """Parse the real CLI flags, including equals syntax and repeated options."""
+def wait_options(entry):
+    """Use bus wait's parser for every recipe consumer, including readiness."""
     from .ops import bus_parser
+    try:
+        flags = entry['argv'][entry['argv'].index('wait')+1:]
+        with contextlib.redirect_stderr(io.StringIO()):
+            return bus_parser().parse_args(['wait', *flags])
+    except (ValueError, SystemExit):
+        raise Refusal('invalid_bus_waiter', entry.get('name', 'waiter')) from None
+
+
+def lane_waiter(state, name):
+    from .bus_protocol import WAKE_KINDS
     matches = []
     for entry in state.get('re_arms', []):
         if entry.get('kind') != 'bus-waiter' or 'wait' not in entry.get('argv', []):
             continue
-        try:
-            flags = entry['argv'][entry['argv'].index('wait')+1:]
-            with contextlib.redirect_stderr(io.StringIO()):
-                options = bus_parser().parse_args(['wait', *flags])
-        except SystemExit:
-            raise Refusal('invalid_bus_waiter', entry['name']) from None
+        options = wait_options(entry)
         if options.to == name and not options.signal and not options.subject:
             if not options.persistent or options.timeout not in (None, 0):
                 raise Refusal('unbounded_lane_waiter_required', entry['name'])
+            kinds = {kind.strip() for kind in options.kinds.split(',') if kind.strip()}
+            if not options.own_asks or not set(WAKE_KINDS.split(',')).issubset(kinds):
+                raise Refusal('complete_lane_waiter_required', entry['name'])
             matches.append(entry)
     if len(matches) != 1:
         raise Refusal('default_rearms_required')
@@ -322,10 +330,10 @@ def final_state(manifest, plan):
         if entry.get('verify_argv') is not None and (not isinstance(entry['verify_argv'], list)
                 or not entry['verify_argv'] or not all(isinstance(arg, str) and arg for arg in entry['verify_argv'])):
             raise Refusal('invalid_rearm_verifier', entry['name'])
-        if entry['kind'] == 'bus-waiter' and ('--persistent' not in entry['argv'] or 'wait' not in entry['argv'] or not any(
-                flag in entry['argv'] and len(entry['argv']) > entry['argv'].index(flag)+1
-                for flag in ('--to', '--signal', '--subject'))):
-            raise Refusal('invalid_bus_waiter', entry['name'])
+        if entry['kind'] == 'bus-waiter':
+            options = wait_options(entry)
+            if not options.persistent or not any((options.to, options.signal, options.subject)):
+                raise Refusal('invalid_bus_waiter', entry['name'])
         if entry['kind'] == 'heartbeat' and not entry.get('verify_argv'):
             raise Refusal('heartbeat_verifier_required', entry['name'])
         if not isinstance(entry.get('env', {}), dict) or not all(
@@ -589,12 +597,16 @@ def verify_rearm(manifest, plan, entry, outcome, snapshot):
     if entry['kind'] == 'bus-waiter':
         if duplicate_waiter(manifest, entry, snapshot, pid):
             return False
-        argv = shlex.split(current.get('argv', ''))
+        try:
+            argv = shlex.split(current.get('argv', ''))
+        except ValueError:
+            return False
         # A live generic waiter with different flags cannot satisfy the recorded recipe.
         if 'wait' not in argv or argv[argv.index('wait'):] != entry['argv'][entry['argv'].index('wait'):]:
             return False
-        if '--to' in entry['argv'] and not any(flag in entry['argv'] for flag in ('--signal', '--subject')):
-            name = entry['argv'][entry['argv'].index('--to')+1]
+        options = wait_options(entry)
+        if options.to and not options.signal and not options.subject:
+            name = options.to
             cursor = manifest.paths.bus_log.parent/'state/cursors'/(name_key(name)+'.wait')
             owner = read_json(cursor.with_suffix('.wait.owner.json'), {})
             if (not cursor.exists() or cursor.stat().st_mtime < outcome['requested_at']
@@ -617,17 +629,20 @@ def verify_rearm(manifest, plan, entry, outcome, snapshot):
 
 
 def duplicate_waiter(manifest, entry, snapshot, expected=None):
-    if entry['kind'] != 'bus-waiter' or '--to' not in entry['argv'] or any(
-            flag in entry['argv'] for flag in ('--signal', '--subject')):
+    if entry['kind'] != 'bus-waiter':
         return False
-    target = entry['argv'][entry['argv'].index('--to')+1]
+    options = wait_options(entry)
+    if not options.to or options.signal or options.subject:
+        return False
     for pid, row in snapshot.items():
+        if pid == expected:
+            continue
         try:
             args = shlex.split(row.get('argv', ''))
-        except ValueError:
+            other = wait_options(dict(argv=args))
+        except (ValueError, Refusal):
             continue
-        if (pid != expected and 'wait' in args and '--to' in args
-                and args[args.index('--to')+1:args.index('--to')+2] == [target]
+        if (other.to == options.to and not other.signal and not other.subject
                 and ('--manifest' not in args or str(manifest.file) in args)):
             return True
     return False
@@ -638,8 +653,9 @@ def waiter_available(manifest, entry):
         return
     if duplicate_waiter(manifest, entry, claude_resume.processes()):
         raise Refusal('duplicate_waiter', entry['name'])
-    if '--to' in entry['argv'] and not any(f in entry['argv'] for f in ('--signal', '--subject')):
-        target = entry['argv'][entry['argv'].index('--to')+1]
+    options = wait_options(entry)
+    if options.to and not options.signal and not options.subject:
+        target = options.to
         path = manifest.paths.bus_log.parent/'state/cursors'/(name_key(target)+'.wait.lock')
         with locked(path):
             pass  # Kernel ownership catches old detached consumers, including older binaries.

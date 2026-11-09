@@ -1,8 +1,6 @@
 """Explicit local MCP service installation; never exposes a public endpoint."""
 import argparse
-import os
 from pathlib import Path
-import secrets
 from .manifest import ManifestError
 from .paths import python_env
 from .services import manager
@@ -10,10 +8,11 @@ from .state import read_json, write_json
 from .selfupdate import register
 
 
-def spec(manifest, secret, port):
+def spec(manifest, secret, port, clients=None):
     return dict(Label=manifest.launchd.label_prefix+'.mcp',
                 ProgramArguments=[manifest.launchd.python,'-m','coordkit.cli','--manifest',str(manifest.file),
-                                  'mcp-serve','--secret-file',str(secret),'--port',str(port)],
+                                  'mcp-serve','--secret-file',str(secret),'--port',str(port)] +
+                                 (['--clients-file',str(clients)] if clients is not None else []),
                 WorkingDirectory=str(manifest.file.parent),
                 EnvironmentVariables={'PATH':':'.join(manifest.launchd.path),**python_env()},
                 RunAtLoad=True, KeepAlive=True,
@@ -22,7 +21,7 @@ def spec(manifest, secret, port):
 
 
 def main(argv, manifest):
-    from .mcp_server import SECRET_FILE, load_secret
+    from .mcp_server import CLIENTS_FILE, SECRET_FILE, Refused, load_clients, load_secret
     from .ops import parser_for
     parser=parser_for('mcp')
     opts=parser.parse_args(argv)
@@ -39,16 +38,17 @@ def main(argv, manifest):
         print('MCP_UNINSTALLED')
         return 0
     secret=Path(opts.secret_file or SECRET_FILE).expanduser().absolute()
-    secret.parent.mkdir(parents=True,exist_ok=True)
+    clients=Path(opts.clients_file or CLIENTS_FILE).expanduser().absolute()
+    # Installation must never restore a retired, all-powerful legacy bearer.
+    # Only a pre-existing secret opts an older installation into legacy fallback.
     try:
-        fd=os.open(secret,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-    except FileExistsError:
-        pass
-    else:
-        with os.fdopen(fd,'w') as stream:
-            stream.write(secrets.token_urlsafe(48)+'\n')
-    load_secret(secret)
-    job=spec(manifest,secret,opts.port)
+        if not load_clients(clients):
+            load_secret(secret)
+    except FileNotFoundError:
+        raise ManifestError('mcp_credentials_required: create a named token with mcp-clients add') from None
+    except Refused as exc:
+        raise ManifestError(str(exc)) from None
+    job=spec(manifest,secret,opts.port,clients)
     Path(job['StandardOutPath']).parent.mkdir(parents=True,exist_ok=True)
     previous=read_json(receipt)
     if previous and previous==job and service.path(label).exists():
@@ -58,5 +58,5 @@ def main(argv, manifest):
     service.install(job,previous=bool(previous))
     register(manifest)
     print('MCP_INSTALLED 127.0.0.1:'+str(opts.port)+'/mcp')
-    print('Use a bearer token from '+str(secret)+'. Configure TLS transport separately; writes remain disabled.')
+    print('Use a configured client bearer. Configure TLS transport separately; writes remain disabled.')
     return 0

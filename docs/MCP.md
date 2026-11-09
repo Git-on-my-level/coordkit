@@ -2,11 +2,70 @@
 
 Optional stdlib MCP over Streamable HTTP: stateless JSON-RPC 2.0 on `POST /mcp`, bound to `127.0.0.1`. An operator-managed TLS tunnel can expose it remotely. Read [SECURITY](SECURITY.md) before enabling access.
 
-All requests require `Authorization: Bearer <secret>`. The secret file defaults to `~/.coordkit-mcp/connector.secret` (mode 0600, outside repositories); override with `COORDKIT_MCP_SECRET_FILE`. Missing or unsafe permissions fail closed. There is no built-in OAuth provider: verify your client's bearer-header support before exposing this endpoint.
+All requests require `Authorization: Bearer <secret>`. Named tokens live outside repositories in
+`~/.coordkit-mcp/clients.json` (regular, non-symlink file, mode 0600; keep its directory mode 0700).
+Override with `--clients-file` on `mcp-serve` or `COORDKIT_MCP_CLIENTS_FILE`. Each entry has a unique secret
+of at least 32 characters and its own permissions:
 
-Read tools inspect the bus and bounded agentctl/train metadata. Write tools (`post`, `ack`, `question_answer`) use `[mcp].identity` (default `ck-<project>-mcp`); `post` also accepts senders explicitly allowlisted in `[mcp].post_as`. Acknowledgements require an assignee; question answers require an open tier-2 question. Writes are disabled until `<root>/state/mcp/writes-enabled` exists and are refused while `kill` exists. Configure clients to confirm each write with the operator.
+```json
+{
+  "operator-connector": {
+    "secret": "REPLACE_WITH_A_RANDOM_SECRET_AT_LEAST_32_CHARACTERS",
+    "identity": "operator-mcp",
+    "post_as": ["review-lane"],
+    "write": true,
+    "answer": true
+  }
+}
+```
 
-Every call is journaled without secrets in `<root>/state/mcp/calls.ndjson`. Output is untrusted agent text, explicitly labelled and capped. See the security document for rate limits, slot pools and resource bounds.
+Omitted grants default to `write: false`, `answer: false`, `post_as: []`; omitted `identity` defaults to the
+client name. Names and identities use plain bus names; `legacy` is reserved. Malformed JSON, invalid fields,
+duplicate keys/secrets, short secrets, unreadable files and unsafe permissions fail closed with 503.
+The file is capped at 64 KiB. Every request reopens and validates its metadata and permissions;
+an unchanged file reuses a single parsed snapshot keyed by device, inode, nanosecond modification/change times
+and size. Changed or removed files take effect on the next request. Add a new entry and update the client
+to rotate a token; delete its entry to revoke it on the next request. Rate limits remain process-wide. There is no built-in OAuth provider:
+verify your client's bearer-header support before exposing this endpoint.
+
+Read tools inspect the bus and bounded agentctl/train metadata. Every write tool (`post`, `ack`,
+`question_answer`) requires the token's `write` grant. `post` defaults to its `identity`; extra senders must
+be in its `post_as`. Posting as a manifest-designated human (including human roles and members) also requires
+`answer`. This grant is required for `kind=answer`, for `kind=msg` with `re` naming an open/escalated question,
+for `question_answer`, for acknowledgements as a human identity, and for `ack state=done` targeting an
+open/escalated question (it emits an answer).
+Acknowledgements must be assigned to the client's identity; question answers
+require an open tier-2 question and record that identity as the answerer. The bearer is the authorization;
+client confirmation is still recommended but is not the server's enforcement mechanism.
+
+Writes also require a regular, non-symlink `<root>/state/mcp/writes-enabled` file and no `kill` directory
+entry (even a dangling symlink trips the kill switch). Selected-project writes require both entry and target
+gates. Gates are checked again immediately before invoking the append operation. Configure clients to
+confirm each write with the operator.
+
+Every call is journaled without secrets in `<root>/state/mcp/calls.ndjson`, mode 0600 (also after rotation;
+the active journal and rotated `calls.ndjson.*` files are tightened at startup without following symlinks).
+Each line includes `client`, the matched entry id or `legacy`;
+unauthenticated/admission failures use `anonymous` when no token was matched. Over-limit requests are not
+journaled individually to bound disk use. Output is untrusted agent text, explicitly labelled and capped.
+See the security document for rate limits, slot pools and resource bounds.
+
+### Legacy migration
+
+During migration, a bearer not matching `clients.json` can still match the mode-0600
+`~/.coordkit-mcp/connector.secret` (`--secret-file` / `COORDKIT_MCP_SECRET_FILE`), capped at 4 KiB.
+This synthetic `legacy` client has `write: true`, `answer: true`, manifest `[mcp].identity`
+(default `ck-<project>-mcp`), and manifest `[mcp].post_as`. Named tokens never inherit manifest sender grants. A missing clients file permits legacy
+operation; an invalid clients file refuses admission rather than silently restoring legacy powers.
+
+1. Deploy the new code with the existing legacy secret.
+2. Create the private clients file with explicit grants; both bearers now work.
+3. Update the remote client's bearer and confirm `client=operator-connector` in the journal.
+4. Delete `connector.secret`; named tokens keep working and the old bearer is refused immediately.
+
+No restart is required for credential edits. Removing both credential sources disables admission. Do not
+reuse a secret across entries or as both a named and legacy token: named matches take precedence, but
+retaining a legacy copy would defeat revocation of the named entry.
 
 ## Read tools
 
@@ -50,7 +109,7 @@ sample = "~/project/coordkit.toml"
 other = "../other/coordkit.toml"
 ```
 
-No registry is required for existing callers. Selection retains the entry connector's `[mcp].identity` and authentication.
+No registry is required for existing callers. Selection retains the authenticated client's identity and grants (or the entry manifest's legacy grants).
 Writes still require the entry and selected project's existing `writes-enabled` files and absence of `kill`;
 CLI write calls are serialized because they retain global bus configuration. Read calls use independent
 manifest-owned log snapshots and never hold that write lock while polling.
@@ -94,21 +153,44 @@ roster page. The connector's existing request journal remains its only read-call
 
 ## Local setup and optional exposure
 
-Create the secret outside the repository with restrictive permissions. Avoid replacing an existing secret without updating its clients.
+Create tokens outside the repository with restrictive permissions. The small local helper does not need a manifest:
 
 ```sh
-mkdir -p ~/.coordkit-mcp
-chmod 700 ~/.coordkit-mcp
-(umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > ~/.coordkit-mcp/connector.secret)
-chmod 600 ~/.coordkit-mcp/connector.secret
+coordkit mcp-clients add reader
+coordkit mcp-clients add operator-connector --write --answer --post-as review-lane
+coordkit mcp-clients list
 coordkit --manifest ~/project/coordkit.toml mcp-serve
 ```
 
+`add` prints the new secret once to stdout after saving it in the mode-0600 file; transfer it directly to the
+client's credential setting. Do not paste it into bus messages or commit it. `list` prints identities and
+grants, never secrets; `revoke NAME` removes an entry. Repeat `--post-as` for more senders. Use
+`--clients-file PATH` or the environment override for a different file. The helper defaults identity to the
+name; edit the private JSON to use a different bus identity. Helper edits are serialized and atomically
+replace the file. An existing name is never overwritten by `add`.
+
+`mcp-clients add` (and `revoke`) tighten an existing credential directory to 0700
+only after verifying that the opened directory belongs to the current user;
+symlink directories and directories owned by another user are refused.
+
+For optional managed service installation, create a named token first, then run
+`coordkit --manifest ~/project/coordkit.toml mcp install`. Use `--clients-file PATH`
+for a custom file; the installer records its resolved path in the service arguments.
+Installation and reinstallation never create a legacy secret. A pre-existing
+private legacy secret remains supported for migration, but once removed it stays
+retired unless an operator deliberately restores it. Missing or invalid credentials
+refuse installation before any service or installation receipt is written.
+
 The manifest must be live. Use your host supervisor for persistent service operation. The [example plist](../examples/omi/launchd/com.example.coordkit-mcp.plist) is a template: expand its home-relative placeholders to absolute paths before installation; launchd does not expand `~` or shell variables. Its label must remain outside the project's managed prefix if it is supervised separately.
 
-Verify an authenticated `tools/list` returns 200 and an unauthenticated request returns 401 on loopback. For remote access, arrange TLS, tunnel policy and the client's bearer header explicitly. Tools do not grant arbitrary file, shell, cloud or production access; bus asks can still cause agents to act. Enable writes only after an independent security review and the operator's explicit approval for that endpoint. Create `writes-enabled` after the client is configured to confirm each write.
+Verify an authenticated `tools/list` returns 200 and an unauthenticated request returns 401 on loopback. For remote access, arrange TLS, tunnel policy and the client's bearer header explicitly. Operators using Tailscale Funnel should restrict the public route to `/mcp`, rather than proxying `/`; route configuration is a separate operations step. Tools do not grant arbitrary file, shell, cloud or production access; bus asks can still cause agents to act. Enable writes only after an independent security review and the operator's explicit approval for that endpoint. Create `writes-enabled` after the client is configured to confirm each write.
 
-Rollback: remove the specific tunnel route; create `<root>/state/mcp/kill`; remove `writes-enabled`; stop the supervised process; rotate or remove its secret and remove the client connector. Existing requests can finish after the admission kill switch, so stop the process when immediate cessation is required.
+Rollback/access shutdown: remove the specific tunnel route; create `<root>/state/mcp/kill`; remove
+`writes-enabled`; stop the supervised process; revoke named tokens and remove the legacy secret and client
+connector as appropriate. Existing requests can finish after admission, and the last gate check is not atomic
+with append: stop the process when immediate cessation is required. For a code rollback to a single-secret
+release, restore a private legacy secret and update the client bearer before restarting that release;
+`clients.json` is inert to older code. Review any tunnel-route change separately.
 
 `agents_status` also returns optional `config_dir`, `account` (directory basename),
 `session_id`, `transcript_path`, `pid`, `permission_mode`, and `identity_refreshed_at`
