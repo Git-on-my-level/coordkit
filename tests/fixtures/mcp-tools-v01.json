@@ -565,7 +565,7 @@
   },
   {
     "name": "post",
-    "description": "Post a message as the configured MCP identity. Agents act on asks, so be explicit. Confirm with the operator before calling: this acts on the live bus.",
+    "description": "Post as the client identity or an allowed sender; requires write permission. Human senders, answers and msg replies to open questions require answer permission. Agents act on asks, so be explicit. Confirm with the operator before calling: this acts on the live bus.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -593,7 +593,7 @@
         },
         "as": {
           "type": "string",
-          "description": "Post as this lane (only names in the manifest mcp.post_as list); default the MCP identity."
+          "description": "Post as a sender allowed by this token; default the client identity."
         },
         "project": {
           "type": "string",
@@ -617,7 +617,7 @@
   },
   {
     "name": "ack",
-    "description": "Acknowledge a bus row addressed to the configured MCP identity. Confirm with the operator before calling: this acts on the live bus.",
+    "description": "Acknowledge a bus row addressed to the client identity; requires write permission. Completing an open question also requires answer permission. Confirm with the operator before calling: this acts on the live bus.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -657,7 +657,7 @@
   },
   {
     "name": "question_answer",
-    "description": "Answer an open agent question (closes it and tells the asker). Confirm with the operator before calling: this acts on the live bus.",
+    "description": "Answer an open tier-2 agent question (closes it and tells the asker); requires write and answer permissions. Confirm with the operator before calling: this acts on the live bus.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,

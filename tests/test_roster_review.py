@@ -32,7 +32,9 @@ class RosterReviewTests(AddressedCase):
 
     def connector_post(self, text='service update', sender='review-desk'):
         self.manifest.mcp.post_as = [sender]
-        return mcp_server.write_call(self.manifest, 'post', {'as': sender, 'to': 'all', 'kind': 'fyi', 'text': text})
+        gate = mcp_server.home(self.manifest)/'writes-enabled'
+        gate.parent.mkdir(parents=True, exist_ok=True); gate.touch()
+        return mcp_server.call_tool(self.manifest, 'post', {'as': sender, 'to': 'all', 'kind': 'fyi', 'text': text})
 
     def transcript(self, lane, session, model, mtime):
         path = usage.transcript_dir(lane)/f'{session}.jsonl'

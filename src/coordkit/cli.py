@@ -46,6 +46,9 @@ def main(argv=None):
     parser.add_argument("command", choices=tuple(COMMANDS))
     options, rest = parser.parse_known_args(argv)
     try:
+        if options.command == 'mcp-clients':
+            from .mcp_server import clients_main
+            return clients_main(rest)
         if options.command == 'update':
             from .selfupdate import main as update_main
             return update_main(rest, load(options.manifest) if options.manifest else None)

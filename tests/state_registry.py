@@ -262,3 +262,9 @@ row('lifecycle.py', 'relay/service.json', 'relay installation receipt includes t
 row('selfupdate.py', 'relay/service.json', 'update reconciles explicitly installed relay service',
     'explicit relay uninstall or down', 'only owned services may be reinstalled',
     'manager failure triggers existing update rollback')
+
+row('mcp_server.py', 'clients.json|clients.json.lock|writer:clients_main',
+    'explicit mcp-clients add/revoke; external private credentials',
+    'revoke removes an entry; lock released on exit',
+    're-read every request; atomic edits; no cached credentials',
+    'malformed/insecure file refuses admission; absent file permits legacy fallback')
