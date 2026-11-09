@@ -61,7 +61,9 @@ def candidate(manifest, row):
     if str(row.get('id', '')).startswith(OWN_PREFIXES):
         return False
     # A handoff that names no PR and is not an auditor report is a status update, not work.
-    return row['kind'] == 'ask' or bool(prs(row)) or is_flag_report(manifest, row)
+    return (row['kind'] == 'ask' or bool(prs(row)) or is_flag_report(manifest, row)
+            or bool(row.get('handoff_bounce') or row.get('handoff_degraded'))
+            or any(str(row.get(k, '')).startswith('repo:') for k in ('ref', 'evidence')))
 
 
 def open_obligations(manifest, rows, at, pr_state=lambda number: None):

@@ -58,6 +58,12 @@ row('bus.py', 'spill_ref|origin=mcp', 'bus spill or connector-originated post',
     'immutable row retained with bus history; archive retention owns spill files',
     'no latch; ref roots bound reads and activity TTL bounds local evidence',
     'text never grants ref access; service origin never proves a local listener')
+row('bus.py', '--', 'per-writer spill filename separator', 'retained with bus history',
+    'no latch; same retention as spill_ref', 'read failures surface to reader')
+row('handoffs.py', 'handoff_degraded|handoff_local_digests|handoff_bounce',
+    'explicit degradation or failed consumer pickup', 'immutable bus history; poster acknowledges repair obligation and reposts',
+    'pickup checks synchronously; bounce uses normal obligation pickup ladder',
+    'failed pickup returns a deduplicated handoff directly to poster')
 row('mcp_server.py', 'state|mcp|calls.ndjson', 'every MCP request', 'append-only audit journal of connector calls', 'reviewed with the connector; rotation documented in docs/MCP.md', 'journal is the record; refusals counted per outcome')
 row('mcp_server.py', 'writes-enabled', 'the guarded go-live turns writes on', 'operator removes the file (writes off)', 'until removed; the kill file overrides it', 'write tools refuse while absent')
 row('mcp_server.py', '.ndjson.1', 'the journal passes JOURNAL_MAX', 'the next rotation replaces it', 'at most two journal files', 'none needed: bounded audit')
