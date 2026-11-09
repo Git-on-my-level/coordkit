@@ -4,6 +4,7 @@ import io
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 from unittest.mock import patch
@@ -75,6 +76,24 @@ class InstallPathTests(FakeCase):
     def test_flat_release_import_root_is_stable(self):
         with patch.object(paths, '__file__', str(self.root/'current/coordkit/paths.py')):
             self.assert_layout(self.root/'current')
+
+    def test_rendered_reconciler_imports_flat_release_from_unrelated_cwd(self):
+        # launchd supplies no interactive shell environment. Exercise the rendered
+        # interpreter and import root, rather than only comparing plist strings.
+        release = self.root/'releases/v1'
+        shutil.copytree(Path(cli.__file__).parent, release/'coordkit',
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        current = self.root/'current'
+        current.symlink_to(release, target_is_directory=True)
+        with patch.object(paths, '__file__', str(release/'coordkit/paths.py')):
+            job = next(job for job in lifecycle.templates(self.manifest)
+                       if job['Label'].endswith('.reconcile'))
+        self.assertEqual(job['EnvironmentVariables']['PYTHONPATH'], str(current))
+        result = subprocess.run([*job['ProgramArguments'][:3], '--version'], cwd=self.root,
+                                env=job['EnvironmentVariables'], capture_output=True,
+                                text=True, timeout=5)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, f'coordkit {__version__}'),
+                         result.stderr)
 
     def test_version_needs_no_manifest_or_external_tools(self):
         output = io.StringIO()

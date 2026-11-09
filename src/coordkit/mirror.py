@@ -5,11 +5,12 @@ from .process import ToolError
 import sys
 
 
-def card_for(manifest, label, subject=None):
+def card_for(manifest, label, subject=None, *, resolve=None):
     client = AnxClient(manifest)
+    resolve = resolve or client.resolve_card
     if subject and (subject.startswith('card:') or subject.startswith(manifest.loop.receipt_prefix)):
         card = subject if subject.startswith('card:') else f'card:{subject}'
-        client.resolve_card(card)
+        resolve(card)
         return card
     # A subject can name a train or a PR, not necessarily a card. Prefer the owner's
     # explicit execution linkage, including a recent terminal run for its handoff.
@@ -28,7 +29,7 @@ def card_for(manifest, label, subject=None):
     if len(matches) > 1:
         raise CardUnresolved(label, 'ambiguous execution card linkage')
     card = f'card:{next(iter(matches)) if matches else subject or label}'
-    client.resolve_card(card)
+    resolve(card)
     return card
 
 

@@ -10,12 +10,15 @@ import time
 from . import bus, deadletters, lane, loop, loop_answers, escalation
 from .stock import held, report
 from .actl import AgentctlClient
-from .anxcli import AnxClient, past_promises
+from .anxcli import AnxClient, CardUnresolved, past_promises
 from .manifest import duration
 from .merge import gh
 from .mirror import card_for
 from .process import ToolError, parse_ts, run
 from .state import read_json, write_json
+
+
+MISSING_CARD_TTL = 6 * 3600
 
 
 def card_ref(card):
@@ -25,6 +28,7 @@ def card_ref(card):
 def reconcile(manifest, dry_run=False, at=None):
     if not dry_run:
         manifest.writable()
+    started = time.monotonic()
     at=time.time() if at is None else at
     state_path=manifest.paths.root/'reconcile/state.json'
     state=read_json(state_path, {'fired':[], 'dead':{}, 'loops':{}})
@@ -36,8 +40,16 @@ def reconcile(manifest, dry_run=False, at=None):
     state['dead'] = {key:stamp for key,stamp in state['dead'].items() if at-stamp < max_age}
     fired = state['fired']
     state['last_run'] = at
+    state['started_at'] = at
     state.setdefault('blockers', {})
     state.setdefault('holds', {})
+    missing = state.setdefault('missing_cards', {})
+    for ref in list(missing):
+        if missing[ref]['expires_at'] <= at:
+            del missing[ref]
+    unresolved = state.setdefault('unresolved_obligations', {})
+    if not dry_run:
+        write_json(state_path, state)
     client, actl=AnxClient(manifest), AgentctlClient(manifest)
     findings=False
     def action(check,key,detail,perform,ask=False):
@@ -66,11 +78,51 @@ def reconcile(manifest, dry_run=False, at=None):
         else:
             bus.main(argv, manifest)
 
+    lookups, resolutions = {}, {}
+    def resolve_card(ref):
+        if ref not in lookups:
+            if ref in missing:
+                lookups[ref] = CardUnresolved(ref, 'not_found (cached)')
+            else:
+                try:
+                    lookups[ref] = client.resolve_card(ref)
+                except ToolError as exc:
+                    lookups[ref] = exc
+                    # CardUnresolved wraps protocol/auth errors too. Only a confirmed
+                    # not_found is evidence safe to retain across passes.
+                    cause = exc
+                    while cause is not None:
+                        if isinstance(cause, ToolError) and cause.category == 'not_found':
+                            missing[ref] = {'expires_at': at + MISSING_CARD_TTL}
+                            break
+                        cause = cause.__cause__
+        result = lookups[ref]
+        if isinstance(result, ToolError):
+            raise result
+        for key in list(unresolved):
+            if unresolved[key]['card'] == ref:
+                del unresolved[key]
+        return result
+
     def obligation_card(row):
+        # Mapping may need agentctl; share it too, but cache actual card reads by
+        # reference so different owners of the same card cannot multiply calls.
+        key = (row['owner'], row.get('subject'))
         try:
-            return card_for(manifest, row['owner'], row.get('subject'))
+            if key not in resolutions:
+                try:
+                    resolutions[key] = card_for(manifest, *key, resolve=resolve_card)
+                except ToolError as exc:
+                    resolutions[key] = exc
+            if isinstance(resolutions[key], ToolError):
+                raise resolutions[key]
+            unresolved.pop(row['id'], None)
+            return resolutions[key]
         except ToolError as exc:
-            print(f'RECONCILE card unresolved {row["id"]}: {exc}')
+            ref = next((ref for ref, result in lookups.items() if result is exc), None)
+            unresolved[row['id']] = {'card': ref, 'owner': row['owner'], 'detail': str(exc)}
+            if not dry_run:
+                write_json(state_path, state)
             return manifest.escalation.card
     def ask(check,key,card,situation,recommend):
         action(check,key,card,lambda:escalation.ask(manifest,card,kind=check,situation=situation,
@@ -191,10 +243,15 @@ def reconcile(manifest, dry_run=False, at=None):
     adopted = state.setdefault('obligations_since', at)
     # coordkit's own rows always count; other writers' rows (an incumbent still posting) only after adoption.
     since_adoption = lambda row: bus.adopted_row(row, adopted)
-    for row in bus.open_rulings(rows):
+    rulings, blockers = bus.open_rulings(rows), bus.open_blockers(rows)
+    open_obligations = {row['id'] for row in rulings + blockers}
+    for key in list(unresolved):
+        if key not in open_obligations:
+            del unresolved[key]
+    for row in rulings:
         if not since_adoption(row):
             continue
-        if at-parse_ts(row['ts']).timestamp() >= duration(manifest.reconciler.ruling_ask_after):
+        if 'ruling:'+row['id'] not in fired and at-parse_ts(row['ts']).timestamp() >= duration(manifest.reconciler.ruling_ask_after):
             card=obligation_card(row)
             ask('rulings','ruling:'+row['id'],card,f'Ruling {row["id"]} has not been acknowledged by {row["owner"]}.',
                 'Obtain the owner acknowledgement or reassign this ruling.')
@@ -204,14 +261,19 @@ def reconcile(manifest, dry_run=False, at=None):
              '--subject',card,'--evidence','bus:'+row['id'],'--no-mirror', '--force',
              '--id','wake-'+hashlib.sha256(key.encode()).hexdigest()[:24], recommendation],manifest))
     open_ids = set()
-    for row in bus.open_blockers(rows):
+    for row in blockers:
         if not since_adoption(row) or at-parse_ts(row['ts']).timestamp() < duration(manifest.reconciler.blocker_ask_after):
             continue
         key = row['id']; open_ids.add(key)
+        if 'wake:blocker:'+key in fired and 'blocker:'+key in fired:
+            continue
+        state['blockers'][key] = state['blockers'].get(key, 0)+1
+        # A delivered wake needs no card lookup while waiting for the ask threshold.
+        if 'wake:blocker:'+key in fired and state['blockers'][key] < manifest.loop.fail_report_after:
+            continue
         card = obligation_card(row)
         recommendation = f'Answer or disposition blocker {key} with a decision --re {key} and a reason.'
         wake_obligation('blockers', 'blocker:'+key, row, card, recommendation)
-        state['blockers'][key] = state['blockers'].get(key, 0)+1
         if state['blockers'][key] >= manifest.loop.fail_report_after:
             ask('blockers', 'blocker:'+key, card, f'Blocker {key} remains open past its maximum age.', recommendation)
     state['blockers'] = {key:value for key,value in state['blockers'].items() if key in open_ids}
@@ -374,7 +436,7 @@ def reconcile(manifest, dry_run=False, at=None):
         else:
             fired.pop('stock:'+kind, None)
     if not dry_run:
-        state['last_completed'] = at
+        state['last_completed'] = at + time.monotonic() - started
         write_json(state_path,state)
     return 5 if findings else 0
 

@@ -125,7 +125,14 @@ row('lane.py', 'plan:relaunches|plan:autocontinued|writer:_watch', 'capacity fai
 row('lane.py', 'plan:completion|plan:terminal|phase:completing|phase:released|writer:finish|writer:_recover', 'proven terminal execution', 'lease handoff then terminal event and plan', 'next reconciler pass / lane.max_run_hours', 'recovery failure asks; replay dedupes terminal')
 row('lane.py', 'phase:deadline_exceeded|writer:expire', 'run deadline exceeded', 'confirm cancellation then finish; otherwise retain ownership', 'renewal stops at max_run_hours; lease_ttl backstop', 'deadline ask then cancellation recovery')
 row('lane.py', 'plan:alarms|writer:alarm', 'unsafe recovery/capacity/deadline', 'terminal plan archived', 'one ask per plan and cause', 'ANX ask and optional pager')
-row('reconcile.py', 'reconcile/state.json|state.json|state:last_run|state:last_completed|writer:main|writer:reconcile', 'run starts', 'last_completed receipt', 'two intervals doctor deadline', 'doctor red; per-check ANX asks')
+row('reconcile.py', 'reconcile/state.json|state.json|state:last_run|state:started_at|state:last_completed|writer:main|writer:reconcile', 'run starts; started_at and last_run persisted before probes', 'last_completed records pass end only after success', 'two configured intervals since completion; legacy/start fallback without completion', 'doctor red; per-check ANX asks')
+row('reconcile.py', 'state:missing_cards', 'confirmed ANX not_found during obligation lookup',
+    'expires after six hours; successful lookup after expiry replaces miss',
+    'six hour TTL; in-memory hits and errors last one pass', 'doctor unresolved_obligations summary')
+row('reconcile.py', 'state:unresolved_obligations|writer:obligation_card', 'obligation card resolution fails',
+    'obligation closes or card successfully resolves on a later unfired obligation',
+    'bounded by open ruling and blocker ids; retained even after action receipt',
+    'one doctor summary with counts, sample ids and state path; no per-pass per-row log')
 row('stock.py', 'reconcile/state.json', 'read obligations_since (adoption baseline)', 'set once by the first live reconcile; archived by a cutover apply', 'persistent baseline, no latch', 'stock counts only adopted rows; reconcile asks on thresholds')
 row('reconcile.py', 'run.lock|skip.json', 'reconciler invocation', 'kernel unlock; next run replaces skip receipt', 'nonblocking lock; two interval health limit', 'skip receipt and doctor red')
 row('reconcile.py', 'state:fired|writer:action', 'successful action receipt', 'age GC or normal recovery clears alarm key', 'reconciler.state_max_age', 're-ask unresolved obligation after retention window')
