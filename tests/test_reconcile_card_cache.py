@@ -1,11 +1,13 @@
 """An obligation receipt must prevent repeat I/O, including missing-card I/O."""
 import contextlib
+import dataclasses
 import io
 import json
 import time
 from unittest.mock import patch
 
 from coordkit import bus, lifecycle, reconcile
+from coordkit.process import ToolError
 from coordkit.state import read_json, write_json
 from tests.support import FakeCase
 
@@ -26,9 +28,9 @@ class ReconcileCardCacheTests(FakeCase):
         self.respond({'tool': 'anx', 'contains': ['cards', 'get'], 'exit': exit_code,
                       'json': {'ok': False, 'error': {'code': code}}})
 
-    def run_pass(self, at=10000, dry=False):
+    def run_pass(self, at=10000, dry=False, ask_error=None):
         output = io.StringIO()
-        with contextlib.redirect_stdout(output), patch.object(reconcile.escalation, 'ask'), \
+        with contextlib.redirect_stdout(output), patch.object(reconcile.escalation, 'ask', side_effect=ask_error), \
                 patch.object(bus, 'main', return_value=0):
             reconcile.reconcile(self.manifest, dry_run=dry, at=at)
         return output.getvalue()
@@ -140,6 +142,38 @@ class ReconcileCardCacheTests(FakeCase):
         self.run_pass(at=10300, dry=True)
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(len(self.lookups()), 1)
+
+    def test_shadow_doctor_ignores_live_unresolved_receipts(self):
+        self.rows()
+        self.missing()
+        self.run_pass()
+        path = self.manifest.paths.root/'reconcile/state.json'
+        before = path.read_bytes()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            lifecycle.doctor(dataclasses.replace(self.manifest, mode='shadow'))
+        self.assertIn('DOCTOR unresolved_obligations green shadow: reconciler not scheduled', out.getvalue())
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_closed_cleanup_is_durable_even_when_a_later_stage_fails(self):
+        self.rows()
+        self.missing()
+        self.run_pass()
+        self.rows(0)
+        with patch.object(reconcile, 'report', side_effect=RuntimeError('later failure')), \
+                self.assertRaises(RuntimeError):
+            self.run_pass(at=10300)
+        self.assertEqual(self.state()['unresolved_obligations'], {})
+
+    def test_repaired_card_cleanup_survives_failed_ask_and_later_failure(self):
+        self.rows()
+        self.missing()
+        self.run_pass()
+        self.rows(prefix='retry')
+        self.respond()  # now exists, after the negative TTL
+        with patch.object(reconcile, 'report', side_effect=RuntimeError('later failure')), \
+                self.assertRaises(RuntimeError):
+            self.run_pass(at=31600, ask_error=ToolError('anx', 6, 'unavailable'))
+        self.assertEqual(self.state()['unresolved_obligations'], {})
 
     def test_confirmed_miss_survives_a_later_pass_failure(self):
         self.rows()

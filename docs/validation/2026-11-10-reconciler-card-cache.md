@@ -26,6 +26,8 @@ Validated with synthetic obligations and fake ANX responses on 2026-11-10
   reconcile no longer emits one unresolved-card line per row per pass. Closing
   an obligation removes its record on the next pass. A successful later lookup
   of the card clears its unresolved records, including handled obligations.
+  Both cleanups persist before later fallible stages; shadow doctor ignores
+  retained live reconciler receipts because it schedules no clearing pass.
   Repairing a card alone does not force a handled obligation to be looked up.
 - `started_at` and legacy `last_run` record pass start before probes. A successful
   pass sets `last_completed` at the end, using elapsed monotonic time added to

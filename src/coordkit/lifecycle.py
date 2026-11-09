@@ -341,6 +341,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
             raise ManifestError('reconciler overdue beyond two intervals; '+detail)
         return 'last reconciliation within two intervals; '+detail
     def unresolved_obligations():
+        if manifest.mode == 'shadow':
+            return 'shadow: reconciler not scheduled'
         path = manifest.paths.root/'reconcile/state.json'
         unresolved = read_json(path, {}).get('unresolved_obligations', {})
         if unresolved:

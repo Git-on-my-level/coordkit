@@ -99,9 +99,13 @@ def reconcile(manifest, dry_run=False, at=None):
         result = lookups[ref]
         if isinstance(result, ToolError):
             raise result
+        cleared = False
         for key in list(unresolved):
             if unresolved[key]['card'] == ref:
                 del unresolved[key]
+                cleared = True
+        if cleared and not dry_run:
+            write_json(state_path, state)
         return result
 
     def obligation_card(row):
@@ -245,9 +249,13 @@ def reconcile(manifest, dry_run=False, at=None):
     since_adoption = lambda row: bus.adopted_row(row, adopted)
     rulings, blockers = bus.open_rulings(rows), bus.open_blockers(rows)
     open_obligations = {row['id'] for row in rulings + blockers}
+    closed = False
     for key in list(unresolved):
         if key not in open_obligations:
             del unresolved[key]
+            closed = True
+    if closed and not dry_run:
+        write_json(state_path, state)
     for row in rulings:
         if not since_adoption(row):
             continue

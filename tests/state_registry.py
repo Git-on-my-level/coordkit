@@ -129,8 +129,8 @@ row('reconcile.py', 'reconcile/state.json|state.json|state:last_run|state:starte
 row('reconcile.py', 'state:missing_cards', 'confirmed ANX not_found during obligation lookup',
     'expires after six hours; successful lookup after expiry replaces miss',
     'six hour TTL; in-memory hits and errors last one pass', 'doctor unresolved_obligations summary')
-row('reconcile.py', 'state:unresolved_obligations|writer:obligation_card', 'obligation card resolution fails',
-    'obligation closes or card successfully resolves on a later unfired obligation',
+row('reconcile.py', 'state:unresolved_obligations|writer:obligation_card|writer:resolve_card', 'obligation card resolution fails',
+    'obligation closes or card successfully resolves on a later unfired obligation; cleanup persists before later stages',
     'bounded by open ruling and blocker ids; retained even after action receipt',
     'one doctor summary with counts, sample ids and state path; no per-pass per-row log')
 row('stock.py', 'reconcile/state.json', 'read obligations_since (adoption baseline)', 'set once by the first live reconcile; archived by a cutover apply', 'persistent baseline, no latch', 'stock counts only adopted rows; reconcile asks on thresholds')
