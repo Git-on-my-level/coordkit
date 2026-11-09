@@ -12,6 +12,13 @@ The server binds to loopback and serves only `POST /mcp`. A tunnel terminates TL
 
 Writes are off by default. They require `writes-enabled` and the absence of `kill` under `<root>/state/mcp/`. Selected-project writes require both entry and target gates. Caller-selected senders, shell commands and file paths are refused. `ack` requires an assignee and `question_answer` requires an open tier-2 question. Ref access resolves candidates before matching manifest-owned roots, rejecting traversal, prefix siblings and symlink escapes. Broad root declarations intentionally broaden access; review them as permissions.
 
+The bearer-gated read-only `agents_status` tool exposes host metadata: config directories,
+account basenames, session IDs, transcript paths, best-effort PIDs with process-start
+validation, permission mode, and identity refresh time. These are within the trusted
+account boundary. Identity is captured through an explicit key allowlist, kept in private
+local registration/hook state, and never attached to bus rows. No tokens, credential
+payloads, or arbitrary environment variables are captured or exposed.
+
 Resource bounds:
 
 - Request body: 128 KiB; serialized tool result: 64 KiB. Row bodies: 4000 characters, or 200 in brief mode. Pages: default 30, maximum 100 rows; inline replies: latest 10; ref page: maximum 32 KiB.
