@@ -10,12 +10,35 @@ import time
 from . import bus, deadletters, lane, loop, loop_answers, escalation
 from .stock import held, report
 from .actl import AgentctlClient
-from .anxcli import AnxClient, past_promises
+from .anxcli import AnxClient, CardUnresolved, past_promises
 from .manifest import duration
 from .merge import gh
 from .mirror import card_for
 from .process import ToolError, parse_ts, run
 from .state import read_json, write_json
+
+
+MISSING_CARD_TTL = 6 * 3600
+MISSING_CARD_REVERIFY = 3600
+MISSING_CARD_LIMIT = 2000
+
+
+def card_cache_scope(manifest):
+    return [manifest.anx.workspace, manifest.anx.lead_actor, manifest.anx.base_url]
+
+
+def missing_card_key(manifest, ref):
+    return json.dumps([*card_cache_scope(manifest), ref], separators=(',', ':'))
+
+
+def prune_missing_cards(missing, scope, at):
+    # Legacy ref-only entries have no trustworthy workspace identity: discard.
+    for key, entry in list(missing.items()):
+        if entry.get('scope') != scope or entry['expires_at'] <= at:
+            del missing[key]
+    oldest = sorted(missing, key=lambda key: (missing[key]['created_at'], key))
+    for key in oldest[:max(0, len(missing)-MISSING_CARD_LIMIT)]:
+        del missing[key]
 
 
 def card_ref(card):
@@ -25,6 +48,7 @@ def card_ref(card):
 def reconcile(manifest, dry_run=False, at=None):
     if not dry_run:
         manifest.writable()
+    started = time.monotonic()
     at=time.time() if at is None else at
     state_path=manifest.paths.root/'reconcile/state.json'
     state=read_json(state_path, {'fired':[], 'dead':{}, 'loops':{}})
@@ -36,8 +60,15 @@ def reconcile(manifest, dry_run=False, at=None):
     state['dead'] = {key:stamp for key,stamp in state['dead'].items() if at-stamp < max_age}
     fired = state['fired']
     state['last_run'] = at
+    state['started_at'] = at
     state.setdefault('blockers', {})
     state.setdefault('holds', {})
+    missing = state.setdefault('missing_cards', {})
+    cache_scope = card_cache_scope(manifest)
+    prune_missing_cards(missing, cache_scope, at)
+    unresolved = state.setdefault('unresolved_obligations', {})
+    if not dry_run:
+        write_json(state_path, state)
     client, actl=AnxClient(manifest), AgentctlClient(manifest)
     findings=False
     def action(check,key,detail,perform,ask=False):
@@ -66,11 +97,72 @@ def reconcile(manifest, dry_run=False, at=None):
         else:
             bus.main(argv, manifest)
 
+    lookups, resolutions = {}, {}
+    def resolve_card(ref):
+        cache_key = missing_card_key(manifest, ref)
+        had_missing = cache_key in missing
+        if ref not in lookups:
+            cached = missing.get(cache_key)
+            if cached and at-cached['checked_at'] < MISSING_CARD_REVERIFY:
+                lookups[ref] = CardUnresolved(ref, 'not_found (cached)')
+            else:
+                # A failed retry must not turn a transport/auth error into a new
+                # proof of absence. Only a fresh not_found repopulates the cache.
+                missing.pop(cache_key, None)
+                try:
+                    lookups[ref] = client.resolve_card(ref)
+                except ToolError as exc:
+                    lookups[ref] = exc
+                    # CardUnresolved wraps protocol/auth errors too. Only a confirmed
+                    # not_found is evidence safe to retain across passes.
+                    cause = exc
+                    while cause is not None:
+                        if isinstance(cause, ToolError) and cause.category == 'not_found':
+                            missing[cache_key] = {'scope': cache_scope, 'ref': ref,
+                                'created_at': cached['created_at'] if cached else at,
+                                'checked_at': at, 'expires_at': at + MISSING_CARD_TTL}
+                            prune_missing_cards(missing, cache_scope, at)
+                            if not dry_run:
+                                write_json(state_path, state)
+                            break
+                        cause = cause.__cause__
+        result = lookups[ref]
+        if isinstance(result, ToolError):
+            raise result
+        cleared = False
+        for key in list(unresolved):
+            if unresolved[key]['card'] == ref:
+                del unresolved[key]
+                cleared = True
+        if (cleared or had_missing) and not dry_run:
+            write_json(state_path, state)
+        return result
+
     def obligation_card(row):
+        # Mapping may need agentctl; share it too, but cache actual card reads by
+        # reference so different owners of the same card cannot multiply calls.
+        key = (row['owner'], row.get('subject'))
         try:
-            return card_for(manifest, row['owner'], row.get('subject'))
+            if key not in resolutions:
+                try:
+                    resolutions[key] = card_for(manifest, *key, resolve=resolve_card)
+                except ToolError as exc:
+                    resolutions[key] = exc
+            if isinstance(resolutions[key], ToolError):
+                raise resolutions[key]
+            if unresolved.pop(row['id'], None) is not None and not dry_run:
+                write_json(state_path, state)
+            return resolutions[key]
         except ToolError as exc:
-            print(f'RECONCILE card unresolved {row["id"]}: {exc}')
+            ref = next((ref for ref, result in lookups.items() if result is exc), None)
+            cached = missing.get(missing_card_key(manifest, ref)) if ref else None
+            record = {'card': ref, 'owner': row['owner'], 'detail': str(exc), 'scope': cache_scope}
+            if cached:
+                record['checked_at'] = cached['checked_at']
+            if unresolved.get(row['id']) != record:
+                unresolved[row['id']] = record
+                if not dry_run:
+                    write_json(state_path, state)
             return manifest.escalation.card
     def ask(check,key,card,situation,recommend):
         action(check,key,card,lambda:escalation.ask(manifest,card,kind=check,situation=situation,
@@ -191,10 +283,28 @@ def reconcile(manifest, dry_run=False, at=None):
     adopted = state.setdefault('obligations_since', at)
     # coordkit's own rows always count; other writers' rows (an incumbent still posting) only after adoption.
     since_adoption = lambda row: bus.adopted_row(row, adopted)
-    for row in bus.open_rulings(rows):
+    rulings, blockers = bus.open_rulings(rows), bus.open_blockers(rows)
+    open_obligations = {row['id'] for row in rulings + blockers}
+    closed = False
+    for key in list(unresolved):
+        if key not in open_obligations:
+            del unresolved[key]
+            closed = True
+    if closed and not dry_run:
+        write_json(state_path, state)
+    # Recheck missing cards hourly even when their action receipts have fired.
+    # Mapping failures (card=None) retry mapping; action receipts still suppress
+    # repeated asks/wakes. Per-pass lookups dedupe shared refs across all rows.
+    open_rows = {row['id']: row for row in rulings + blockers}
+    for key, record in list(unresolved.items()):
+        due = (record.get('scope') != cache_scope or record.get('card') is None
+               or 'checked_at' not in record or at-record['checked_at'] >= MISSING_CARD_REVERIFY)
+        if key in unresolved and key in open_rows and due:
+            obligation_card(open_rows[key])
+    for row in rulings:
         if not since_adoption(row):
             continue
-        if at-parse_ts(row['ts']).timestamp() >= duration(manifest.reconciler.ruling_ask_after):
+        if 'ruling:'+row['id'] not in fired and at-parse_ts(row['ts']).timestamp() >= duration(manifest.reconciler.ruling_ask_after):
             card=obligation_card(row)
             ask('rulings','ruling:'+row['id'],card,f'Ruling {row["id"]} has not been acknowledged by {row["owner"]}.',
                 'Obtain the owner acknowledgement or reassign this ruling.')
@@ -204,14 +314,25 @@ def reconcile(manifest, dry_run=False, at=None):
              '--subject',card,'--evidence','bus:'+row['id'],'--no-mirror', '--force',
              '--id','wake-'+hashlib.sha256(key.encode()).hexdigest()[:24], recommendation],manifest))
     open_ids = set()
-    for row in bus.open_blockers(rows):
+    for row in blockers:
         if not since_adoption(row) or at-parse_ts(row['ts']).timestamp() < duration(manifest.reconciler.blocker_ask_after):
             continue
         key = row['id']; open_ids.add(key)
+        if 'wake:blocker:'+key in fired and 'blocker:'+key in fired:
+            continue
+        passes = state['blockers'].get(key, 0)+1
+        # A delivered wake needs no card lookup while waiting for the ask threshold.
+        if 'wake:blocker:'+key in fired and passes < manifest.loop.fail_report_after:
+            state['blockers'][key] = passes
+            if not dry_run:
+                write_json(state_path, state)
+            continue
         card = obligation_card(row)
         recommendation = f'Answer or disposition blocker {key} with a decision --re {key} and a reason.'
         wake_obligation('blockers', 'blocker:'+key, row, card, recommendation)
-        state['blockers'][key] = state['blockers'].get(key, 0)+1
+        state['blockers'][key] = passes
+        if not dry_run:
+            write_json(state_path, state)
         if state['blockers'][key] >= manifest.loop.fail_report_after:
             ask('blockers', 'blocker:'+key, card, f'Blocker {key} remains open past its maximum age.', recommendation)
     state['blockers'] = {key:value for key,value in state['blockers'].items() if key in open_ids}
@@ -374,7 +495,7 @@ def reconcile(manifest, dry_run=False, at=None):
         else:
             fired.pop('stock:'+kind, None)
     if not dry_run:
-        state['last_completed'] = at
+        state['last_completed'] = at + time.monotonic() - started
         write_json(state_path,state)
     return 5 if findings else 0
 
@@ -382,11 +503,38 @@ def reconcile(manifest, dry_run=False, at=None):
 def main(argv,manifest):
     parser=argparse.ArgumentParser(prog='coordkit reconcile')
     parser.add_argument('--dry-run',action='store_true')
-    parser.add_argument('command', nargs='?', choices=['run','abandon-answer'], default='run')
+    parser.add_argument('command', nargs='?', choices=['run','abandon-answer','forget-missing'], default='run')
     parser.add_argument('answer_id', nargs='?')
+    parser.add_argument('--all', action='store_true', dest='all_missing')
     parser.add_argument('--reason')
     args=parser.parse_args(argv)
     try:
+        if args.command == 'forget-missing':
+            manifest.writable()
+            if bool(args.answer_id) == args.all_missing or args.dry_run or args.reason:
+                parser.error('forget-missing requires exactly one card ref or --all; no --dry-run/--reason')
+            ref = 'card:'+args.answer_id.removeprefix('card:') if args.answer_id else None
+            directory=manifest.paths.root/'reconcile'; directory.mkdir(parents=True,exist_ok=True)
+            with (directory/'run.lock').open('a') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+                state_path=directory/'state.json'
+                state=read_json(state_path, {'fired':{}, 'dead':{}, 'loops':{}})
+                missing = state.setdefault('missing_cards', {})
+                removed = 0
+                for key, entry in list(missing.items()):
+                    if args.all_missing or entry.get('ref', key) == ref:
+                        del missing[key]
+                        removed += 1
+                # Retain the diagnostic until a real successful lookup, but force
+                # even handled rows to retry on the next pass, without re-asking.
+                for record in state.get('unresolved_obligations', {}).values():
+                    if args.all_missing or record.get('card') == ref:
+                        record.pop('checked_at', None)
+                write_json(state_path, state)
+            print(f'RECONCILE forget_missing removed={removed}')
+            return 0
+        if args.all_missing:
+            parser.error('--all is only supported by forget-missing')
         if args.command == 'abandon-answer':
             manifest.writable()
             if not args.answer_id or not args.reason or args.dry_run:

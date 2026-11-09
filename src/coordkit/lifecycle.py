@@ -331,10 +331,26 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
             # Shadow schedules no reconciler; a stamp left by a rolled-back live pass only ages (apply archives it).
             return 'shadow: reconciler not scheduled'
         state = read_json(manifest.paths.root/'reconcile/state.json', {})
-        stamp = state.get('last_completed', state.get('last_run'))
-        if stamp is not None and time.time()-stamp > 2*manifest.reconciler.interval_seconds:
-            raise ManifestError('reconciler overdue beyond two intervals')
-        return 'last reconciliation within two intervals or not started'
+        stamp = state.get('last_completed', state.get('started_at', state.get('last_run')))
+        interval = manifest.reconciler.interval_seconds
+        if stamp is None:
+            return 'not started'
+        age = max(0, time.time()-stamp)
+        detail = f'age={age:.0f}s interval={interval}s deadline={2*interval}s'
+        if age > 2*interval:
+            raise ManifestError('reconciler overdue beyond two intervals; '+detail)
+        return 'last reconciliation within two intervals; '+detail
+    def unresolved_obligations():
+        if manifest.mode == 'shadow':
+            return 'shadow: reconciler not scheduled'
+        path = manifest.paths.root/'reconcile/state.json'
+        unresolved = read_json(path, {}).get('unresolved_obligations', {})
+        if unresolved:
+            cards = {row.get('card') for row in unresolved.values() if row.get('card')}
+            sample = ','.join(sorted(unresolved)[:5])
+            return (f'WARN unresolved obligations={len(unresolved)} cards={len(cards)} '
+                    f'sample={sample}; details={path}')
+        return 'no unresolved obligation cards'
     def deadletters():
         if not manifest.agentctl.pools:
             return 'absent (optional)'
@@ -372,6 +388,7 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
     check('manifest',lambda:manifest.validate_launchd() if manifest.launchd.path else 'services unconfigured (optional)')
     check('binaries',binaries); check('anx',identity); check('agentctl',pools)
     check('reconciler_age',reconciler_age)
+    check('unresolved_obligations',unresolved_obligations)
     check('github',github); check('launchd',jobs); check('dead_letters',deadletters); check('shadow_guard',guard)
     from .relay import health as relay_health
     check('relay', lambda: relay_health(manifest))
