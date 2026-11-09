@@ -8,7 +8,7 @@ from unittest.mock import patch
 from coordkit import lane
 from coordkit.manifest import ManifestError, load, parse_selector
 from coordkit.process import ToolError
-from coordkit.state import write_json
+from coordkit.state import read_json, write_json
 from tests.support import FakeCase
 
 
@@ -103,3 +103,29 @@ class LaneLaunchTests(FakeCase):
         plan = self.plan(selector={'family': 'kimi'})
         lane.launch_run(self.manifest, plan, '-r1', pool='implement')
         self.assertEqual(self.delegate_request()['selector']['family'], 'kimi')
+
+    def test_autocontinue_after_capacity_fallback_keeps_the_fallback_route(self):
+        plan = self.plan(selector={'family': 'kimi'}, execution_id='exec-old', phase='running',
+                         started=time.time())
+        write_json(Path(plan['plan_file']), plan)
+        self.manifest.lane.capacity_fallback = ['plan']
+        self.manifest.lane.capacity_relaunch_max = 1
+        capacity = {'state': 'cancelled', 'failure': {'code': 'provider_capacity'}}
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                patch.object(lane.AgentctlClient, 'await_result',
+                             side_effect=[ToolError('agentctl', 10, 'capacity'), 'done', 'done']), \
+                patch.object(lane.AgentctlClient, 'status', return_value=capacity), \
+                patch.object(lane, 'can_continue', side_effect=[True, False]), \
+                patch.object(lane, 'unread', return_value=[{'id': 'ob-1'}]):
+            self.assertEqual(lane.watch(self.manifest, plan), 0)
+        requests = [row['request'] for row in self.calls()
+                    if row['tool'] == 'agentctl' and 'delegate' in row['args']]
+        self.assertEqual(len(requests), 2)
+        # The plan was adopted mid-run, so both visible launches are the fallback
+        # and its continuation. Neither may reapply the pinned capacity selector.
+        for request in requests:
+            self.assertEqual(request['selector'],
+                             {'pool': 'plan', 'settings': {'access': 'read_only'}})
+        saved = read_json(Path(plan['plan_file']))
+        self.assertEqual((saved['pool'], saved.get('selector'), saved['relaunches']),
+                         ('plan', None, 0))

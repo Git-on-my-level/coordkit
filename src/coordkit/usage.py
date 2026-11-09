@@ -1,5 +1,6 @@
 """Read-only, account- and workspace-scoped transcript usage. No harness control."""
 from collections import Counter
+import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
@@ -249,37 +250,65 @@ def _opencode_counters(data):
             'cache_creation_input_tokens': _count(cache.get('write', tokens.get('cache_write')))}
 
 
-def _opencode_is_wal(path):
-    """Read the SQLite header directly: byte 18 is the file write version (2 = WAL)."""
+OPENCODE_SNAPSHOT_ATTEMPTS = 4
+
+
+def _stat_key(path):
+    """Identity, size and mtime of a live store file, or None when it is absent."""
     try:
-        with Path(path).open('rb') as stream:
-            header = stream.read(20)
+        info = Path(path).stat()
     except OSError:
-        return False
-    return len(header) >= 20 and header[:16] == b'SQLite format 3\x00' and header[18] == 2
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
+def _copy_opencode_store(path, copy):
+    """Copy the store plus its WAL; a vanished WAL simply means the store has none."""
+    wal = Path(str(path) + '-wal')
+    target_wal = Path(str(copy) + '-wal')
+    before = (_stat_key(path), _stat_key(wal))
+    shutil.copyfile(path, copy)
+    try:
+        shutil.copyfile(wal, target_wal)
+    except FileNotFoundError:
+        # A concurrent checkpoint may fold the WAL into the database and remove it.
+        target_wal.unlink(missing_ok=True)
+    return before == (_stat_key(path), _stat_key(wal))
+
+
+@contextlib.contextmanager
 def _opencode_snapshot(path):
-    """Copy a live WAL database and its WAL into a private directory to read.
+    """Yield a private copy of the live OpenCode store; never open it in place.
 
-    `immutable=1` is wrong for a live OpenCode store: the main file can change
-    while committed pages still sit in the WAL, so bypassing WAL recovery can
-    return stale or inconsistent counters. A private copy lets SQLite recover
-    that WAL normally without creating `-shm`/`-wal` beside the live store.
+    `immutable=1` is wrong for a live store: committed pages can still sit in
+    the WAL, so bypassing WAL recovery returns stale counters. Opening the
+    store read-only from its own directory is also unsafe: SQLite may create
+    `-shm`/`-wal` sidecars even for a read-only connection, and the journal
+    mode can change between a header check and connect. The copy is therefore
+    unconditional, and a private directory is removed on every path, including
+    failed copies.
+
+    Copying a database and WAL is not atomic with the writer. Each attempt
+    compares the source files before and after copying and retries when a
+    concurrent checkpoint moved pages between them, so a snapshot cannot
+    silently combine an old database with an emptied WAL.
     """
     directory = Path(tempfile.mkdtemp(prefix='coordkit-opencode-'))
-    copy = directory / OPENCODE_DB
-    shutil.copyfile(path, copy)
-    wal = Path(str(path) + '-wal')
-    if wal.exists():
-        shutil.copyfile(wal, Path(str(copy) + '-wal'))
-    return directory, copy
+    try:
+        copy = directory / OPENCODE_DB
+        for _ in range(OPENCODE_SNAPSHOT_ATTEMPTS):
+            if _copy_opencode_store(path, copy):
+                break
+        else:
+            raise OSError('opencode store changed while it was being snapshotted')
+        yield copy
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _opencode_connect(path):
-    # The caller passes either the untouched store when it is not in WAL mode,
-    # or a private snapshot. mode=ro plus query_only makes an accidental write
-    # impossible; any WAL sidecars belong to the snapshot directory.
+    # mode=ro plus query_only makes an accidental write impossible; any WAL
+    # sidecars belong to the caller's private snapshot directory.
     connection = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.25)
     connection.execute('PRAGMA query_only = ON')
     return connection
@@ -323,88 +352,82 @@ def _opencode_sessions(connection, tables, lane):
     return found[:OPENCODE_MAX_SESSIONS * 2], truncated
 
 
+def _read_opencode(connection, lane, path, *, since=None, until=None):
+    tables = _opencode_tables(connection)
+    sessions, truncated = _opencode_sessions(connection, tables, lane)
+    messages, invalid, unreadable = {}, 0, 0
+    total = 0
+    for table, session_id in sessions:
+        if total >= OPENCODE_MAX_MESSAGES:
+            truncated = True
+            break
+        source = 'session_message' if table == 'session_v2' else 'message'
+        if source not in tables:
+            continue
+        columns = 'id, data, time_created'
+        sql = f'SELECT {columns} FROM {source} WHERE session_id = ?'
+        if source == 'session_message':
+            sql += " AND type = 'assistant'"
+        sql += ' ORDER BY time_created DESC LIMIT ?'
+        try:
+            rows = connection.execute(sql, (session_id, min(OPENCODE_TAIL, OPENCODE_MAX_MESSAGES - total) + 1)).fetchall()
+        except sqlite3.Error:
+            unreadable += 1
+            continue
+        truncated |= len(rows) > OPENCODE_TAIL
+        for identifier, raw, created in rows[:OPENCODE_TAIL]:
+            if total >= OPENCODE_MAX_MESSAGES:
+                truncated = True
+                break
+            total += 1
+            try:
+                data = json.loads(raw)
+            except (ValueError, TypeError):
+                invalid += 1
+                continue
+            if not isinstance(data, dict):
+                invalid += 1
+                continue
+            if source == 'message' and data.get('role') != 'assistant':
+                continue
+            stamp = _epoch_millis((data.get('time') or {}).get('created')
+                                  if isinstance(data.get('time'), dict) else None)
+            if stamp is None:
+                stamp = _epoch_millis(created)
+            counters = _opencode_counters(data)
+            model = _opencode_model(data)
+            if stamp is None:
+                invalid += 1
+                continue
+            try:
+                at = datetime.fromtimestamp(stamp, timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                invalid += 1
+                continue
+            if since is not None and at < since or until is not None and at > until:
+                continue
+            key = identifier if isinstance(identifier, str) else (str(path), identifier)
+            messages[key] = dict(at=at, model=model, usage=counters or dict.fromkeys(TOKEN_FIELDS, 0),
+                                 valid=counters is not None)
+    ordered = sorted(messages.values(), key=lambda item: item['at'])
+    return ordered, truncated, invalid, unreadable
+
+
 def _opencode_messages(lane, *, since=None, until=None):
     """Assistant message counters from OpenCode v1/v2 SQLite rows; never writes."""
-    scratch = None
     try:
         path = opencode_store(lane)
     except (OSError, ValueError, TypeError):
         return [], False, 0, 1
     try:
-        if _opencode_is_wal(path):
-            scratch, source = _opencode_snapshot(path)
-        else:
-            source = path
-        connection = _opencode_connect(source)
-    except (sqlite3.Error, OSError, ValueError):
-        if scratch is not None:
-            shutil.rmtree(scratch, ignore_errors=True)
-        return [], False, 0, 1
-    try:
-        tables = _opencode_tables(connection)
-        sessions, truncated = _opencode_sessions(connection, tables, lane)
-        messages, invalid, unreadable = {}, 0, 0
-        total = 0
-        for table, session_id in sessions:
-            if total >= OPENCODE_MAX_MESSAGES:
-                truncated = True
-                break
-            source = 'session_message' if table == 'session_v2' else 'message'
-            if source not in tables:
-                continue
-            columns = 'id, data, time_created'
-            sql = f'SELECT {columns} FROM {source} WHERE session_id = ?'
-            if source == 'session_message':
-                sql += " AND type = 'assistant'"
-            sql += ' ORDER BY time_created DESC LIMIT ?'
+        with _opencode_snapshot(path) as source:
+            connection = _opencode_connect(source)
             try:
-                rows = connection.execute(sql, (session_id, min(OPENCODE_TAIL, OPENCODE_MAX_MESSAGES - total) + 1)).fetchall()
-            except sqlite3.Error:
-                unreadable += 1
-                continue
-            truncated |= len(rows) > OPENCODE_TAIL
-            for identifier, raw, created in rows[:OPENCODE_TAIL]:
-                if total >= OPENCODE_MAX_MESSAGES:
-                    truncated = True
-                    break
-                total += 1
-                try:
-                    data = json.loads(raw)
-                except (ValueError, TypeError):
-                    invalid += 1
-                    continue
-                if not isinstance(data, dict):
-                    invalid += 1
-                    continue
-                if source == 'message' and data.get('role') != 'assistant':
-                    continue
-                stamp = _epoch_millis((data.get('time') or {}).get('created')
-                                      if isinstance(data.get('time'), dict) else None)
-                if stamp is None:
-                    stamp = _epoch_millis(created)
-                counters = _opencode_counters(data)
-                model = _opencode_model(data)
-                if stamp is None:
-                    invalid += 1
-                    continue
-                try:
-                    at = datetime.fromtimestamp(stamp, timezone.utc)
-                except (OverflowError, OSError, ValueError):
-                    invalid += 1
-                    continue
-                if since is not None and at < since or until is not None and at > until:
-                    continue
-                key = identifier if isinstance(identifier, str) else (str(path), identifier)
-                messages[key] = dict(at=at, model=model, usage=counters or dict.fromkeys(TOKEN_FIELDS, 0),
-                                     valid=counters is not None)
-        ordered = sorted(messages.values(), key=lambda item: item['at'])
-        return ordered, truncated, invalid, unreadable
+                return _read_opencode(connection, lane, path, since=since, until=until)
+            finally:
+                connection.close()
     except (sqlite3.Error, OSError, ValueError, TypeError):
         return [], False, 0, 1
-    finally:
-        connection.close()
-        if scratch is not None:
-            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def opencode_usage(lane, since, until):

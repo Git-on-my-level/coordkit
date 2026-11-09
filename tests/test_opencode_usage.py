@@ -2,7 +2,10 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 import sqlite3
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from coordkit import usage
@@ -156,6 +159,101 @@ class OpenCodeUsageTests(FakeCase):
         self.assertEqual(reading.turns, 1)
         self.assertEqual(reading.input_tokens, 10)
         self.assertEqual(sorted(item.name for item in (self.root/'oc').iterdir()), before)
+
+    def test_non_wal_store_is_still_read_from_a_private_copy(self):
+        connection = self.store()
+        connection.execute("INSERT INTO session_v2 VALUES ('ses_repo', '/work/repo')")
+        self.message(connection, 'ses_repo', 'm1', self.assistant())
+        connection.commit(); connection.close()
+        live = Path(self.root/'oc'/'opencode.db')
+        seen = []
+        original = usage._opencode_connect
+
+        def capture(path):
+            seen.append(Path(path))
+            return original(path)
+
+        # No WAL header exists here, but the store must never be opened in place:
+        # OpenCode can switch it to WAL before a lazily opened connection reads it.
+        with patch.object(usage, '_opencode_connect', side_effect=capture):
+            reading = usage.collect([self.lane()], AT)[0][1]
+        self.assertEqual(reading.turns, 1)
+        self.assertEqual(len(seen), 1)
+        self.assertNotEqual(seen[0], live)
+        self.assertNotEqual(seen[0].parent, live.parent)
+        self.assertEqual(sorted(path.name for path in live.parent.iterdir()), ['opencode.db'])
+
+    def test_failed_snapshot_copy_leaves_no_private_directory(self):
+        connection = self.store()
+        connection.execute("INSERT INTO session_v2 VALUES ('ses_repo', '/work/repo')")
+        self.message(connection, 'ses_repo', 'm1', self.assistant())
+        connection.commit(); connection.close()
+        created = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording(*args, **kwargs):
+            path = Path(real_mkdtemp(*args, **kwargs))
+            created.append(path)
+            return str(path)
+
+        with patch.object(usage.tempfile, 'mkdtemp', side_effect=recording), \
+                patch.object(usage.shutil, 'copyfile', side_effect=OSError('disk full')):
+            reading = usage.collect([self.lane()], AT)[0][1]
+        self.assertEqual((reading.turns, reading.unreadable_files), (0, 1))
+        self.assertTrue(created)
+        for path in created:
+            self.assertFalse(path.exists(), f'private snapshot leaked: {path}')
+
+    def test_vanished_wal_is_treated_as_no_wal(self):
+        connection = self.store()
+        connection.execute('PRAGMA journal_mode = WAL')
+        connection.execute('PRAGMA wal_autocheckpoint = 0')
+        connection.execute("INSERT INTO session_v2 VALUES ('ses_repo', '/work/repo')")
+        self.message(connection, 'ses_repo', 'm1', self.assistant())
+        connection.commit()
+        live = Path(self.root/'oc'/'opencode.db')
+        wal = Path(str(live) + '-wal')
+        self.assertTrue(wal.exists())
+        real_copy = usage.shutil.copyfile
+        vanished = []
+
+        def copy(source, destination):
+            if str(source).endswith('-wal') and not vanished:
+                vanished.append(True)
+                Path(source).unlink()  # a checkpoint folded the WAL into the database
+                raise FileNotFoundError(source)
+            return real_copy(source, destination)
+
+        try:
+            with patch.object(usage.shutil, 'copyfile', side_effect=copy):
+                reading = usage.collect([self.lane()], AT)[0][1]
+        finally:
+            connection.close()
+        self.assertTrue(vanished)
+        self.assertEqual(reading.unreadable_files, 0)
+
+    def test_concurrent_checkpoint_retries_until_the_source_is_stable(self):
+        connection = self.store()
+        connection.execute("INSERT INTO session_v2 VALUES ('ses_repo', '/work/repo')")
+        self.message(connection, 'ses_repo', 'm1', self.assistant())
+        connection.commit(); connection.close()
+        live = Path(self.root/'oc'/'opencode.db')
+        real_copy = usage.shutil.copyfile
+        copies = []
+
+        def copy(source, destination):
+            source = str(source)
+            copies.append(source)
+            real_copy(source, destination)
+            if source == str(live) and copies.count(source) == 1:
+                # Simulate a checkpoint rewriting the database right after the copy.
+                info = live.stat()
+                os.utime(live, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+
+        with patch.object(usage.shutil, 'copyfile', side_effect=copy):
+            reading = usage.collect([self.lane()], AT)[0][1]
+        self.assertEqual(reading.turns, 1)
+        self.assertGreaterEqual(copies.count(str(live)), 2)
 
     def test_store_is_read_only_and_damaged_sources_fail_open(self):
         connection = self.store()

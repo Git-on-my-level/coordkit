@@ -47,6 +47,55 @@ class RateLimitShapeTests(FakeCase):
         marked = dict(generic, retry={'status': 429, 'retry_after_ms': 1000})
         self.assertEqual(lane.rate_limit(marked, now)['retry_after_ms'], 1000)
 
+    def test_non_finite_and_negative_retry_values_are_ignored_not_trusted(self):
+        now = time.time()
+        for value in (float('inf'), float('-inf'), float('nan'), -1, -1000, 10 ** 400):
+            with self.subTest(value=value):
+                evidence = lane.rate_limit(
+                    {'state': 'rate_limited', 'retry_after_ms': value}, now)
+                # The 429 marker is still evidence, but the delay itself is unusable.
+                self.assertIsNotNone(evidence)
+                self.assertIsNone(evidence['retry_after_ms'])
+                # An unusable delay must not keep stale evidence alive.
+                self.assertIsNone(lane.rate_limit(
+                    {'state': 'rate_limited', 'retry_after_ms': value,
+                     'updated_at': stamp(3 * 3600)}, now))
+
+    def test_huge_retry_delays_are_capped_instead_of_pinning_a_lane(self):
+        now = time.time()
+        huge = {'state': 'rate_limited', 'retry_after_ms': 10 ** 18,
+                'updated_at': stamp(3 * 3600)}
+        self.assertIsNone(lane.rate_limit(huge, now))
+        fresh = dict(huge, updated_at=stamp(30))
+        self.assertEqual(lane.rate_limit(fresh, now)['retry_after_ms'],
+                         lane.MAX_RETRY_AFTER_MS)
+
+    def test_non_finite_evidence_timestamps_are_discarded(self):
+        for value in (float('inf'), float('-inf'), float('nan'), '1e309', '-1e309', 'nan',
+                      -1, 10 ** 400):
+            with self.subTest(value=value):
+                self.assertIsNone(lane._epoch(value))
+
+    def test_future_reset_deadline_extends_freshness_only_to_the_cap(self):
+        now = time.time()
+        recent = {'failure': {'status': 429, 'occurred_at': stamp(10 * 60),
+                              'reset_at': now + 30 * 60}}
+        self.assertIsNotNone(lane.rate_limit(recent, now))
+        # A reset far beyond the cap cannot make hours-old evidence current.
+        far = {'failure': {'status': 429, 'occurred_at': stamp(3 * 3600),
+                           'reset_at': now + 10 * 365 * 86400}}
+        self.assertIsNone(lane.rate_limit(far, now))
+        # A past reset does not extend the base evidence window.
+        past = {'failure': {'status': 429, 'occurred_at': stamp(3 * 3600),
+                            'reset_at': stamp(3600)}}
+        self.assertIsNone(lane.rate_limit(past, now))
+
+    def test_provider_rate_limit_event_without_a_numeric_status(self):
+        now = time.time()
+        status = {'events': [{'type': 'retry', 'at': stamp(30),
+                              'error': {'type': 'provider.rate_limit'}}]}
+        self.assertIsNotNone(lane.rate_limit(status, now))
+
 
 class RateLimitRecoveryTests(FakeCase):
     def quiet(self, fn, *args, **kwargs):

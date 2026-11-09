@@ -3,6 +3,7 @@ import argparse
 import datetime as dt
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -180,17 +181,35 @@ HUNG_LIVENESS = {'unreachable', 'lost', 'exited', 'orphaned'}
 # and only while the evidence is fresh enough to still explain the silence.
 RATE_LIMIT_STATES = {'rate_limited', 'rate-limited', 'paused_rate_limit', 'paused_provider_rate_limit'}
 RATE_LIMIT_CODES = {'provider_rate_limit', 'provider_rate_limited', 'rate_limited',
-                    'rate-limit', 'provider.rate-limit', 'quota_exceeded'}
+                    'rate-limit', 'provider.rate-limit', 'provider.rate_limit',
+                    'quota_exceeded'}
 RATE_LIMIT_EVENT_TYPES = {'retry', 'rate_limit', 'rate-limit'}
 RATE_LIMIT_EVIDENCE_BOUND = 5 * 60.0
+# A malformed or hostile retry delay must not keep a lane alive forever.
+MAX_RETRY_AFTER_MS = 60 * 60 * 1000
+MAX_RESET_WINDOW = 60 * 60.0
+
+
+def _finite(value):
+    """True for an int/float that fits a float; huge JSON integers are not trusted."""
+    try:
+        return math.isfinite(value)
+    except (OverflowError, TypeError):
+        return False
 
 
 def _epoch(value):
-    """Best-effort epoch seconds from a numeric tick or an ISO timestamp."""
+    """Best-effort epoch seconds from a numeric tick or an ISO timestamp.
+
+    Non-finite and negative inputs are discarded rather than trusted: infinity
+    would otherwise make freshness checks pass forever.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return value / 1000 if value >= 10 ** 11 else value if value >= 0 else None
+        if not _finite(value) or value < 0:
+            return None
+        return value / 1000 if value >= 10 ** 11 else value
     if isinstance(value, str):
         text = value.strip()
         try:
@@ -200,7 +219,9 @@ def _epoch(value):
                 return parse_ts(text).timestamp()
             except (AttributeError, TypeError, ValueError):
                 return None
-        return number / 1000 if number >= 10 ** 11 else number if number >= 0 else None
+        if not _finite(number) or number < 0:
+            return None
+        return number / 1000 if number >= 10 ** 11 else number
     return None
 
 
@@ -269,10 +290,19 @@ def rate_limit(status, now=None):
     retry = found.get('retry_after_ms')
     if retry is None:
         retry = found.get('retryAfterMs')
-    retry = retry if type(retry) in (int, float) and retry >= 0 else None
+    retry = retry if type(retry) in (int, float) and _finite(retry) and retry >= 0 else None
+    if retry is not None:
+        retry = min(retry, MAX_RETRY_AFTER_MS)
     # A provider retry window makes its own evidence relevant for twice that long,
     # but a small 429 window must not pin a lane forever on a retained old event.
-    window = max(2 * (retry / 1000 if retry is not None else 0), RATE_LIMIT_EVIDENCE_BOUND)
+    # A future reset deadline (when the provider omits retry_after_ms) is also
+    # bounded evidence, so a long provider window is honoured only up to the cap.
+    window = RATE_LIMIT_EVIDENCE_BOUND
+    if retry is not None:
+        window = max(window, 2 * retry / 1000)
+    reset = _epoch(found.get('reset_at') or found.get('resets_at'))
+    if reset is not None and at is not None and reset > at:
+        window = max(window, min(reset - at, MAX_RESET_WINDOW))
     if at is None or at < now - window:
         return None
     return {'retry_after_ms': retry,
@@ -382,10 +412,18 @@ def _watch(manifest, plan):
                         raise Refusal('parked_execution_not_cancelled',execution)
                 attempts += 1
                 chain = manifest.lane.capacity_fallback or [plan['pool']]
+                next_pool = chain[min(attempts-1,len(chain)-1)]
+                # The fallback is now the active route. Adopt it so a later
+                # autocontinue does not revert to the capacity-limited pool (and
+                # its pinned selector) that just refused work. Staying on the
+                # plan's own pool keeps the selector the run was launched with.
+                if next_pool != plan['pool']:
+                    plan['pool'] = next_pool
+                    plan.pop('selector', None)
                 plan['relaunches'] = attempts
                 previous = execution
                 recovery = f'Reconcile effects from prior execution {previous} before continuing. Never repeat a completed side effect.\n\n'+plan['prompt']
-                execution = launch_run(manifest,plan,f'-r{attempts}',chain[min(attempts-1,len(chain)-1)],prompt=recovery)
+                execution = launch_run(manifest,plan,f'-r{attempts}',next_pool,prompt=recovery)
                 event(manifest,{'kind':'relaunched','execution_id':execution,'previous_execution_id':previous,'label':label})
                 print(f'LANE_RELAUNCHED {label} exec={execution} attempt={attempts}',flush=True)
                 continue
@@ -400,6 +438,10 @@ def _watch(manifest, plan):
             code, state = exc.exit_code, status['state']
         if code == 0 and can_continue(manifest,plan):
             plan['autocontinued'] = True
+            # A continuation is a fresh run on the active route; it gets its own
+            # capacity budget instead of inheriting exhausted fallback attempts.
+            plan['relaunches'] = 0
+            attempts = 0
             prompt = plan['prompt']+'\nAddress these unread obligations:\n'+json.dumps(unread(manifest,plan))
             previous = execution
             execution = launch_run(manifest,plan,'-ac',prompt=prompt)
