@@ -289,6 +289,35 @@ class QuestionContractTests(AddressedCase):
                     escalate.assert_not_called()
                     self.assertFalse(stored.get('auto_default_applied'))
 
+    def test_cached_answer_preserves_physical_first_reply_order(self):
+        for ago in (0, -60):  # equal timestamps and an incumbent with a clock ahead
+            with self.subTest(ago=ago), patch.object(questions, 'route'):
+                record, _ = questions.create(self.manifest, 'worker-ui', 'Use cache?', session_id=str(ago))
+            qid = record['qid']
+            earlier = self.incumbent_row('incumbent-' + qid, 'lead-a', 'worker-ui', 'answer',
+                                         'First answer', ago=ago, re=qid)
+            self.quiet(bus.main, ['post', '--from', 'lead-a', '--to', 'worker-ui', '--kind', 'answer',
+                                 '--re', qid, 'Later answer'], self.manifest)
+            stored = questions.load_all(self.manifest)[qid]
+            self.assertEqual(stored['bus_answer']['text'], 'Later answer')
+            self.assertEqual(questions.replies(self.manifest, self.rows(), stored)['id'], earlier['id'])
+            with patch.object(questions, 'deliver', return_value='waiter'):
+                self.quiet(questions.ladder, self.manifest, self.now + 1, rows=self.rows())
+            self.assertEqual(questions.load_all(self.manifest)[qid]['answer_id'], earlier['id'])
+
+    def test_evicted_cached_reply_precedes_later_answers(self):
+        record = dict(qid='q-test', asker='worker-ui')
+        saved = dict(id='first', ts=ts(self.now), seq=5, frm='lead-a', re='q-test', kind='answer', text='First')
+        record['bus_answer'] = saved
+        for newer in (dict(saved, id='later', seq=6, ts=ts(self.now - 60)),
+                      dict(saved, id='incumbent', ts=ts(self.now + 60))):
+            if newer['id'] == 'incumbent':
+                newer.pop('seq')
+            with self.subTest(newer=newer['id']):
+                self.assertEqual(questions.replies(self.manifest, [newer], record)['id'], 'first')
+        older = dict(saved, id='older', seq=4, ts=ts(self.now + 60))
+        self.assertEqual(questions.replies(self.manifest, [older], record)['id'], 'older')
+
     def test_legacy_tail_identity_matches_full_reader_and_settlement(self):
         # A nonzero byte tail and a record cap must both retain physical line
         # numbers, counting malformed and blank lines as the full reader does.

@@ -1,5 +1,6 @@
 """Unanswered coordination must converge without repeated wakes or ownerless work."""
 import json
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from coordkit import addressed, approvals, bus, escalation, mcp_server, questions
@@ -12,6 +13,11 @@ class ProcessDefaultsTests(AddressedCase):
         super().setUp()
         self.manifest.bus.mirror = False
         self.lease('lead-a')
+        # Grace-period assertions use self.now; posts must share that clock even
+        # when a loaded host takes several seconds to publish a test's rows.
+        clock = patch.object(bus, 'now', return_value=datetime.fromtimestamp(self.now, timezone.utc))
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def post(self, text='Use the cached result?', kind='ask', *flags):
         self.quiet(bus.main, ['post', '--from', 'worker-ui', '--to', 'lead-a',
@@ -187,6 +193,17 @@ class ProcessDefaultsTests(AddressedCase):
                 with self.subTest(kind=kind, text=text):
                     self.assertTrue(approvals.requires_owner(dict(kind=kind, text=text)))
 
+    def test_question_followed_by_explicit_approval_requires_owner(self):
+        for kind in ('approval', 'ruling', 'msg', 'answer', 'decision'):
+            for text in ('Can we deploy? Approved.', 'Green light? Permission granted.',
+                         'Approve deployment?\nGo ahead with deployment.'):
+                with self.subTest(kind=kind, text=text):
+                    flags = ('--subject', 'deployment', '--rollback', 'hold') if kind == 'decision' else ()
+                    row = self.post(text, kind, '--force', *flags)
+                    self.assertTrue(row['owner_missing'])
+                    finding, = approvals.findings(self.manifest, [row], self.now + 1801)
+                    self.assertEqual(finding['id'], row['id'])
+
     def test_only_ownership_clears_a_pending_approval(self):
         for resolution in ('owner', 'claim', 'ack'):
             with self.subTest(resolution=resolution):
@@ -197,11 +214,26 @@ class ProcessDefaultsTests(AddressedCase):
                 self.assertEqual(finding['id'], approval['id'])
                 owner_row = dict(approval, id='owner', kind='msg' if resolution == 'owner' else resolution,
                                  frm='worker-ui', text='I own it', re=approval['id'])
-                if resolution == 'owner':
+                if resolution in ('owner', 'ack'):
                     owner_row['owner'] = 'worker-ui'
-                else:
+                if resolution != 'owner':
                     owner_row['topic'] = 'general'  # resolve the reference's topic
                 self.assertEqual(approvals.findings(self.manifest, [*rows, owner_row], self.now + 1801), [])
+
+    def test_bare_acknowledgements_do_not_claim_an_ownerless_approval(self):
+        approval = self.post('Approved: deploy.', 'ruling')
+        self.quiet(bus.main, ['ack', approval['id'], '--from', 'lead-a', '--force'], self.manifest)
+        ack = self.rows()[-1]
+        self.assertEqual(ack['kind'], 'ack')
+        self.assertNotIn('owner', ack)
+        finding, = approvals.findings(self.manifest, self.rows(), self.now + 1801)
+        self.assertEqual(finding['id'], approval['id'])
+        for kind in ('ask', 'ruling'):
+            with self.subTest(acknowledged_kind=kind):
+                source = dict(approval, id='source', kind=kind)
+                bare = dict(ack, re='source', topic='general')
+                finding, = approvals.findings(self.manifest, [approval, source, bare], self.now + 1801)
+                self.assertIsNone(approvals.topics(self.manifest, [approval, source, bare], self.now + 1801)['result']['owner'])
 
     def test_later_owner_on_a_post_clears_and_approval_opt_out(self):
         self.post('Approved', 'approval')

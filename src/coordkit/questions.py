@@ -246,7 +246,7 @@ def track_bus_reply(manifest, row):
                 # The ladder still owns delivery and ANX withdrawal. Save only
                 # the first answer, including replies to prior escalation hops.
                 record.setdefault('bus_answer', {k: answer[k] for k in
-                                  ('id', 'ts', 'frm', 're', 'kind', 'text') if k in answer})
+                                  ('id', 'ts', 'seq', 'frm', 're', 'kind', 'text') if k in answer})
     update(manifest, apply)
 
 
@@ -808,19 +808,33 @@ def replies(manifest, rows, record):
     """The first real answer to this question from anyone but its asker and coordkit. A receipt
     ("received", an `ack` of received/blocked, or bare acknowledgement text) is not an answer."""
     ids = {record['qid'], record.get('bus_id'), *record.get('bus_ids', [])} - {None}
-    if isinstance(record.get('bus_answer'), dict):
-        rows = [record['bus_answer'], *rows]
-    for row in rows:
+    def matches(row):
         if not isinstance(row, dict) or not isinstance(row.get('text', ''), str):
-            continue
+            return False
         if row.get('re') not in ids or row.get('frm') in (record['asker'], 'coordkit'):
-            continue
+            return False
         if row.get('kind') not in ('answer', 'decision', 'ruling', 'approval', 'msg'):
-            continue
+            return False
         if row.get('ack') in ('received', 'blocked') or RECEIPT.match(row.get('text') or ''):
-            continue
-        return row
-    return None
+            return False
+        return True
+    answers = [row for row in rows if matches(row)]
+    saved = record.get('bus_answer')
+    if not matches(saved):
+        return next(iter(answers), None)
+    if not answers:
+        return saved
+    first = answers[0]
+    # When both are present, the supplied physical log order is authoritative,
+    # even for incumbent rows with absent sequences or equal/skewed timestamps.
+    if any(row.get('id') == saved.get('id') for row in answers):
+        return first
+    if type(first.get('seq')) is int and type(saved.get('seq')) is int:
+        return first if first['seq'] < saved['seq'] else saved
+    try:
+        return first if parse_ts(first['ts']) < parse_ts(saved['ts']) else saved
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return saved
 
 
 DEFAULT_ROLLBACK = 'post a correcting answer --re to the original ask; re-ask with new information to replace the default'

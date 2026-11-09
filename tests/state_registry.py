@@ -174,6 +174,11 @@ row('questions.py', 'settlement_scan|default_deferred_swept|default_deferred_dig
     'file replacement, truncation or boundary change restarts proof; real answer or verified default settles; closed retention seven days',
     'each call scans at most 256 KiB and 10000 complete rows; final proof and sequence-hint repair run under bus flock',
     'sweep names qid and reason before marking swept; hourly digest marks digested only after successful publication')
+row('questions.py', 'bus_answer',
+    'track_bus_reply persists the first matching harness reply with its timestamp and append sequence',
+    'ladder consumes it through normal close/delivery and ANX withdrawal; inert after closure and pruned with the closed record after seven days',
+    'question store caps bound size; answered records retry delivery each sweep; closed retention seven days',
+    'undelivered answers reach the relay; an unknown asker closes via relay after UNBOUND_DELIVERY_WINDOW')
 row('questions.py', 'refs|.txt|coord-|id|writer:spill_row', 'generated escalation or default answer exceeds the bus text cap',
     'structured ref retains complete text; append-only evidence is kept', 'bus.text_cap; archive has no latch',
     'question receipt and normal CLI/MCP ref readers')

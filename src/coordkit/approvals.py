@@ -12,14 +12,12 @@ def requires_owner(row):
     if row.get('no_owner_required') or row.get('copy_of'):
         return False
     text = row.get('text')
-    if isinstance(text, str):
-        # Classify the approval statement, not a later follow-up question.
-        statement = re.split(r'(?<=[.!?])\s+|\n', text.strip(), maxsplit=1)[0]
-        if statement.endswith('?'):
-            return False
-    return (row.get('kind') in ('approval', 'ruling') or
-            row.get('kind') in ('answer', 'decision', 'msg') and
-            isinstance(row.get('text'), str) and bool(APPROVES.match(row['text'])))
+    statements = re.split(r'(?<=[.!?])\s+|\n', text.strip()) if isinstance(text, str) else []
+    # Explicit affirmative statements count on either side of a question.
+    affirmative = any(APPROVES.match(s) and not s.rstrip().endswith('?') for s in statements)
+    if row.get('kind') in ('approval', 'ruling'):
+        return affirmative or not statements or not statements[0].endswith('?')
+    return row.get('kind') in ('answer', 'decision', 'msg') and affirmative
 
 
 def topics(manifest, rows, at):
@@ -47,7 +45,7 @@ def topics(manifest, rows, at):
             topic = topic_by_id.get(row['re'], topic)
         topic_by_id[row['id']] = topic
         item = result.setdefault(topic, dict(owner=None, approval=None, stamp=0))
-        owner = row.get('owner') or (row.get('frm') if row.get('kind') in ('claim', 'ack') else None)
+        owner = row.get('owner') or (row.get('frm') if row.get('kind') == 'claim' else None)
         if isinstance(owner, str) and owner.strip() and owner not in ('all', 'lead'):
             item['owner'] = owner
         if requires_owner(row):
