@@ -205,6 +205,77 @@ class ReconcileCardCacheTests(FakeCase):
         self.assertEqual(self.state()['started_at'], 12000)
         self.assertEqual(self.state()['last_completed'], 11710)
 
+    def _obligation(self, kind, ident):
+        path = self.manifest.paths.bus_log
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(id=ident, kind=kind, owner='worker', frm='worker', to='lead',
+                                        origin='coordkit', subject='release-train', text='needs action',
+                                        ts='1970-01-01T00:00:00Z'))+'\n')
+        self.manifest.bus.mirror = False
+        state = self.manifest.paths.root/'reconcile/state.json'
+        if state.exists():
+            state.unlink()
+
+    def _passes(self, *ats, asks=None):
+        # Append before returning so a later failure in the pass still leaves the count.
+        if asks is None:
+            asks = []
+        for at in ats:
+            with contextlib.redirect_stdout(io.StringIO()), patch.object(reconcile.escalation, 'ask',
+                    side_effect=lambda *args, **kwargs: asks.append(args)), patch.object(bus, 'main', return_value=0):
+                reconcile.reconcile(self.manifest, at=at)
+        return asks
+
+    def _doctor_line(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            lifecycle.doctor(self.manifest)
+        return next(line for line in out.getvalue().splitlines() if 'DOCTOR unresolved_obligations' in line)
+
+    def test_ambiguous_mapping_clears_after_linkage_is_repaired_without_reasking(self):
+        # Two execution cards, then one. The handled ask must not stick card=None.
+        self._obligation('ruling', 'map-1')
+        linked = lambda *cards: {'tool': 'agentctl', 'contains': ['recent'], 'json': {'ok': True, 'result': {
+            'executions': [{'id': f'e{i}', 'labels': ['worker', f'anx.card.{card}'], 'state': 'running'}
+                           for i, card in enumerate(cards)]}}}
+        self.respond(linked('alpha', 'beta'))
+        asks = self._passes(10000, 10300)
+        record = self.state()['unresolved_obligations']['map-1']
+        self.assertIsNone(record['card'])
+        self.assertIn('ambiguous', record['detail'])
+        self.assertIn('ruling:map-1', self.state()['fired'])
+        self.assertEqual(len(asks), 1)
+        self.assertIn(' red ', self._doctor_line())
+        self.respond(linked('alpha'))
+        before = len(self.lookups())
+        with patch.object(reconcile, 'report', side_effect=RuntimeError('later failure')), self.assertRaises(RuntimeError):
+            self._passes(10600, asks=asks)
+        self.assertEqual(len(self.lookups()), before+1)
+        self.assertIn('card:alpha', self.lookups()[-1]['args'])
+        self.assertEqual(self.state()['unresolved_obligations'], {})
+        self.assertEqual(len(asks), 1)
+        self.assertIn(' green ', self._doctor_line())
+
+    def test_agentctl_mapping_error_clears_after_linkage_returns_without_reasking(self):
+        self.manifest.loop.fail_report_after = 1
+        self._obligation('blocker', 'map-1')
+        self.respond({'tool': 'agentctl', 'contains': ['--label'], 'exit': 6,
+                      'json': {'ok': False, 'error': {'code': 'unavailable'}}})
+        asks = self._passes(10000, 10300)
+        record = self.state()['unresolved_obligations']['map-1']
+        self.assertIsNone(record['card'])
+        self.assertIn('unavailable', record['detail'])
+        self.assertIn('blocker:map-1', self.state()['fired'])
+        self.assertIn('wake:blocker:map-1', self.state()['fired'])
+        self.assertEqual(len(asks), 1)
+        self.assertEqual(len(self.lookups()), 0)
+        self.respond({'tool': 'agentctl', 'contains': ['--label'], 'json': {'ok': True, 'result': {'executions': [
+            {'id': 'e1', 'labels': ['worker', 'anx.card.alpha'], 'state': 'running'}]}}})
+        with patch.object(reconcile, 'report', side_effect=RuntimeError('later failure')), self.assertRaises(RuntimeError):
+            self._passes(10600, asks=asks)
+        self.assertEqual(self.state()['unresolved_obligations'], {})
+        self.assertEqual(len(asks), 1)
+        self.assertIn(' green ', self._doctor_line())
+
     def test_doctor_uses_completion_and_configured_interval(self):
         self.manifest.reconciler.interval_seconds = 900
         path = self.manifest.paths.root/'reconcile/state.json'

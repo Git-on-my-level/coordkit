@@ -120,13 +120,16 @@ def reconcile(manifest, dry_run=False, at=None):
                     resolutions[key] = exc
             if isinstance(resolutions[key], ToolError):
                 raise resolutions[key]
-            unresolved.pop(row['id'], None)
+            if unresolved.pop(row['id'], None) is not None and not dry_run:
+                write_json(state_path, state)
             return resolutions[key]
         except ToolError as exc:
             ref = next((ref for ref, result in lookups.items() if result is exc), None)
-            unresolved[row['id']] = {'card': ref, 'owner': row['owner'], 'detail': str(exc)}
-            if not dry_run:
-                write_json(state_path, state)
+            record = {'card': ref, 'owner': row['owner'], 'detail': str(exc)}
+            if unresolved.get(row['id']) != record:
+                unresolved[row['id']] = record
+                if not dry_run:
+                    write_json(state_path, state)
             return manifest.escalation.card
     def ask(check,key,card,situation,recommend):
         action(check,key,card,lambda:escalation.ask(manifest,card,kind=check,situation=situation,
@@ -256,6 +259,13 @@ def reconcile(manifest, dry_run=False, at=None):
             closed = True
     if closed and not dry_run:
         write_json(state_path, state)
+    # Ambiguous linkage and agentctl errors raise before resolve_card, leaving
+    # card=None. A later lookup cannot match that, so retry the mapping. A fired
+    # ask receipt still suppresses the ask.
+    open_rows = {row['id']: row for row in rulings + blockers}
+    for key, record in list(unresolved.items()):
+        if record.get('card') is None and key in open_rows:
+            obligation_card(open_rows[key])
     for row in rulings:
         if not since_adoption(row):
             continue
