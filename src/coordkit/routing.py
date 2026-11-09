@@ -226,14 +226,23 @@ def _store_identity(manifest, name, via, identity, *, register=False):
     return update_json(home(manifest)/'register.json', transform)[name]
 
 
-def write_register(manifest, name, via, identity=None):
+def write_register(manifest, name, via, identity=None, *, env=None):
     """First local post/ack/wait makes a name routable; manifest policy wins."""
-    if internal_name(manifest, name) or name in cfg(manifest).agents:
+    if internal_name(manifest, name):
         return
     with locked(home(manifest)/'register.lock'):
         previous = ((read_json(home(manifest)/'register.json', {}) or {}).get(name) or {}).get('identity') or {}
-        record = identity_sources(manifest, name, stored=previous) if identity is None else clean_identity(identity)
-        return _store_identity(manifest, name, via, probe_identity(record), register=True)
+        record = identity_sources(manifest, name, env=env, stored=previous) if identity is None else clean_identity(identity)
+        return _store_identity(manifest, name, via, probe_identity(record), register=name not in cfg(manifest).agents)
+
+
+def register_activity(manifest, name, via, *, env=None):
+    """Optional metadata cannot fail an otherwise successful post, ack or wait."""
+    import logging
+    try:
+        return write_register(manifest, name, via, env=env)
+    except Exception as exc:
+        logging.getLogger(__name__).warning('optional %s registration for %s failed (%s)', via, name, type(exc).__name__)
 
 
 def refresh_identity(manifest, name):
@@ -250,7 +259,9 @@ def refresh_identity(manifest, name):
         record = identity_sources(manifest, name, stored=previous)
         comparable = {k: v for k, v in previous.items() if k not in {'pid', 'pid_started', 'refreshed_at'}}
         changed = {k: v for k, v in record.items() if k not in {'pid', 'pid_started'}} != comparable
-        if not changed or 0 <= time.time() - previous.get('refreshed_at', 0) < duration(cfg(manifest).heartbeat_every):
+        if 0 <= time.time() - previous.get('refreshed_at', 0) < duration(cfg(manifest).heartbeat_every):
+            return
+        if not changed and identity_pid(previous) is not None:
             return
         return _store_identity(manifest, name, 'hook', probe_identity(record))
 

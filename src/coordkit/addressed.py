@@ -166,9 +166,9 @@ def listening(manifest, name, at=None, probe=None, rows=None, *, waiter_only=Fal
     for row in rows:
         if row.get('frm') != name or row.get('copy_of') or row.get('question'):
             continue
-        # Question adapters synthesize rows on behalf of blocked askers; those
-        # and relay-applied traffic cannot prove the sender is a local listener.
-        if str(row.get('origin', '')).startswith('relay:'):
+        # Synthetic question rows, connector posts and relay-applied traffic
+        # cannot prove that the sender is a local listener.
+        if row.get('origin') == 'mcp' or str(row.get('origin', '')).startswith('relay:'):
             continue
         try:
             posted = parse_ts(row['ts']).timestamp()
@@ -651,7 +651,7 @@ def _sweep(manifest, rows=None, at=None, probe=None, dry_run=False, out=print):
 
 # -- CLI --------------------------------------------------------------------------------------------
 
-def send(manifest, frm, to, text, kind='ask', urgent=False, re_id=None, topic='general', extra=()):
+def send(manifest, frm, to, text, kind='ask', urgent=False, re_id=None, topic='general', extra=(), *, origin='coordkit'):
     from . import bus
     manifest.writable()
     argv = ['post', '--from', frm, '--to', to, '--kind', kind, '--topic', topic,
@@ -659,7 +659,7 @@ def send(manifest, frm, to, text, kind='ask', urgent=False, re_id=None, topic='g
     if re_id:
         argv += ['--re', re_id]
     bus.LAST_POST = None
-    bus.main(argv + [text], manifest)
+    bus.main(argv + [text], manifest, origin=origin)
     outcome = (bus.LAST_POST or (None, None))[1]
     if to != 'all' and outcome is None and target_kind(manifest, to) is None:
         print(f'NOT_REGISTERED {to}: no waiter lease can be checked; register it in [addressed.agents]', file=sys.stderr)

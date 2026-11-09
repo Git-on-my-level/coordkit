@@ -415,11 +415,12 @@ def line(r, full=False):
             pass
     return f"{r.get('id', '-')} {r['ts']} {r['frm']}→{r['to']} [{r.get('kind', 'msg')}/{r.get('topic', 'general')}] {text}"
 
-def _main(argv, *, site_local=False):
+def _main(argv, *, site_local=False, origin='coordkit'):
     from .ops import bus_parser
     p = bus_parser()
     o = p.parse_args(argv)
     o.site_local = site_local
+    o.origin = origin
     if o.cmd == 'post':
         targets = o.to if isinstance(o.to, list) else [o.to]
         targets = list(dict.fromkeys(resolve(t) for item in targets for t in item.split(',')))
@@ -473,6 +474,7 @@ def dispatch(o):
             dispatch(argparse.Namespace(cmd='ack', id=o.id, frm=o.frm, owner=None, force=False, note='replied'))
         return
     if o.cmd == 'post':
+        from .routing import register_activity
         # Validate the recipient so work does not silently reach an unknown lane.
         # Known but silent for IDLE_HOURS -> post it AND copy the lead so it isn't lost.
         rows = read()
@@ -496,6 +498,7 @@ def dispatch(o):
                 if old['publication_hash'] != signature:
                     raise ManifestError('publication_id_conflict: '+o.id)
                 append([])
+                register_activity(CONFIG, o.frm, 'post', env={} if getattr(o, 'origin', None) == 'mcp' else None)
                 print(f'already posted id={o.id}')
                 return
             if old:
@@ -509,6 +512,7 @@ def dispatch(o):
                 if actual != payload:
                     raise ManifestError('publication_id_conflict: '+o.id)
                 append([])
+                register_activity(CONFIG, o.frm, 'post', env={} if getattr(o, 'origin', None) == 'mcp' else None)
                 print(f'already posted id={o.id}')
                 return
         # Addressed bus (brief 8.2/8.3): a registered name or role is checked against waiter leases, never
@@ -675,12 +679,13 @@ def dispatch(o):
             text = text[:max(0, room - len(suffix))].rstrip() + suffix
             print(f'note: post text is capped at {TEXT_CAP} chars; the full text is in {spill}. '
                   'Next time write detail to a file and pass --ref PATH.', file=sys.stderr)
-        rec = dict(ts=now().isoformat(timespec='seconds'), id=rid, origin='coordkit', frm=o.frm, to=o.to,
+        rec = dict(ts=now().isoformat(timespec='seconds'), id=rid, origin=getattr(o, 'origin', 'coordkit'), frm=o.frm, to=o.to,
                    topic=o.topic, kind=o.kind, text=text, text_hash=hashlib.sha256(o.text.encode()).hexdigest())
         if o.id: rec['publication_hash'] = signature
         if o.owner: rec['owner'] = o.owner
         if o.re: rec['re'] = o.re
-        if spill_ref: rec['ref'] = spill_ref
+        if spill_ref:
+            rec['ref'] = rec['spill_ref'] = spill_ref
         if o.ref: rec['ref'] = str(pathlib.Path(o.ref).resolve())
         if o.signal: rec['signal'] = o.signal
         if prs: rec['prs'] = prs
@@ -699,8 +704,7 @@ def dispatch(o):
         # Addressed escalation runs before the ANX projection: a mirror failure (exit 1) must never
         # stop a deaf/vacant alert from reaching the fallback, relay file or pager.
         append(recs, project=not target)
-        from .routing import write_register
-        write_register(CONFIG, o.frm, "post")
+        register_activity(CONFIG, o.frm, 'post', env={} if rec['origin'] == 'mcp' else None)
         global LAST_POST
         LAST_POST = (rec, addressed.after_post(CONFIG, rec, role) if target else None)
         if target:
@@ -717,8 +721,8 @@ def dispatch(o):
             append([dict(ts=now().isoformat(timespec='seconds'), id=secrets.token_hex(3), origin='coordkit', frm=o.frm, to=work['frm'],
                          topic=work.get('topic', 'general'), kind='ack', re=o.id, owner=owner,
                          text=o.note or (f'picked up by {owner}' if owner == o.frm else f'reassigned to {owner}'))])
-            from .routing import write_register
-            write_register(CONFIG, o.frm, 'ack')
+            from .routing import register_activity
+            register_activity(CONFIG, o.frm, 'ack')
             print(f'acked {o.id} owner={owner}')
             return
         ruling = next((r for r in rows if r.get('id') == o.id and r.get('kind') == 'ruling'), None)
@@ -733,8 +737,8 @@ def dispatch(o):
         append([dict(ts=now().isoformat(timespec='seconds'), id=secrets.token_hex(3), origin='coordkit', frm=o.frm, to=ruling['frm'],
                      topic=ruling.get('topic', 'general'), kind='ack', re=o.id,
                      text=(o.note or 'ack') + ('' if ruling.get('owner') == o.frm else f' [forced; owner {ruling.get("owner")}]'))])
-        from .routing import write_register
-        write_register(CONFIG, o.frm, 'ack')
+        from .routing import register_activity
+        register_activity(CONFIG, o.frm, 'ack')
         print(f'acked {o.id} ({age_minutes(ruling)} min after the ruling)')
     elif o.cmd == 'open-rulings':
         rows = [r for r in open_rulings(read()) if age_minutes(r) >= o.min_age]
@@ -821,8 +825,8 @@ def dispatch(o):
     elif o.cmd == 'wait':
         if not o.to:
             print('refused: bus wait needs --to LANE, --signal NAME or --subject SUBJECT', file=sys.stderr); sys.exit(2)
-        from .routing import write_register
-        write_register(CONFIG, o.to, 'wait')
+        from .routing import register_activity
+        register_activity(CONFIG, o.to, 'wait')
         kinds = {k.strip() for k in o.kinds.split(',') if k.strip()}
         start = get_cursor(o.to, 'wait', None)
         if start is None: start = read_from(10 ** 12)[0]  # first wait: only messages from now on
@@ -862,7 +866,7 @@ def dispatch(o):
         print('topics:'); [print(f'  {t}: {n}') for t, n in topics.most_common(15)]
         via_lead = sum(n for (a, b), n in pairs.items() if 'lead' in (a, b)); print(f'through lead: {via_lead}/{len(rows)}')
 
-def main(argv=None, manifest=None, *, site_local=False):
+def main(argv=None, manifest=None, *, site_local=False, origin='coordkit'):
     argv = list(argv or [])
     no_mirror = '--no-mirror' in argv
     argv = [arg for arg in argv if arg != '--no-mirror']
@@ -878,5 +882,5 @@ def main(argv=None, manifest=None, *, site_local=False):
         STATE.mkdir(parents=True, exist_ok=True)
         with (STATE / 'bus.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            return _main(argv, site_local=site_local)
-    return _main(argv, site_local=site_local)
+            return _main(argv, site_local=site_local, origin=origin)
+    return _main(argv, site_local=site_local, origin=origin)

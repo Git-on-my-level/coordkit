@@ -42,8 +42,8 @@ class AutoRegisterTests(AddressedCase):
         self.assertNotIn('identity', self.rows()[0])
         self.assertNotIn(str(self.root/'account'), self.manifest.paths.bus_log.read_text())
 
-    def test_skip_internal_manifest_and_invalid_names(self):
-        for name in ('lead', 'coordkit', 'service-agent', 'coordkit-report', 'lead-a', 'all', '../bad'):
+    def test_skip_internal_and_invalid_names(self):
+        for name in ('lead', 'coordkit', 'service-agent', 'coordkit-report', 'all', '../bad'):
             routing.write_register(self.manifest, name, 'post')
         self.assertEqual(self.register(), {})
 

@@ -222,7 +222,11 @@ def deliver(manifest, payload, out=None):
         write_json(cursor, {'file': file_identity, 'offset': offset})
         # Optional metadata must never replay an already-flushed delivery on failure.
         from .routing import refresh_identity
-        refresh_identity(manifest, name)
+        try:
+            refresh_identity(manifest, name)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning('optional hook identity for %s failed (%s)', name, type(exc).__name__)
 
 
 def run_hook(manifest, stdin=None, out=None):

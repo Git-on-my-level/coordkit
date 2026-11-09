@@ -408,18 +408,18 @@ def page(items, key, args, project=None, sort_field=None, reverse=False, **extra
     return result
 
 
+# Presentation only: a text marker never authorizes a file read.
 SPILL = re.compile(r'\[full: ([^\]]*)\]')
 
 
 def ref_file(manifest, row, full=False):
     """Trust only manifest-derived roots; resolve the candidate to reject traversal and symlink escapes.
 
-    The bus caps row text and spills the rest to a refs file named in a `[full: PATH]` marker. full=true (or a
-    row with no ref) reads that file, so remote readers see what was cut."""
+    Only structured refs written by the bus grant access. Text markers are untrusted
+    caller input, even when they look like the bus's spill notice."""
     ref = row.get('ref')
-    spill = SPILL.search(str(row.get('text') or ''))
-    if spill and (full or not ref):
-        ref = spill.group(1).strip()
+    if row.get('spill_ref') and (full or not ref):
+        ref = row['spill_ref']
     if not isinstance(ref, str) or not ref:
         raise ValueError('row has no ref file')
     swarm = manifest.paths.bus_log.parent.resolve()
@@ -608,8 +608,15 @@ def agent_rows(manifest, rows, args, at):
         from . import routing, usage
         identity = routing.roster_identity(manifest, name)
         lane = next((lane for lane in manifest.lanes if lane.name == name), None)
-        model, model_at = usage.observed_model(usage.transcript_sources(lane) if lane else
-                                               routing.transcript_paths(manifest, name, identity))
+        paths = routing.transcript_paths(manifest, name, identity)
+        if identity.get('transcript_path'):
+            paths = [Path(identity['transcript_path'])]
+        elif lane and not paths:
+            # Usage includes nested subagents; identity describes only the parent.
+            shared = sum(usage.transcript_dir(other) == usage.transcript_dir(lane) for other in manifest.lanes)
+            if shared == 1:
+                paths = list(usage.transcript_dir(lane).glob('*.jsonl'))
+        model, model_at = usage.observed_model(paths)
         config_dir = identity.get('config_dir')
         identity_fields = {key: clip(identity.get(key), 4096) or None for key in
                            ('config_dir', 'session_id', 'transcript_path', 'permission_mode')}
@@ -925,7 +932,7 @@ def write_call(manifest, tool, args):
         sender = name_arg(args, 'as', required=False) or manifest.mcp.identity
         if sender != manifest.mcp.identity and sender not in manifest.mcp.post_as:
             raise ValueError(f'as must be one of {manifest.mcp.post_as or "(none configured)"}')
-        rc, lines = quiet(addressed.send, manifest, sender, to, text, kind=kind, re_id=re_id)
+        rc, lines = quiet(addressed.send, manifest, sender, to, text, kind=kind, re_id=re_id, origin='mcp')
         posted = bus.LAST_POST[0] if bus.LAST_POST else None
         return {'ok': rc in (0, None, addressed.EXIT_DEAF) and posted is not None, 'rc': rc,
                 'id': posted and posted.get('id'), 'outcome': [clip(l, 160) for l in lines][-5:]}

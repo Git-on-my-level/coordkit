@@ -4,7 +4,7 @@ Optional stdlib MCP over Streamable HTTP: stateless JSON-RPC 2.0 on `POST /mcp`,
 
 All requests require `Authorization: Bearer <secret>`. The secret file defaults to `~/.coordkit-mcp/connector.secret` (mode 0600, outside repositories); override with `COORDKIT_MCP_SECRET_FILE`. Missing or unsafe permissions fail closed. There is no built-in OAuth provider: verify your client's bearer-header support before exposing this endpoint.
 
-Read tools inspect the bus and bounded agentctl/train metadata. Write tools (`post`, `ack`, `question_answer`) always use `[mcp].identity` (default `ck-<project>-mcp`), never a caller-selected sender. Acknowledgements require an assignee; question answers require an open tier-2 question. Writes are disabled until `<root>/state/mcp/writes-enabled` exists and are refused while `kill` exists. Configure clients to confirm each write with the operator.
+Read tools inspect the bus and bounded agentctl/train metadata. Write tools (`post`, `ack`, `question_answer`) use `[mcp].identity` (default `ck-<project>-mcp`); `post` also accepts senders explicitly allowlisted in `[mcp].post_as`. Acknowledgements require an assignee; question answers require an open tier-2 question. Writes are disabled until `<root>/state/mcp/writes-enabled` exists and are refused while `kill` exists. Configure clients to confirm each write with the operator.
 
 Every call is journaled without secrets in `<root>/state/mcp/calls.ndjson`. Output is untrusted agent text, explicitly labelled and capped. See the security document for rate limits, slot pools and resource bounds.
 
@@ -109,11 +109,24 @@ Rollback: remove the specific tunnel route; create `<root>/state/mcp/kill`; remo
 (epoch seconds). Unknown fields are null; strings are clipped. A PID is returned only
 while its captured process start time still matches. Identity merges manifest lane
 bindings, hook notes, allowlisted post-time environment, then question-session bindings.
-Hooks refresh registered identity at most once per `heartbeat_every`, skipping unchanged
-records. Reads never register names or capture the connector server's environment.
+Hooks refresh identity at most once per `heartbeat_every`, retrying missing or invalid
+PIDs even when the binding is unchanged. Manifest agents save identity without changing
+their routing policy. Reads never register names or capture the connector server's environment.
 
 `model` is the observed assistant `message.model` in a bounded 128 KiB tail of the newest
-scoped transcript, with `model_observed_at`. `model_launch` is the manifest lane flag;
+parent transcript, with `model_observed_at`; subagent transcripts are excluded. An
+unpinned lane sharing its account/workspace has no model observation unless explicitly
+bound to a transcript. `model_launch` is the manifest lane flag;
 `model_drift` compares the two using model-family aliases. Unknown observations are null.
 Identity/model work runs only for the requested page. Local posts/acks prove listening
 for `[addressed].activity_ttl` (default `15m`), after stronger hook/lease/wait evidence.
+Connector posts (including allowlisted `as` senders) carry `origin=mcp`, preserve
+registration and explicit bindings, and never capture the service process's identity
+or prove local listening. Registration failures log a warning and do not interrupt
+post delivery, acknowledgement or waiting.
+
+`ref_read` uses structured `ref` / `spill_ref` metadata only. Caller-written
+`[full: PATH]` text never grants file access. `full=true` selects the bus-generated
+spill when a row also has an attachment. Older rows with a structured `ref` remain
+readable; text-only legacy markers are no longer readable as refs, and older rows
+with both an attachment and only a text spill marker expose the attachment.

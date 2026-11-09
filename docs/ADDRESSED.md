@@ -8,6 +8,9 @@ Internal senders (including `lead`, `coordkit`, and configured internal names) a
 Relay-applied rows never auto-register remote senders. Use `coordkit retire NAME` to
 retire an obsolete registration; manual removal forgets it. Any local poster becomes a
 routable recipient, with normal deaf-recipient escalation.
+Manifest names save identity-only metadata without changing policy. Registration
+errors log and allow post/ack/wait to continue; an explicit-ID post retry can recover
+registration without appending a second row.
 A role uses its first listening member. Roles marked `human = true`, and their members,
 do not need machine listening evidence.
 
@@ -18,6 +21,8 @@ evidence, which takes priority over post activity. Synthetic question-adapter ro
 written on behalf of blocked askers do not count as sender activity. It also accepts the enabled incumbent `bus wait --to NAME` process probe. A running pane
 alone is not evidence. The retired addressed waiter and sidecar tick no longer run.
 `[[lanes]]` session bindings and `question bind` remain valid sources of transcript identity.
+MCP posts, including allowlisted `as` senders, carry service origin and do not prove
+that a local agent can hear messages or capture the connector's account/session.
 
 `coordkit sweep [--dry-run] [--json]` checks role vacancy, recipient deafness, and bounded
 receipt deadlines. It preserves human-role handling, adoption/backlog filtering, and the

@@ -801,8 +801,8 @@ class McpReadBatchTests(McpCase):
         spill, attached = refs/'1107-abc123.txt', refs/'brief.md'
         spill.write_text('whole handoff text\n')
         attached.write_text('attached brief\n')
-        self.row('capped', text=f'start of handoff … [full: {spill}]')
-        self.row('both', text=f'start … [full: {spill}]', ref=str(attached))
+        self.row('capped', text=f'start of handoff … [full: {spill}]', ref=str(spill), spill_ref=str(spill))
+        self.row('both', text=f'start … [full: {spill}]', ref=str(attached), spill_ref=str(spill))
         self.assertEqual(self.read('ref_read', id='capped')['text'], 'whole handoff text\n')
         self.assertEqual(self.read('ref_read', id='both')['text'], 'attached brief\n')
         self.assertEqual(self.read('ref_read', id='both', full=True)['text'], 'whole handoff text\n')

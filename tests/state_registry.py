@@ -54,6 +54,10 @@ row('manifest.py', 'lead.json', 'lead adopt', 'next adoption', 'persistent ident
 row('actl.py', 'request.json|writer:delegate', 'delegate request', 'execution receipt', 'bounded tool timeout', 'loop failures or lane alarm')
 row('extract.py', '.tmp|writer:commit', 'transcript extraction', 'atomic checkpoint replacement', 'one cycle max_age', 'loop failure ask')
 row('bus.py', 'bus.lock|harvest.lock|.lock|.|.tmp|writer:append|writer:project_pending|writer:dispatch', 'bus command / atomic cursor update', 'kernel releases lock / rename', 'bounded caller invocation; kernel on death', 'caller failure and reconciliation mirror ask')
+row('bus.py', 'spill_ref|origin=mcp', 'bus spill or connector-originated post',
+    'immutable row retained with bus history; archive retention owns spill files',
+    'no latch; ref roots bound reads and activity TTL bounds local evidence',
+    'text never grants ref access; service origin never proves a local listener')
 row('mcp_server.py', 'state|mcp|calls.ndjson', 'every MCP request', 'append-only audit journal of connector calls', 'reviewed with the connector; rotation documented in docs/MCP.md', 'journal is the record; refusals counted per outcome')
 row('mcp_server.py', 'writes-enabled', 'the guarded go-live turns writes on', 'operator removes the file (writes off)', 'until removed; the kill file overrides it', 'write tools refuse while absent')
 row('mcp_server.py', '.ndjson.1', 'the journal passes JOURNAL_MAX', 'the next rotation replaces it', 'at most two journal files', 'none needed: bounded audit')
