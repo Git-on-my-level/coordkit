@@ -18,7 +18,13 @@ directory. The same repository name can map to a different checkout on each host
 Directories must be repo-relative, without traversal. `required` defaults to false
 for existing installations; repo refs are validated even without it. Explicit
 file paths outside the configured repository roots (or manifest directory when
-none are configured) always need an explicit degradation reason.
+none are configured) need an explicit degradation reason, except for files under
+`paths.root`. Coordkit's own run artifacts (including loop findings) are valid
+local sources in compatibility mode even when state storage is outside the
+repositories. Resolved paths must stay inside the root; symlinks and traversal
+cannot authorize outside files. This does not make state artifacts portable:
+`required = true` still requires repo authority for handoffs, and consumers
+still check local payload readability.
 
 Write `handoffs/worker-a--20261110-task.md` as `worker-a`. The basename must
 start with the exact poster identity and `--`; include a date/task suffix to

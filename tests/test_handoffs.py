@@ -5,6 +5,7 @@ import io
 import subprocess
 import time
 import os
+import shutil
 from unittest.mock import patch
 
 from coordkit import addressed, bus, mcp_server, obligations
@@ -108,6 +109,33 @@ class HandoffTests(FakeCase):
         local.unlink()
         self.invoke('ack', self.rows()[0]['id'], '--from', 'lead', code=2)
         self.assertEqual(self.rows()[-1]['to'], 'worker')
+
+    def test_state_root_is_local_source_without_expanding_outside_boundary(self):
+        self.manifest.handoffs.required = False
+        state = self.root.parent / (self.root.name + '-state')
+        state.mkdir()
+        self.addCleanup(shutil.rmtree, state)
+        self.manifest.paths.root = state
+        findings = state / 'loops' / 'audit' / 'runs' / 'cycle' / 'findings.md'
+        findings.parent.mkdir(parents=True)
+        findings.write_text('Local run evidence')
+        for repos in ({}, {'sample': str(self.repo)}):
+            with self.subTest(repos=repos):
+                self.manifest.handoffs.repos = repos
+                self.post('--evidence', str(findings))
+        self.assertTrue(all('handoff_degraded' not in row for row in self.rows()))
+        self.invoke('ack', self.rows()[0]['id'], '--from', 'lead')
+        outside = state.with_name(state.name + '-outside.md')
+        outside.write_text('Outside')
+        self.addCleanup(outside.unlink)
+        link = state / 'escape.md'
+        link.symlink_to(outside)
+        for path in (outside, link, state / '..' / outside.name):
+            with self.subTest(path=path):
+                self.assertIn('outside configured repository roots',
+                              self.post('--evidence', str(path), code=2))
+        self.manifest.handoffs.required = True
+        self.assertIn('repo-relative authority', self.post('--evidence', str(findings), code=2))
 
     def test_uncommitted_ignored_and_oversized_files_refused(self):
         other = self.path.with_name('worker--new.md')

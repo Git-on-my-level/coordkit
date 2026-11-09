@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shutil
 from unittest.mock import patch
 from coordkit import auditor, loop
 from coordkit.extract import clean, commit, extract
@@ -41,6 +42,26 @@ class LoopTests(FakeCase):
         self.assertIn('--plan',calls[0]['args'])
         self.assertEqual(calls[0]['request'],calls[1]['request'])
         self.assertEqual(calls[1]['request']['selector'],{'pool':'plan','settings':{'access':'read_only'}})
+
+    def test_external_state_root_nonempty_cycle_recovers_pending_handoff(self):
+        # State storage is not necessarily inside the manifest or any checkout.
+        self.manifest.paths.root = self.root.parent / (self.root.name + '-state')
+        self.manifest.bus.mirror = False
+        self.addCleanup(shutil.rmtree, self.manifest.paths.root)
+        self.manifest.handoffs.repos = {'workspace': str(self.root / 'checkout')}
+        self.respond({'tool': 'anx', 'contains': ['note'], 'exit': 2, 'stderr': 'receipt refused'})
+        self.assertEqual(self.invoke()[0], 1)
+        self.assertTrue((self.state / 'pending.json').exists())
+        self.respond()
+        code, out, err = self.invoke()
+        self.assertEqual(code, 0, err)
+        self.assertIn('CYCLE_OK audit', out)
+        self.assertEqual((self.state / 'fails').read_text(), '0\n')
+        self.assertFalse((self.state / 'pending.json').exists())
+        rows = [json.loads(s) for s in self.manifest.paths.bus_log.read_text().splitlines()]
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(Path(rows[0]['evidence']).is_relative_to(self.state / 'runs'))
+        self.assertNotIn('handoff_degraded', rows[0])
 
     def test_empty_findings_still_receipt(self):
         self.respond({'tool':'agentctl','contains':['delegate','--wait'], 'stdout':'MISSED_JSON_START {"items":[]} MISSED_JSON_END'})
