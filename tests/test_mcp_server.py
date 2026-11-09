@@ -856,7 +856,8 @@ class McpReadBatchTests(McpCase):
         self.assertEqual(agents['worker-ui']['last_state'], 'stopped per roster-1105')
         self.assertEqual(agents['relay']['status'], 'relay/human')
         self.assertEqual(agents['coordinator']['status'], 'listening')
-        self.assertEqual(agents['observer']['status'], 'unregistered')
+        self.assertEqual(agents['observer']['status'], 'listening')
+        self.assertIn('posted', agents['observer']['why'])
         self.assertIsNotNone(agents['observer']['last_post_at'])
         self.assertNotIn('gone', agents)
 

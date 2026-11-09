@@ -517,8 +517,9 @@ def topic_rows(manifest, rows, by_re, args, at):
 
 
 def agent_rows(manifest, rows, args, at):
-    from . import addressed
+    from . import addressed, routing
     from .relay import participants, remote_only
+    routing.observe_senders(manifest, rows, at)
     sources = participants(manifest, rows)
     remote = remote_only(manifest, rows, sources)
     registry, roles = addressed.registry(manifest), addressed.roles(manifest)

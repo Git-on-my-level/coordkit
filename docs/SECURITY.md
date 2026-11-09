@@ -18,6 +18,11 @@ validation, permission mode, and identity refresh time. These are within the tru
 account boundary. Identity is captured through an explicit key allowlist, kept in private
 local registration/hook state, and never attached to bus rows. No tokens, credential
 payloads, or arbitrary environment variables are captured or exposed.
+Roster reads may cache first local sender observations in private registration
+state using existing locked atomic writes. This metadata maintenance also runs with
+connector writes disabled; it never posts or delivers messages. Observation ignores
+connector/relay/synthetic rows and the reader's environment, and cannot promote a
+removed manifest agent's identity-only cache into a route.
 
 Resource bounds:
 

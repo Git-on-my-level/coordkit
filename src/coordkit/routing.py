@@ -22,7 +22,8 @@ def registry(manifest):
         metadata = {'registered_at', 'registered_by', 'role', 'runtime', 'adapter',
                     'fallback', 'target', 'remote', 'human', 'label', 'description'}
         if isinstance(spec, dict) and metadata.intersection(spec):
-            out.setdefault(name, dict(spec, name=name, source='register'))
+            source = 'observed' if spec.get('registered_by') == 'observed' else 'register'
+            out.setdefault(name, dict(spec, name=name, source=source))
     return out
 
 
@@ -109,6 +110,61 @@ def internal_name(manifest, name):
     return (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name)
             or name in {'all', 'coordkit', 'lead', manifest.mcp.identity, *cfg(manifest).internal_senders,
                         *manifest.escalation.internal_senders})
+
+
+def local_activity(row):
+    """Only a sender's own local row can establish registration or recency."""
+    return (not row.get('copy_of') and not row.get('question') and '_relay' not in row
+            and row.get('origin') != 'mcp' and not str(row.get('origin', '')).startswith('relay:'))
+
+
+OBSERVATION_ROW_LIMIT = 1000
+OBSERVATION_BATCH_LIMIT = 50
+
+
+def observe_senders(manifest, rows, at):
+    """Observe a bounded recent tail of the roster's already-loaded rows once.
+
+    Existing entries throttle writes permanently, including identity-only caches:
+    observing a removed manifest name must never promote its cached identity.
+    Busy writers take priority; observation skips rather than waiting on their lock.
+    """
+    import logging
+    from itertools import islice
+    from .process import parse_ts
+    try:
+        path = home(manifest)/'register.json'
+        existing = read_json(path, {}) or {}
+        names = {}
+        for row in islice(reversed(rows), OBSERVATION_ROW_LIMIT):
+            name = row.get('frm')
+            if internal_name(manifest, name) or name in existing or not local_activity(row):
+                continue
+            try:
+                recent = 0 <= at - parse_ts(row['ts']).timestamp() <= 86400
+            except (ValueError, TypeError, KeyError, OverflowError):
+                continue
+            if recent:
+                names[name] = None
+                if len(names) >= OBSERVATION_BATCH_LIMIT:
+                    break
+        if not names:
+            return
+        # Explicit bindings only, without PID probes or the roster reader's env.
+        # Identity collection can read files; keep it outside the writer lock.
+        records = {name: identity_sources(manifest, name, env={}) for name in names}
+        with locked(home(manifest)/'register.lock', blocking=False) as lock:
+            if lock is None:
+                return
+            # A concurrent post/hook/observer may have written during collection.
+            existing = read_json(path, {}) or {}
+            records = {name: identity for name, identity in records.items() if name not in existing}
+            if records:
+                _store_identities(manifest, 'observed', records,
+                                  register=records.keys() - cfg(manifest).agents.keys())
+    except Exception as exc:
+        # Roster metadata must not make an otherwise valid read unavailable.
+        logging.getLogger(__name__).warning('optional observed registration failed (%s)', type(exc).__name__)
 
 
 def identity_sources(manifest, name, env=None, *, stored=None):
@@ -218,18 +274,24 @@ def probe_identity(record):
 
 def _store_identity(manifest, name, via, identity, *, register=False):
     """Persist an identity selected while the caller holds register.lock."""
+    return _store_identities(manifest, via, {name: identity}, register={name} if register else set())[name]
+
+
+def _store_identities(manifest, via, identities, *, register=()):
+    """One atomic replacement for identities selected under register.lock."""
     import time
     from .state import update_json
     at = time.time()
     def transform(current):
-        entry = current.setdefault(name, {})
-        if register:
-            entry.setdefault('registered_at', at)
-            entry.setdefault('registered_by', via)
-        entry['identity'] = clean_identity(dict(identity, refreshed_at=at))
-        entry['refreshed_at'] = at
+        for name, identity in identities.items():
+            entry = current.setdefault(name, {})
+            if name in register:
+                entry.setdefault('registered_at', at)
+                entry.setdefault('registered_by', via)
+            entry['identity'] = clean_identity(dict(identity, refreshed_at=at))
+            entry['refreshed_at'] = at
         return current
-    return update_json(home(manifest)/'register.json', transform)[name]
+    return update_json(home(manifest)/'register.json', transform)
 
 
 def write_register(manifest, name, via, identity=None, *, env=None):

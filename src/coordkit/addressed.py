@@ -163,12 +163,11 @@ def listening(manifest, name, at=None, probe=None, rows=None, *, waiter_only=Fal
         from . import bus
         rows = bus.read_path(manifest.paths.bus_log)
     latest = None
+    from .routing import local_activity
     for row in rows:
-        if row.get('frm') != name or row.get('copy_of') or row.get('question'):
-            continue
         # Synthetic question rows, connector posts and relay-applied traffic
         # cannot prove that the sender is a local listener.
-        if row.get('origin') == 'mcp' or str(row.get('origin', '')).startswith('relay:'):
+        if row.get('frm') != name or not local_activity(row):
             continue
         try:
             posted = parse_ts(row['ts']).timestamp()
