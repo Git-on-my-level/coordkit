@@ -61,12 +61,15 @@ def candidate(manifest, row):
     if str(row.get('id', '')).startswith(OWN_PREFIXES):
         return False
     # A handoff that names no PR and is not an auditor report is a status update, not work.
-    return row['kind'] == 'ask' or bool(prs(row)) or is_flag_report(manifest, row)
+    return (row['kind'] == 'ask' or bool(prs(row)) or is_flag_report(manifest, row)
+            or bool(row.get('handoff_bounce') or row.get('handoff_degraded'))
+            or any(str(row.get(k, '')).startswith('repo:') for k in ('ref', 'evidence')))
 
 
 def open_obligations(manifest, rows, at, pr_state=lambda number: None):
     """[{id, kind, frm, owner, since, age, prs, flags}] still waiting for an owner's pickup."""
     from . import bus
+    from .handoffs import portable
     bus.configure(manifest)
     book = bus.aliases()
     canonical = lambda name: bus.resolve(name, book)
@@ -80,6 +83,7 @@ def open_obligations(manifest, rows, at, pr_state=lambda number: None):
             continue
         owner, since = canonical(row.get('owner') or row['to']), parse_ts(row['ts']).timestamp()
         numbers = prs(row)
+        contract = row['kind'] == 'handoff' and portable(row)
         flags = sorted(set(FLAG.findall(row.get('text') or ''))) if is_flag_report(manifest, row) else []
         closed = None
         for reply in replies.get(row['id'], []):
@@ -89,6 +93,9 @@ def open_obligations(manifest, rows, at, pr_state=lambda number: None):
                     or reply.get('copy_of') or reply.get('escalation'):
                 continue
             from .addressed import assignees
+            if (contract
+                    and not (reply.get('handoff_verified') == row['id'] or reply.get('handoff_bounce'))):
+                continue  # old/foreign replies cannot silently claim portable payloads they never probed
             if (reply.get('kind') == 'ack' or reply.get('ack')) and canonical(reply.get('frm')) not in {canonical(n) for n in assignees(dict(row, owner=owner), manifest)}:
                 continue  # only the assigned reader can pick up or reassign work
             if flags:
@@ -115,13 +122,15 @@ def open_obligations(manifest, rows, at, pr_state=lambda number: None):
             if not flags:
                 continue
         if numbers and not flags:
-            if any(r.get('frm') == owner and set(prs(r)) & set(numbers) for r in later):
+            if any(r.get('frm') == owner and set(prs(r)) & set(numbers)
+                   and (not contract or r.get('handoff_verified') == row['id']) for r in later):
                 continue
             if any(r.get('frm') == row['frm'] and r.get('kind') in KINDS and set(prs(r)) & set(numbers) for r in later):
                 continue  # superseded by a newer handoff/ask from the same sender
             if all(pr_state(n) in ('MERGED', 'CLOSED') for n in numbers):
                 continue  # any named PR still open keeps the work open
-        if row.get('subject') and any(r.get('frm') == owner and r.get('subject') == row['subject'] for r in later):
+        if row.get('subject') and any(r.get('frm') == owner and r.get('subject') == row['subject']
+                                    and (not contract or r.get('handoff_verified') == row['id']) for r in later):
             continue
         level = 'normal' if flags else priority(row)
         found.append({'id':row['id'], 'kind':row['kind'], 'frm':row['frm'], 'owner':owner, 'since':since,

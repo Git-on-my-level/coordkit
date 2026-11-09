@@ -169,6 +169,7 @@ def prs_tag(r):
     for key in ('state', 'subject', 'needs', 'evidence', 'rollback'):
         if r.get(key): tags += f' {key}={r[key]}'
     if r.get('irreversible'): tags += ' IRREVERSIBLE'
+    if r.get('handoff_degraded'): tags += f" DEGRADED_HANDOFF={r['handoff_degraded']}"
     if r.get('re') and r.get('kind') == 'decision': tags += f" re={r['re']}"
     return tags
 def brief(r):
@@ -425,15 +426,16 @@ def live_readers():
 def age_minutes(r): return int((now() - parse_ts(r['ts'])).total_seconds() // 60)
 def line(r, full=False):
     text = r.get('text') or ''
+    degraded = f" [DEGRADED HANDOFF: {r['handoff_degraded']}]" if r.get('handoff_degraded') else ''
     if not full:
-        return f"{r.get('id', '-')} {r.get('kind', 'msg')} {r['frm']}→{r['to']}: {' '.join(text.split())[:200]}"
+        return f"{r.get('id', '-')} {r.get('kind', 'msg')} {r['frm']}→{r['to']}{degraded}: {' '.join(text.split())[:200]}"
     if r.get('ref') or r.get('spill_ref'):
         from .refs import ref_file
         try:
             text = ref_file(CONFIG, r, full=True).read_text().removesuffix('\n')
         except (OSError, UnicodeError, ValueError):
             pass
-    return f"{r.get('id', '-')} {r['ts']} {r['frm']}→{r['to']} [{r.get('kind', 'msg')}/{r.get('topic', 'general')}] {text}"
+    return f"{r.get('id', '-')} {r['ts']} {r['frm']}→{r['to']} [{r.get('kind', 'msg')}/{r.get('topic', 'general')}]{degraded} {text}"
 
 def _main(argv, *, site_local=False, origin='coordkit'):
     from .ops import bus_parser
@@ -562,6 +564,10 @@ def dispatch(o):
         return
     if o.cmd == 'post':
         from .routing import register_activity
+        from .handoffs import check_pickup, local_digests, path_like, portable, stored_ref, validate_post
+        degraded = getattr(o, 'degrade_handoff', None)
+        if degraded and o.evidence and path_like(o.evidence):
+            o.evidence = stored_ref(o.evidence)
         # Validate the recipient so work does not silently reach an unknown lane.
         # Known but silent for IDLE_HOURS -> post it AND copy the lead so it isn't lost.
         rows = read()
@@ -586,7 +592,8 @@ def dispatch(o):
                             if getattr(o, k, None)})
             payload['text_hash'] = hashlib.sha256(o.text.encode()).hexdigest()
             payload['prs'] = list(dict.fromkeys(o.pr.replace(' ', ',').split(','))) if o.pr else []
-            payload['ref'] = str(pathlib.Path(o.ref).resolve()) if o.ref else None
+            payload['ref'] = stored_ref(o.ref) if o.ref else None
+            if degraded: payload['handoff_degraded'] = degraded
             signature = hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
             if old and old.get('publication_hash'):
                 if old['publication_hash'] != signature:
@@ -609,6 +616,21 @@ def dispatch(o):
                 register_activity(CONFIG, o.frm, 'post', env={} if getattr(o, 'origin', None) == 'mcp' else None)
                 print(f'already posted id={o.id}')
                 return
+        # An identical stable-ID retry is a receipt for an existing publication,
+        # not another pickup. Probe only genuinely new publications.
+        try:
+            degraded = validate_post(CONFIG, o)
+            degraded_digests = local_digests(CONFIG, o) if degraded else {}
+        except ValueError as exc:
+            print(f'refused: {exc}', file=sys.stderr); sys.exit(2)
+        verified_handoff = None
+        if o.re:
+            work = next((r for r in rows if r.get('id') == o.re), None)
+            if (work and work.get('kind') == 'handoff' and o.frm != work['frm']
+                    and (o.kind == 'claim' or portable(work) or CONFIG.handoffs.required)):
+                if not check_pickup(CONFIG, work, o.frm, rows):
+                    sys.exit(2)
+                verified_handoff = work['id']
         # Addressed bus (brief 8.2/8.3): a registered name or role is checked against waiter leases, never
         # agentctl, and is never silently copied to the lead; deafness escalates to its declared fallback.
         from . import addressed
@@ -662,7 +684,7 @@ def dispatch(o):
                       file=sys.stderr); sys.exit(2)
         elif o.rollback or o.irreversible:
             print('refused: --rollback/--irreversible are only for --kind decision', file=sys.stderr); sys.exit(2)
-        if o.kind == 'handoff' and not o.evidence:
+        if o.kind == 'handoff' and not (o.evidence or (o.ref and o.ref.startswith('repo:'))):
             print('warning: a handoff should carry --evidence <SHA|run id|path>', file=sys.stderr)
         elif o.evidence and o.kind != 'handoff':
             print('refused: --evidence is only for --kind handoff', file=sys.stderr); sys.exit(2)
@@ -720,7 +742,7 @@ def dispatch(o):
         if live is False:
             print(f'warning: {o.to} has no live agent ({why}); posting anyway and copying the lead. '
                   'Re-home the work rather than waiting on an idle lane (rule 20).', file=sys.stderr)
-        if o.ref and not pathlib.Path(o.ref).is_file():
+        if o.ref and not o.ref.startswith('repo:') and not pathlib.Path(o.ref).expanduser().is_file():
             print(f'refused: --ref {o.ref} is not a file', file=sys.stderr); sys.exit(2)
         if o.kind == 'ask' and o.topic != 'coordkit-digest':
             from . import questions
@@ -746,7 +768,9 @@ def dispatch(o):
                               and bool(r.get('no_owner_required')) == o.no_owner_required
                               and bool(r.get('no_auto_default')) == o.no_auto_default
                               and bool(r.get('irreversible')) == o.irreversible and r.get('prs', []) == prs
-                              and (not o.ref or r.get('ref') == str(pathlib.Path(o.ref).resolve()))
+                              and r.get('handoff_degraded') == degraded
+                              and r.get('handoff_local_digests', {}) == degraded_digests
+                              and (not o.ref or r.get('ref') == stored_ref(o.ref))
                               and r.get('text_hash', hashlib.sha256(r.get('text', '').encode()).hexdigest()) == digest
                               and now() - parse_ts(r['ts']) < dt.timedelta(minutes=5)), None)
             if duplicate:
@@ -782,7 +806,7 @@ def dispatch(o):
         room = TEXT_CAP - len(copy_prefix)  # the lead copy must fit the cap too
         if len(text) > room:
             # Token budget: every reader pays for every post. Keep the post short, the detail on disk.
-            spill = STATE / 'refs' / f'{now():%m%d}-{rid}.txt'
+            spill = STATE / 'refs' / f'{name_key(o.frm)}--{now():%m%d}-{rid}.txt'
             spill.parent.mkdir(parents=True, exist_ok=True)
             spill.write_text(text + '\n')
             spill_ref = str(spill)
@@ -799,9 +823,12 @@ def dispatch(o):
         if o.id: rec['publication_hash'] = signature
         if o.owner: rec['owner'] = o.owner
         if o.re: rec['re'] = o.re
+        if verified_handoff: rec['handoff_verified'] = verified_handoff
         if spill_ref:
             rec['ref'] = rec['spill_ref'] = spill_ref
-        if o.ref: rec['ref'] = str(pathlib.Path(o.ref).resolve())
+        if o.ref: rec['ref'] = stored_ref(o.ref)
+        if degraded: rec['handoff_degraded'] = degraded
+        if degraded_digests: rec['handoff_local_digests'] = degraded_digests
         if o.signal: rec['signal'] = o.signal
         if prs: rec['prs'] = prs
         for key in ('state', 'subject', 'needs', 'rollback', 'evidence'):
@@ -854,10 +881,14 @@ def dispatch(o):
         rows = read()
         work = next((r for r in rows if r.get('id') == o.id and r.get('kind') in ('handoff', 'ask')), None)
         if work is not None:
+            from .handoffs import check_pickup
+            if not check_pickup(CONFIG, work, o.frm, rows):
+                sys.exit(2)
             # pick up (or reassign with --owner) a handoff or ask.
             owner = o.owner or o.frm
             append([dict(ts=now().isoformat(timespec='seconds'), id=secrets.token_hex(3), origin='coordkit', frm=o.frm, to=work['frm'],
                          topic=work.get('topic', 'general'), kind='ack', re=o.id, owner=owner,
+                         **({'handoff_verified': work['id']} if work['kind'] == 'handoff' else {}),
                          text=o.note or (f'picked up by {owner}' if owner == o.frm else f'reassigned to {owner}'))])
             from .routing import register_activity
             register_activity(CONFIG, o.frm, 'ack')

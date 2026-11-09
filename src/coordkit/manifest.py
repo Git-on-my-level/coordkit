@@ -55,6 +55,16 @@ class Bus:
 
 
 @dataclass
+class Handoffs:
+    required: bool = False
+    repos: dict[str, str] = field(default_factory=dict)
+    directories: list[str] = field(default_factory=lambda: ['handoffs'])
+    max_bytes: int = 262144
+    remote: str = 'origin'
+    fetch_timeout_seconds: int = 30
+
+
+@dataclass
 class Deliver:
     stop_requires_waiter: bool = True
     waiter_fresh_seconds: int = 180
@@ -305,10 +315,10 @@ def _table(cls, data, section, required=()):
         if key not in data or data[key] == "":
             raise ManifestError(f"missing_key: {section}.{key}")
     # Dataclass annotations are postponed; these schema field names carry uniform types.
-    lists = {"flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as"}
-    maps = {"aliases", "pools", "loops", "roles", "agents", "projects"}
-    booleans = {"stop_requires_waiter", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
-    integers = {"auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
+    lists = {"directories", "flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as"}
+    maps = {"aliases", "pools", "loops", "roles", "agents", "projects", "repos"}
+    booleans = {"required", "stop_requires_waiter", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
+    integers = {"fetch_timeout_seconds", "max_bytes", "auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
     numbers = {"wake_debounce_minutes", "idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
     for key, value in data.items():
         ok = (isinstance(value, list) and all(type(x) is (int if key == "ci" else str) for x in value)) if key in lists else (
@@ -318,7 +328,7 @@ def _table(cls, data, section, required=()):
             raise ManifestError(f"invalid_type: {section}.{key}")
         if key in (integers | numbers) and value < 0:
             raise ManifestError(f"invalid_value: {section}.{key} must be nonnegative")
-        if key in {"aliases", "pools", "projects"} and not all(isinstance(v, str) and v for v in value.values()):
+        if key in {"aliases", "pools", "projects", "repos"} and not all(isinstance(v, str) and v for v in value.values()):
             raise ManifestError(f"invalid_type: {section}.{key} values must be nonempty strings")
     return cls(**data)
 
@@ -370,6 +380,7 @@ class Manifest:
     mcp: Mcp = field(default_factory=Mcp)
     services: Services = field(default_factory=Services)
     accounts: Accounts = field(default_factory=Accounts)
+    handoffs: Handoffs = field(default_factory=Handoffs)
     relay: Relay | None = None
     adapters: dict = field(default_factory=dict)
     mode: str = "live"
@@ -455,7 +466,9 @@ def load(path: str | Path | None = None) -> Manifest:
         raw["questions"] = question_data
     config = {name: _table(cls, raw.get(name, {}), name) for name, cls in
               (("deliver", Deliver), ("bus", Bus), ("agentctl", Agentctl), ("lane", Lane), ("loop", Loop), ("reconciler", Reconciler),
-               ("wait", Wait), ("merge", Merge), ("launchd", Launchd), ("rc_host", RcHost), ("shadow", Shadow), ("limits", Limits), ("escalation", Escalation), ("obligations", Obligations), ("addressed", Addressed), ("review", Review), ("questions", Questions), ("mcp", Mcp), ("services", Services), ("accounts", Accounts))}
+               ("wait", Wait), ("merge", Merge), ("launchd", Launchd), ("rc_host", RcHost), ("shadow", Shadow), ("limits", Limits), ("escalation", Escalation), ("obligations", Obligations), ("addressed", Addressed), ("review", Review), ("questions", Questions), ("mcp", Mcp), ("services", Services), ("accounts", Accounts), ("handoffs", Handoffs))}
+    from .handoffs import validate_config
+    validate_config(config['handoffs'])
     if config["services"].manager not in ("", "launchd", "systemd"):
         raise ManifestError("invalid_value: services.manager")
     if any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}', key) for key in config['mcp'].projects):
