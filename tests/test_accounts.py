@@ -142,6 +142,21 @@ class AccountsTests(FakeCase):
             self.assertEqual(mcp_server.call_tool(self.manifest, 'accounts', {})['status'], 'unavailable')
         self.assertFalse(self.manifest.paths.bus_log.exists())
 
+    def test_unencodable_names_fail_open_through_mcp(self):
+        self.enable()
+        for field in ('id', 'window'):
+            data = facts()
+            if field == 'id':
+                data['accounts'][0]['id'] = '\ud800'
+            else:
+                data['accounts'][0]['windows'][0]['name'] = '\ud800'
+            # json.dumps escapes the lone surrogate; json.loads restores it.
+            self.facts.write_text(json.dumps(data))
+            self.assertFalse(accounts.snapshot(self.manifest, AT)['available'], field)
+            result = mcp_server.call_tool(self.manifest, 'accounts', {})
+            self.assertEqual(result['status'], 'unavailable', field)
+            json.dumps(result, ensure_ascii=False).encode('utf-8')
+
     def test_agents_status_joins_one_snapshot_and_survives_missing_facts(self):
         self.enable()
         from coordkit import routing
