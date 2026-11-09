@@ -88,7 +88,7 @@ row('loop.py', 'result.lock|fails|skip.json|writer:record_failure', 'failed, unk
 row('loop.py', 'escalation.json|writer:_retry_escalation', 'failure threshold; journal pending ask before sending',
     'any successful cycle clears the streak and pending/sent report under result.lock',
     'retry unsent next cycle; sent_at/next_at/sent_count re-arm at failure_realert_intervals, last interval repeats',
-    'direct ANX Decide ask on loop card; previous_ask_id replaces its predecessor, previous_answer retains context; legacy agent-only sent receipts are delivered immediately')
+    'direct ANX Decide ask on loop card; previous_ask_id replaces its predecessor, previous_answers retains known rulings by ID; legacy agent-only sent receipts are delivered immediately')
 row('loop_answers.py', 'state/loop-asks|.json|writer:remember',
     'successful direct loop ask returns its ID, journaled before marking send complete',
     'correlation receipts and received answers survive supersession/recovery; operator archives with bus/ask history',

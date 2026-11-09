@@ -101,6 +101,24 @@ class LoopEscalationTests(FakeCase):
         self.assertIn('Keep retrying while investigating', self.asks()[-1][self.asks()[-1].index('--details') + 1])
         self.assertFalse(any('await' in call['args'] for call in self.calls()))
 
+    def test_consecutive_answered_reminders_retain_both_rulings_without_duplicates(self):
+        first = self.record_failure(1000)['ask_id']
+        self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
+            'items': [{'ask_id': first, 'answer': {'text': 'Pause deployments'}}]}}})
+        second = self.record_failure(4600)['ask_id']
+        self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
+            'items': [{'ask_id': second, 'answer': {'text': 'Keep retrying'}}]}}},
+            {'tool': 'anx', 'contains': ['ask'], 'exit': 2, 'stderr': 'ANX unavailable'})
+        pending = self.record_failure(26200)
+        self.assertFalse(pending['sent'])
+        self.assertEqual(set(pending['previous_answers']), {first, second})
+        self.respond()  # locally retained answers also survive an empty remote listing
+        with patch.object(loop.time, 'time', return_value=26300):
+            loop.retry_escalation(self.manifest, 'audit', 'loop-audit', self.state)
+        details = self.asks()[-1][self.asks()[-1].index('--details') + 1]
+        self.assertEqual(details.count(first + ': Pause deployments'), 1)
+        self.assertEqual(details.count(second + ': Keep retrying'), 1)
+
     def test_incomplete_answer_lookup_keeps_reminder_and_previous_id_for_retry(self):
         first = self.record_failure(1000)['ask_id']
         self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
@@ -114,6 +132,15 @@ class LoopEscalationTests(FakeCase):
             loop.retry_escalation(self.manifest, 'audit', 'loop-audit', self.state)
         self.assertTrue(read_json(self.state/'escalation.json')['sent'])
         self.assertEqual(self.asks()[-1][self.asks()[-1].index('--supersedes') + 1], first)
+
+    def test_string_answer_context_survives_report_rebuild(self):
+        report = self.record_failure(1000)
+        report.pop('previous_answers')
+        report['previous_answer'] = 'event:earlier: Preserve the earlier ruling'
+        write_json(self.state/'escalation.json', report)
+        self.assertTrue(self.record_failure(4600)['sent'])
+        self.assertIn('event:earlier: Preserve the earlier ruling',
+                      self.asks()[-1][self.asks()[-1].index('--details') + 1])
 
     def test_failed_reminder_retains_payload_and_does_not_advance_timer(self):
         self.record_failure(1000)

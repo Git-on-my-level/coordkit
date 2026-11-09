@@ -187,10 +187,13 @@ def record_failure(manifest, name, settings, handle, state, detail, cycle=None, 
             legacy = report and report.get('sent') and report.get('channel') != 'anx'
             if not report or legacy or (report.get('sent') and time.time() >= report['next_at']):
                 previous = report if report and not legacy else {}
+                answers = previous.get('previous_answers', {})
+                if previous.get('previous_answer'):
+                    answers.setdefault('legacy', previous['previous_answer'])
                 report = {'sent': False, 'channel': 'anx', 'card': f'card:{handle}',
                           'sent_count': previous.get('sent_count', 0),
                           'previous_ask_id': previous.get('ask_id'),
-                          'previous_answer': previous.get('previous_answer', ''),
+                          'previous_answers': answers,
                           'cycle': cycle, 'error_file': str(error_file), 'ask': {
                     'situation': f'Loop {name} has failed {failures} consecutive cycles: {detail}',
                     'impact': ('Scheduled checks are failing to complete reliably, so follow-ups can be missed '
@@ -218,14 +221,17 @@ def _retry_escalation(manifest, name, handle, state):
         return
     try:
         card = report.get('card') or f'card:{handle}'
+        answers = report.setdefault('previous_answers', {})
+        if report.get('previous_answer'):  # compatibility with earlier string receipts
+            answers.setdefault('legacy', report['previous_answer'])
         if report.get('previous_ask_id') and not report.get('ask_id'):
             answer = loop_answers.answer_context(manifest, report['previous_ask_id'])
             if answer:
-                report['previous_answer'] = answer
+                answers[report['previous_ask_id']] = answer
                 write_json(path, report)
         details = f"Cycle: {report['cycle']}\nEvidence: {report['error_file']}"
-        if report.get('previous_answer'):
-            details += '\n\nEarlier answer (the loop is still failing):\n' + report['previous_answer']
+        if answers:
+            details += '\n\nEarlier answers (the loop is still failing):\n' + '\n\n'.join(answers.values())
         brief = briefs.machine('loop_failure', subject=briefs.subject_words(card), **report['ask'],
             evidence=briefs.pr_evidence(manifest, *report['ask'].values(), details),
             details=details,
