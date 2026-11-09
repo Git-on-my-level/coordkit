@@ -2,7 +2,7 @@
 
 **Agent-native local message bus for agent swarms.** Run coding agents across many machines with a shared message protocol, explicit recipients, acknowledgements, and durable handoffs.
 
-coordkit is a small Python core with optional adapters. The bus is append-only JSON Lines on local disk. An optional self-hosted relay replicates rows across machines using outbound WebSockets; without `[relay]`, the bus stays local. The protocol is neutral across Claude Code, Codex, Hermes (ACP), and agentctl. v0.3 adds relay transport alongside Claude Code hooks, a tmux answer adapter, agentctl/ANX integration, and an optional MCP connector; it does not install Codex or Hermes hooks.
+coordkit is a small Python core with optional adapters. The bus is append-only JSON Lines on local disk. An optional self-hosted relay replicates rows across machines using outbound WebSockets; without `[relay]`, the bus stays local. The protocol is neutral across Claude Code, Codex, Hermes (ACP), OpenCode and agentctl. v0.3 adds relay transport alongside Claude Code hooks, a tmux answer adapter, agentctl/ANX integration, and an optional MCP connector; it does not install Codex or Hermes hooks.
 
 ## Requirements and installation
 

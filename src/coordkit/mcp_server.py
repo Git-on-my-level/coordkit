@@ -725,15 +725,18 @@ def agent_rows(manifest, rows, args, at):
         from . import routing, usage
         identity = routing.roster_identity(manifest, name)
         lane = next((lane for lane in manifest.lanes if lane.name == name), None)
-        paths = routing.transcript_paths(manifest, name, identity)
-        if identity.get('transcript_path'):
-            paths = [Path(identity['transcript_path'])]
-        elif lane and not paths:
-            # Usage includes nested subagents; identity describes only the parent.
-            shared = sum(usage.transcript_dir(other) == usage.transcript_dir(lane) for other in manifest.lanes)
-            if shared == 1:
-                paths = list(usage.transcript_dir(lane).glob('*.jsonl'))
-        model, model_at = usage.observed_model(paths)
+        if lane and usage.lane_harness(lane) == 'opencode' and not identity.get('transcript_path'):
+            model, model_at = usage.opencode_observed_model(lane)
+        else:
+            paths = routing.transcript_paths(manifest, name, identity)
+            if identity.get('transcript_path'):
+                paths = [Path(identity['transcript_path'])]
+            elif lane and not paths:
+                # Usage includes nested subagents; identity describes only the parent.
+                shared = sum(usage.scope_key(other) == usage.scope_key(lane) for other in manifest.lanes)
+                if shared == 1:
+                    paths = list(usage.transcript_dir(lane).glob('*.jsonl'))
+            model, model_at = usage.observed_model(paths)
         config_dir = identity.get('config_dir')
         identity_fields = {key: clip(identity.get(key), 4096) or None for key in
                            ('config_dir', 'session_id', 'transcript_path', 'permission_mode')}
@@ -784,11 +787,15 @@ def lane_rows(manifest, args):
                         executions[row['id']] = row
         except (ToolError, ValueError, AttributeError):
             status = 'unavailable'
+    from .lane import rate_limit as rate_limit_evidence
     for row in executions.values():
         labels = row.get('labels') or []
+        evidence = rate_limit_evidence(row)
         items.append(dict(id=clip(row['id'], 200), source='agentctl',
                           label=clip(','.join(str(v) for v in labels), FIELD),
-                          state=clip(row.get('state'), FIELD), head_sha=clip(row.get('head_sha') or row.get('sha'), FIELD) or None,
+                          state=clip('rate_limited' if evidence and row.get('state') not in ('completed', 'failed', 'cancelled', 'orphaned') else row.get('state'), FIELD),
+                          rate_limited=evidence,
+                          head_sha=clip(row.get('head_sha') or row.get('sha'), FIELD) or None,
                           last_ts=lane_time(row.get('updated_at') or row.get('started_at') or row.get('created_at'))))
     directory = manifest.path(manifest.mcp.train_state_dir) if manifest.mcp.train_state_dir else None
     # Skip env names BEFORE metadata/content access. Symlinks cannot redirect a safe name to secrets.

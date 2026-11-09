@@ -242,11 +242,15 @@ max_age = "2h"
 
 Use `coordkit accounts` or `coordkit accounts --json` for the same file-only view.
 The file schema is `{schema_version: 1, generated_at, accounts: [{id, windows:
-[{name, used_ratio, resets_at, observed_at}]}]}`. Ratios must be finite in `[0, 1]`;
-percentages multiply them by 100. Timestamps require timezones and are returned in
-UTC; `resets_at` may be null. A window is stale if either `observed_at` or
-`generated_at` exceeds `max_age`, or is in the future. Republishing cannot refresh
-an old observation. Stale readings remain visible.
+[{name, used_ratio, resets_at, observed_at}]}]}`. `used_ratio` must be finite and
+nonnegative; values above 1 are overage and render above 100% rather than making
+the file invalid. `resets_at` and `observed_at` may be omitted or null (`resets_at`)
+or omitted (`observed_at`, which then uses `generated_at`). Timestamps require
+timezones and are returned in UTC. A window is stale if `generated_at` or an
+explicit `observed_at` exceeds `max_age`, or is in the future. A throughput-only
+account with a per-minute window is valid without any weekly window; a sample at
+or above the nominal limit is shown as such, not as an exhausted account.
+Republishing cannot refresh an old observation. Stale readings remain visible.
 
 Reads accept regular files only, at most 1 MiB, 256 accounts, and 32 windows per
 account. Invalid, missing, oversized, or unreadable facts report `unavailable`;

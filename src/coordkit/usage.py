@@ -6,6 +6,7 @@ import json
 import os
 from itertools import islice
 from pathlib import Path
+import sqlite3
 from .identity import encoded_cwd, transcript_dir
 
 TOKEN_FIELDS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')
@@ -195,9 +196,222 @@ def parse_transcripts(sources, since, until):
     return result
 
 
+OPENCODE_DB = 'opencode.db'
+OPENCODE_MAX_SESSIONS = 512
+OPENCODE_MAX_MESSAGES = 20000
+OPENCODE_TAIL = 20000
+
+
+def lane_harness(lane):
+    """Explicit [lanes].harness, with an OpenCode session id as a safe fallback."""
+    explicit = str(getattr(lane, 'harness', '') or '').lower()
+    if explicit in ('opencode',):
+        return 'opencode'
+    if explicit in ('claude', 'claude-code'):
+        return 'claude'
+    return 'opencode' if str(getattr(lane, 'session_id', '') or '').startswith('ses_') else 'claude'
+
+
+def opencode_store(lane):
+    """OpenCode's read-only session store; config_dir is its data directory."""
+    path = Path(lane.config_dir).expanduser()
+    return path if path.name == OPENCODE_DB else path / OPENCODE_DB
+
+
+def _epoch_millis(value):
+    if type(value) not in (int, float) or not value >= 0:
+        return None
+    return value / 1000 if value >= 10 ** 11 else value
+
+
+def _opencode_model(data):
+    model = data.get('model')
+    if isinstance(model, dict):
+        return model.get('id') or model.get('modelID') or ''
+    if isinstance(model, str):
+        return model
+    identifier = data.get('modelID') or ''
+    return identifier
+
+
+def _opencode_counters(data):
+    tokens = data.get('tokens')
+    if not isinstance(tokens, dict):
+        tokens = data.get('usage')
+    if not isinstance(tokens, dict):
+        return None
+    cache = tokens.get('cache') if isinstance(tokens.get('cache'), dict) else {}
+    return {'input_tokens': _count(tokens.get('input')),
+            'output_tokens': _count(tokens.get('output')),
+            'cache_read_input_tokens': _count(cache.get('read', tokens.get('cache_read'))),
+            'cache_creation_input_tokens': _count(cache.get('write', tokens.get('cache_write')))}
+
+
+def _opencode_connect(path):
+    # mode=ro plus query_only makes an accidental write impossible; a missing WAL
+    # sidecar fails open as an unreadable source rather than creating one.
+    connection = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.25)
+    connection.execute('PRAGMA query_only = ON')
+    return connection
+
+
+def _opencode_tables(connection):
+    return {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+
+def _opencode_sessions(connection, tables, lane):
+    """Sessions in this lane's store, scoped by session id or workspace directory."""
+    if not {'session', 'session_v2'} & tables:
+        return [], False
+    directories = {str(lane.cwd)}
+    try:
+        directories.add(os.path.realpath(str(lane.cwd)))
+    except OSError:
+        pass
+    marks = ','.join('?' for _ in directories)
+    found, truncated = [], False
+    for table in ('session_v2', 'session'):
+        if table not in tables:
+            continue
+        if lane.session_id:
+            rows = connection.execute(f'SELECT id FROM {table} WHERE id = ? LIMIT 2',
+                                      (lane.session_id,)).fetchall()
+        else:
+            rows = connection.execute(f'SELECT id FROM {table} WHERE directory IN ({marks}) LIMIT ?',
+                                      (*directories, OPENCODE_MAX_SESSIONS + 1)).fetchall()
+        truncated |= len(rows) > OPENCODE_MAX_SESSIONS
+        for (identifier,) in rows[:OPENCODE_MAX_SESSIONS]:
+            found.append((table, identifier))
+    return found[:OPENCODE_MAX_SESSIONS * 2], truncated
+
+
+def _opencode_messages(lane, *, since=None, until=None):
+    """Assistant message counters from OpenCode v1/v2 SQLite rows; never writes."""
+    try:
+        path = opencode_store(lane)
+    except (OSError, ValueError, TypeError):
+        return [], False, 0, 1
+    try:
+        connection = _opencode_connect(path)
+    except (sqlite3.Error, OSError, ValueError):
+        return [], False, 0, 1
+    try:
+        tables = _opencode_tables(connection)
+        sessions, truncated = _opencode_sessions(connection, tables, lane)
+        messages, invalid, unreadable = {}, 0, 0
+        total = 0
+        for table, session_id in sessions:
+            if total >= OPENCODE_MAX_MESSAGES:
+                truncated = True
+                break
+            source = 'session_message' if table == 'session_v2' else 'message'
+            if source not in tables:
+                continue
+            columns = 'id, data, time_created'
+            sql = f'SELECT {columns} FROM {source} WHERE session_id = ?'
+            if source == 'session_message':
+                sql += " AND type = 'assistant'"
+            sql += ' ORDER BY time_created DESC LIMIT ?'
+            try:
+                rows = connection.execute(sql, (session_id, min(OPENCODE_TAIL, OPENCODE_MAX_MESSAGES - total) + 1)).fetchall()
+            except sqlite3.Error:
+                unreadable += 1
+                continue
+            truncated |= len(rows) > OPENCODE_TAIL
+            for identifier, raw, created in rows[:OPENCODE_TAIL]:
+                if total >= OPENCODE_MAX_MESSAGES:
+                    truncated = True
+                    break
+                total += 1
+                try:
+                    data = json.loads(raw)
+                except (ValueError, TypeError):
+                    invalid += 1
+                    continue
+                if not isinstance(data, dict):
+                    invalid += 1
+                    continue
+                if source == 'message' and data.get('role') != 'assistant':
+                    continue
+                stamp = _epoch_millis((data.get('time') or {}).get('created')
+                                      if isinstance(data.get('time'), dict) else None)
+                if stamp is None:
+                    stamp = _epoch_millis(created)
+                counters = _opencode_counters(data)
+                model = _opencode_model(data)
+                if stamp is None:
+                    invalid += 1
+                    continue
+                try:
+                    at = datetime.fromtimestamp(stamp, timezone.utc)
+                except (OverflowError, OSError, ValueError):
+                    invalid += 1
+                    continue
+                if since is not None and at < since or until is not None and at > until:
+                    continue
+                key = identifier if isinstance(identifier, str) else (str(path), identifier)
+                messages[key] = dict(at=at, model=model, usage=counters or dict.fromkeys(TOKEN_FIELDS, 0),
+                                     valid=counters is not None)
+        ordered = sorted(messages.values(), key=lambda item: item['at'])
+        return ordered, truncated, invalid, unreadable
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        return [], False, 0, 1
+    finally:
+        connection.close()
+
+
+def opencode_usage(lane, since, until):
+    ordered, truncated, invalid, unreadable = _opencode_messages(lane)
+    result = Usage(truncated=truncated or len(ordered) >= OPENCODE_MAX_MESSAGES,
+                   invalid_rows=invalid, unreadable_files=unreadable)
+    if ordered:
+        newest = ordered[-1]['usage']
+        result.context_now = sum(newest[k] for k in TOKEN_FIELDS if k != 'output_tokens')
+    for item in ordered[:OPENCODE_MAX_MESSAGES]:
+        if not since <= item['at'] <= until:
+            continue
+        result.turns += 1
+        result.missing_usage += not item['valid']
+        for key, count in item['usage'].items():
+            setattr(result, key, getattr(result, key) + count)
+        context = sum(item['usage'][k] for k in TOKEN_FIELDS if k != 'output_tokens')
+        result.max_context = max(result.max_context, context)
+        if item['model']:
+            result.latest_model = item['model']
+            if item['model'] not in result.models:
+                result.models.append(item['model'])
+    return result
+
+
+def opencode_observed_model(lane):
+    """Newest assistant model from the local OpenCode store, bounded to the recent tail."""
+    ordered, _, _, _ = _opencode_messages(lane)
+    for item in reversed(ordered):
+        if item['model']:
+            return item['model'], item['at'].isoformat()
+    return None, None
+
+
+def scope_key(lane):
+    if lane_harness(lane) == 'opencode':
+        return ('opencode', str(opencode_store(lane)), str(lane.cwd))
+    return ('claude', str(transcript_dir(lane)))
+
+
+def read_lane(lane, since, until):
+    if lane_harness(lane) == 'opencode':
+        return opencode_usage(lane, since, until)
+    return parse_transcripts(transcript_sources(lane), since, until)
+
+
 def model_matches(intended, actual):
-    """A short family alias accepts its versioned variants; a version stays pinned."""
+    """A short family alias accepts its versioned variants; a version stays pinned.
+
+    A provider-qualified OpenCode id (`provider/model`) matches the unqualified model.
+    """
     intended, actual = (v.lower().removeprefix('claude-') for v in (intended, actual))
+    if intended.rsplit('/', 1)[-1] == actual.rsplit('/', 1)[-1]:
+        return True
     return intended == actual or (intended.isalpha() and actual.startswith(intended + '-'))
 
 
@@ -211,9 +425,9 @@ def collect(lanes, at):
     Session-scoped lanes still count toward the pair: an unscoped lane sharing their directory
     would otherwise read their transcripts as its own.
     """
-    counts = Counter(str(transcript_dir(lane)) for lane in lanes)
-    return [(lane, None if not lane.session_id and counts[str(transcript_dir(lane))] > 1 else
-             parse_transcripts(transcript_sources(lane), at - timedelta(hours=1), at)) for lane in lanes]
+    counts = Counter(scope_key(lane) for lane in lanes)
+    return [(lane, None if not lane.session_id and counts[scope_key(lane)] > 1 else
+             read_lane(lane, at - timedelta(hours=1), at)) for lane in lanes]
 
 
 def doctor_warnings(manifest, at=None):

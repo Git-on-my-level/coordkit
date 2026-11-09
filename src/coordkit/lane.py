@@ -118,7 +118,7 @@ def launch_run(manifest, plan, suffix='', pool=None, prompt=None):
     directory = manifest.paths.out_dir/'req'/(plan['label']+suffix)
     directory.mkdir(parents=True, exist_ok=True)
     raw = AgentctlClient(manifest).delegate(prompt or plan['prompt'], directory,
-            key=plan['key']+suffix, pool=pool or plan['pool'], label=plan['label'], detach=True,
+            key=plan['key']+suffix, pool=pool or plan['pool'], selector=plan.get('selector'), label=plan['label'], detach=True,
             card=plan.get('card'), owns=plan['owns'], access=plan['access'], timeout='20m', wakeable=True)
     doc = json.loads(raw)
     if doc.get('ok') is not True:
@@ -129,6 +129,7 @@ def launch_run(manifest, plan, suffix='', pool=None, prompt=None):
         raise ToolError('agentctl',6,'missing execution id','protocol_error')
     plan['execution_id'] = execution
     plan['phase'] = 'running'
+    plan.pop('rate_limit', None)
     write_json(Path(plan['plan_file']),plan)
     event(manifest, {'kind':'launched','execution_id':execution,'label':plan['label'], 'card':plan.get('card'), 'owns':plan['owns']})
     AgentctlClient(manifest).subscribe(execution)
@@ -169,6 +170,67 @@ def expired(manifest, plan):
 
 
 HUNG_LIVENESS = {'unreachable', 'lost', 'exited', 'orphaned'}
+
+# Provider throttling is not a hung process. agentctl does not publish a stable
+# rate-limit field yet (another change is adding retry events under `status`), so
+# read every shape we know tolerantly and require an explicit 429/rate-limit code.
+RATE_LIMIT_STATES = {'rate_limited', 'rate-limited', 'paused_rate_limit', 'paused_provider_rate_limit'}
+RATE_LIMIT_CODES = {'provider_rate_limit', 'provider_rate_limited', 'rate_limited',
+                    'rate-limit', 'provider.rate-limit', 'quota_exceeded'}
+
+
+def rate_limit(status):
+    """Return retry evidence when a nonterminal run is only waiting on provider 429s."""
+    if not isinstance(status, dict):
+        return None
+    found = {}
+    state = status.get('state')
+    if state in RATE_LIMIT_STATES:
+        found.update(retry_after_ms=status.get('retry_after_ms'),
+                     reset_at=status.get('reset_at'), model=status.get('model'))
+    for container in (status.get('rate_limit'), status.get('rateLimit'), status.get('retry')):
+        if isinstance(container, dict):
+            found.update(container)
+    failure = status.get('failure') or status.get('error') or {}
+    if isinstance(failure, dict):
+        code = failure.get('code') or failure.get('type') or failure.get('category')
+        if code in RATE_LIMIT_CODES or failure.get('status') == 429 or failure.get('status_code') == 429:
+            found.update(failure)
+    events = status.get('events')
+    if isinstance(events, list):
+        for row in reversed(events[-64:]):
+            if not isinstance(row, dict) or row.get('type') not in ('retry', 'rate_limit', 'rate-limit'):
+                continue
+            error = row.get('error') if isinstance(row.get('error'), dict) else {}
+            if error.get('type') in ('provider.rate-limit', 'provider.rate_limit') or error.get('status') == 429:
+                found.update(error)
+                found['retry_after_ms'] = found.get('retryAfterMs', found.get('retry_after_ms'))
+                break
+    if not found:
+        return None
+    retry = found.get('retry_after_ms', found.get('retryAfterMs'))
+    return {'retry_after_ms': retry if type(retry) in (int, float) and retry >= 0 else None,
+            'reset_at': found.get('reset_at') or found.get('resets_at'),
+            'model': found.get('model') or found.get('model_id'),
+            'status': found.get('status') or 429}
+
+
+def note_rate_limit(manifest, plan, evidence):
+    """Persist retry evidence and emit one event per distinct retry window."""
+    record = dict(evidence, observed_at=time.time())
+    previous = plan.get('rate_limit') or {}
+    record['since'] = previous.get('since') or record['observed_at']
+    changed = {k: v for k, v in previous.items() if k != 'observed_at'} != {
+        k: v for k, v in record.items() if k != 'observed_at'}
+    plan['rate_limit'] = record
+    write_json(Path(plan['plan_file']), plan)
+    if changed:
+        event(manifest, {'kind': 'rate_limited', 'execution_id': plan.get('execution_id'),
+                         'label': plan['label'], 'retry_after_ms': record['retry_after_ms'],
+                         'reset_at': record['reset_at'], 'model': record['model']})
+        retry = record['retry_after_ms']
+        print(f'LANE_RATE_LIMITED {plan["label"]} retry_after_ms={retry if retry is not None else "unknown"}', flush=True)
+
 
 
 def hung(manifest, status, now=None):
@@ -227,6 +289,13 @@ def _watch(manifest, plan):
                 if not status.get('state'):
                     alarm(manifest, plan, 'execution_state_unknown', execution)
                     raise Refusal('execution_state_unknown', execution)
+                # A run waiting on provider 429 retries is throttled, not hung: keep its
+                # lease and let agentctl's backoff finish instead of cancelling work.
+                evidence = rate_limit(status)
+                if evidence and status.get('state') not in TERMINAL:
+                    note_rate_limit(manifest, plan, evidence)
+                    lease(manifest,plan,'renew')
+                    continue
                 # Re-read before cancelling: a run that answered again is not hung.
                 if hung(manifest, status) and hung(manifest, client.status(execution)):
                     return expire(manifest, plan, 'execution_hung')
@@ -391,6 +460,13 @@ def _recover(manifest,plan,dry_run=False):
         if status.get('state') not in TERMINAL:
             if not status.get('state'):
                 raise Refusal('execution_state_unknown',plan['execution_id'])
+            evidence = rate_limit(status)
+            if evidence:
+                note_rate_limit(manifest, plan, evidence)
+                lease(manifest,plan,'renew')
+                detach_watcher(manifest,plan)
+                print(f'RECONCILE watcher restored {plan["label"]} (rate limited)')
+                return True
             if hung(manifest, status) and hung(manifest, client.status(plan['execution_id'])):
                 expire(manifest, plan, 'execution_hung')
                 return True
