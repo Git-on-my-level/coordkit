@@ -1,7 +1,10 @@
 """Correlate direct loop asks across recovery and either shared answer consumer."""
+import contextlib
 import hashlib
 import re
+import sys
 
+from . import bus
 from .process import ToolError
 from .state import read_json, write_json
 
@@ -47,7 +50,8 @@ def receive(manifest, item):
         return False
     item = dict(item, ask_id=reference(ask_id))
     from .answers import queued
-    if queued(manifest, item):
+    answer = item.get('answer')
+    if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')) and queued(manifest, item):
         return True  # full reply already retained by the requester-scoped consumer
     target = path(manifest, ask_id)
     record = read_json(target)
@@ -112,10 +116,29 @@ def deliver(manifest, pending):
     record = read_json(pending)
     if not record:
         return
-    from .answers import shared_answer
-    item = {'ask_id': record['ask_id'], 'subject_ref': record['card'], 'answer': record['answer']}
-    if shared_answer(manifest, item):
-        pending.unlink(missing_ok=True)
+    from .answers import delivery_lock, shared_answer
+    answer = record['answer']
+    if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')):
+        item = {'ask_id': record['ask_id'], 'subject_ref': record['card'], 'answer': answer}
+        if shared_answer(manifest, item):
+            pending.unlink(missing_ok=True)
+        return
+    # Older CLI replies have no response identity to acknowledge. Preserve their
+    # original deterministic publication, including retries after append.
+    with delivery_lock(manifest) as acquired:
+        if not acquired:
+            return
+        owner = manifest.escalation.internal_to or manifest.obligations.coordinator or 'lead'
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                bus.main(['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
+                          '--topic', 'loop-failure-answer', '--subject', record['card'],
+                          '--rollback', 'Follow up on the original ANX ask to revise this answer.',
+                          '--id', 'answer-' + record['ask_id'], '--force', '--no-mirror',
+                          '--', answer_text(answer)], manifest)
+            pending.unlink(missing_ok=True)
+        except (SystemExit, ToolError, OSError, ValueError) as exc:
+            print(f'LOOP_ANSWER_PENDING {record["ask_id"]}: {exc}', file=sys.stderr)
 
 
 def drain(manifest):

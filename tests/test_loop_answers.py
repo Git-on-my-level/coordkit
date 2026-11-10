@@ -103,6 +103,49 @@ class LoopAnswersTests(FakeCase):
         self.assertFalse(pending.exists())
         self.assertEqual(len([r for r in self.rows() if r['id'] == self.publication_id(ask_id)]), 1)
 
+    def test_response_less_loop_answers_deliver_once_and_remove_pending(self):
+        self.manifest.escalation.internal_to = 'worker'
+        for index, payload in enumerate(({'answer': {'text': 'Pause'}},
+                                         {'answer': 'Pause'}, {'text': 'Pause'})):
+            with self.subTest(payload=payload):
+                ask_id = f'event:legacy-{index}'
+                loop_answers.remember(self.manifest, ask_id, 'card:loop-audit', 'audit', 'cycle')
+                item = dict(payload, ask_id=ask_id)
+                if index == 0:
+                    # A prior unread poll with the same response-less payload
+                    # must not suppress the legacy loop relay.
+                    with answers.delivery_lock(self.manifest) as acquired:
+                        self.assertTrue(acquired)
+                        answers.stage(self.manifest, item)
+                pending = loop_answers.path(self.manifest, ask_id).with_suffix('.answer.json')
+                for _ in range(2):  # a repeated shared-stream reply also deduplicates
+                    self.assertTrue(self.quiet(loop_answers.receive, self.manifest, item))
+                    self.assertFalse(pending.exists())
+                    self.quiet(loop_answers.drain, self.manifest)
+                rows = [r for r in self.rows() if r['id'] == 'answer-' + ask_id]
+                self.assertEqual(len(rows), 1)
+                self.assertEqual((rows[0]['text'], rows[0]['to'], rows[0]['kind']), ('Pause', 'worker', 'decision'))
+        self.assertFalse(any('/agent-inbox/answers/read' in c['args'] for c in self.calls()))
+
+    def test_response_less_append_then_failure_retries_without_duplicate(self):
+        self.manifest.escalation.internal_to = 'worker'
+        ask_id = 'event:legacy-append-retry'
+        loop_answers.remember(self.manifest, ask_id, 'card:loop-audit', 'audit', 'cycle')
+        pending = loop_answers.path(self.manifest, ask_id).with_suffix('.answer.json')
+        original = bus.main
+        def append_then_fail(*args):
+            original(*args)
+            raise OSError('crash after durable append')
+        with patch.object(bus, 'main', side_effect=append_then_fail):
+            self.quiet(loop_answers.receive, self.manifest,
+                       {'ask_id': ask_id, 'answer': {'text': '--no-mirror'}})
+        self.assertTrue(pending.exists())
+        self.quiet(loop_answers.drain, self.manifest)
+        self.assertFalse(pending.exists())
+        rows = [r for r in self.rows() if r['id'] == 'answer-' + ask_id]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['text'], '--no-mirror')
+
     def test_registration_failure_retries_locally_without_creating_another_ask(self):
         with patch.object(loop_answers, 'remember', side_effect=OSError('local write failed')):
             report = self.record_failure()

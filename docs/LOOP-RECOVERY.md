@@ -172,13 +172,55 @@ keep separate receipts and decision rows. Shared answer-stream consumers skip
 responses already delivered through this path. Loop relays and shared-stream
 reconciliation use the same `consume.lock`, per-response publication ID and
 exact-response acknowledgement, including replies arriving after the unread
-snapshot. Loop replies without response event IDs remain pending rather than being
-published through a second legacy path. Malformed ask references are quarantined
-as doctor-visible receipts without blocking later replies; explicit foreign
+snapshot. Legacy loop replies without response event IDs retain their direct
+`answer-<ask_id>` publication under the same lock. Successful delivery removes the
+loop's pending file; retries deduplicate that stable ID. These older replies
+cannot acknowledge an exact response event until the source supplies its ID.
+Malformed ask references are quarantined as doctor-visible receipts without blocking later replies; explicit foreign
 requester IDs are ignored. Pending subjectless receipts accept a validated card
 from later loop or exact question correlation without reopening delivered replies.
 Dry runs never consume answers. Keep these receipts
 with their corresponding ask and bus history.
+
+### Clearing a quarantined invalid answer
+
+`doctor` includes `invalid=N` and a `details=...` directory for malformed input.
+Inspect the exact `invalid-<hash>.json` receipt privately and correct or explicitly
+disposition its source item through the owning tool. Otherwise the next poll can
+recreate it. Preserve that disposition with the incident evidence. Then archive
+only that receipt under the same consumer lock (substitute the directory printed
+by doctor and the exact inspected filename):
+
+```sh
+python3 - '/path/from/doctor/details' 'invalid-<64-hex>.json' <<'PYTHON'
+import fcntl
+import json
+from pathlib import Path
+import re
+import sys
+
+home, name = Path(sys.argv[1]), sys.argv[2]
+if not re.fullmatch(r'invalid-[0-9a-f]{64}\.json', name):
+    raise SystemExit('expected an exact invalid receipt filename')
+with (home/'consume.lock').open('a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    source = home/name
+    if source.is_symlink() or json.loads(source.read_text()).get('phase') != 'invalid':
+        raise SystemExit('receipt is not a quarantined invalid item')
+    archive = home/'archive'
+    archive.mkdir(mode=0o700, exist_ok=True)
+    target = archive/name
+    if target.exists() or target.is_symlink():
+        raise SystemExit('archive already contains this receipt; preserve both copies')
+    source.rename(target)
+PYTHON
+```
+
+The nonblocking lock fails without moving anything while a consumer is active;
+retry after it finishes. The archive is outside the top-level receipt scan and
+retains the original payload. Rerun `coordkit --manifest /path/to/coordkit.toml doctor`
+to verify the warning cleared. This step neither acknowledges an ANX answer nor
+clears valid pending receipts or `status.json`; any other failures remain visible.
 
 ## Per-loop model selection
 

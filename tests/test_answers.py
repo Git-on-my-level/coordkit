@@ -151,6 +151,25 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(questions.load_all(self.manifest)['q-123abc']['state'], 'closed')
         self.assertEqual(len(self.reads()), 1)
 
+    def test_archiving_dispositioned_invalid_receipt_clears_quarantine_warning(self):
+        bad = dict(self.item, ask_id='event:bad/ask')
+        self.respond(self.listing([bad]))
+        self.consume()
+        self.assertIn('invalid=1', answers.health(self.manifest))
+        with answers.delivery_lock(self.manifest) as acquired:
+            self.assertTrue(acquired)
+            directory = answers.home(self.manifest)
+            archive = directory/'archive'
+            archive.mkdir()
+            receipt, = directory.glob('invalid-*.json')
+            self.assertEqual(read_json(receipt)['phase'], 'invalid')
+            receipt.rename(archive/receipt.name)
+        self.respond(self.listing([]))  # the bad source item has been repaired/dispositioned
+        self.consume()
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.reads(), [])
+
     def test_doctor_surfaces_unrouteable_answer(self):
         from coordkit import lifecycle
         self.item.pop('subject_ref')
@@ -312,7 +331,7 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual((self.rows()[0]['subject'], self.rows()[0]['re']), ('card:loop-audit', 'q-123abc'))
         self.assertEqual(len(self.reads()), 1)
 
-    def test_loop_stream_without_exact_response_id_waits_instead_of_legacy_publication(self):
+    def test_loop_stream_without_exact_response_id_uses_legacy_publication(self):
         from coordkit import loop_answers
         from coordkit.anxcli import AnxClient
         loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
@@ -320,10 +339,12 @@ class AnswerConsumptionTests(FakeCase):
         self.respond({'tool': 'anx', 'contains': ['await'],
                       'json': {'ok': True, 'result': {'answers': [self.item]}}})
         AnxClient(self.manifest).call('await', '--answers')
-        self.assertEqual(self.rows(), [])
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['id'], 'answer-' + self.item['ask_id'])
+        self.assertEqual(self.rows()[0]['text'], self.item['answer']['text'])
         self.assertEqual(self.reads(), [])
-        self.assertIn('pending=1', answers.health(self.manifest))
-        self.assertTrue(loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json').exists())
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.assertFalse(loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json').exists())
 
     def test_option_shaped_answer_is_inert_bus_text(self):
         for index, text in enumerate(('--force', '--no-mirror')):

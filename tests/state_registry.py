@@ -109,7 +109,7 @@ row('loop_answers.py', '.answer.json|writer:receive|writer:deliver',
     'any consuming ANX answer reader receives a registered loop reply through the shared client',
     'durable decision bus row with deterministic ID, then pending answer removed; answer remains in correlation receipt for reminder context',
     'reconciler retries each sweep; external calls bounded by the bus command',
-    'unread_answers doctor warning retains payload until canonical delivery and exact response acknowledgement; never applies an automatic repair')
+    'modern replies retain unread_answers warnings until exact acknowledgement; response-less legacy replies use a stable direct post and LOOP_ANSWER_PENDING on failure')
 row('loop_answers.py', 'reconcile/received-answers|*.json|writer:defer',
     'shared ANX client consumes a reply from the stream, before returning it to any caller',
     'reconciler durably merges into answers.json then unlinks the received file',
@@ -380,7 +380,7 @@ row('mcp_server.py', 'clients.json|clients.json.lock|writer:clients_main',
 
 row('answers.py', 'reconcile/unread-answers|consume.lock|*.json|.json|status.json|refs|.read-body|invalid-|phase:invalid|writer:delivery_lock|writer:reject|writer:consume|writer:stage|writer:process',
     'reconciler polls only its configured actor unread answers, retaining payloads before delivery',
-    'bus fsync then per-answer read acknowledgement; pending receipts retry after failure',
+    'bus fsync then per-answer read acknowledgement; pending receipts retry after failure; operator archives dispositioned invalid receipts per LOOP-RECOVERY.md',
     'snapshot bounded to ten pages and 2000 items; scope includes workspace actor and server; receipts retained',
     'doctor warns on unread delivery, quarantined malformed items or polling failures; no automatic execution or STOP changes')
 
