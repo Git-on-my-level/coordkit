@@ -238,6 +238,36 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(len(self.reads()), 1)
 
+    def test_question_sweep_metadata_variants_do_not_reopen_read_response(self):
+        from coordkit import questions
+        record = self.question()
+        self.respond(self.listing())
+        self.consume()
+        for text in ('Repair it now', 'A differently rendered answer'):
+            alternate = {'text': text, 'response_event_id': 'response', 'outcome': 'answered'}
+            with contextlib.redirect_stderr(io.StringIO()):
+                questions.relay_anx_answer(self.manifest, record, alternate)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+        receipt = read_json(answers.receipt_path(self.manifest, self.item))
+        self.assertEqual(receipt['phase'], 'read')
+        self.assertEqual(receipt['item']['answer'], self.item['answer'])
+
+    def test_question_sweep_retries_delivered_response_using_its_saved_payload(self):
+        from coordkit import questions
+        record = self.question()
+        self.respond(self.listing(), {'tool': 'anx', 'contains': ['/agent-inbox/answers/read'], 'exit': 6})
+        self.consume()
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, self.item))['phase'], 'delivered')
+        self.respond()
+        alternate = {'text': 'A differently rendered answer', 'response_event_id': 'response'}
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(questions.relay_anx_answer(self.manifest, record, alternate))
+        self.assertEqual(len(self.rows()), 1)
+        receipt = read_json(answers.receipt_path(self.manifest, self.item))
+        self.assertEqual(receipt['phase'], 'read')
+        self.assertEqual(receipt['item']['answer'], self.item['answer'])
+
     def test_known_question_supplies_card_for_subjectless_shared_reply(self):
         from coordkit.anxcli import AnxClient
         self.question()

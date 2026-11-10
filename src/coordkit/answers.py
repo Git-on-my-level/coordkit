@@ -165,7 +165,9 @@ def stage(manifest, item):
         item['answer'] = {'text': item['answer']}
     path = receipt_path(manifest, item)
     existing = read_json(path, {})
-    if existing.get('item', {}).get('answer') != item['answer']:
+    # This path identifies one immutable response event. Different CLI shapes
+    # of that event must not replace its saved payload or reopen its receipt.
+    if not existing:
         write_json(path, {'item': item, 'phase': 'pending'})
     elif existing.get('phase') not in ('delivered', 'read'):
         # Correlation may be registered after the consuming stream retained the
