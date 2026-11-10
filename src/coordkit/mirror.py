@@ -3,6 +3,7 @@ from .actl import AgentctlClient
 from .anxcli import AnxClient, CardUnresolved
 from .process import ToolError
 import sys
+import time
 
 
 def card_for(manifest, label, subject=None, *, resolve=None):
@@ -33,6 +34,32 @@ def card_for(manifest, label, subject=None, *, resolve=None):
     return card
 
 
+def board_write(client, row_id, what, *args, attempts=3, pause=1.0, missing_ok=False):
+    """Board-column writes (move, resolve, hold create) are projections of bus state, which stays
+    authoritative. A busy shared board answers them with a stale-token or reused-request conflict
+    (409, retryable), so retry, then skip loudly: one conflicting row must never stall projection."""
+    for attempt in range(attempts):
+        try:
+            client.call(*args, write=True)
+            return True
+        except ToolError as exc:
+            if missing_ok and exc.category == 'not_found':
+                print(f"MIRROR_BOARD_SKIPPED {what} {row_id}: card not found (never projected or already gone)", file=sys.stderr)
+                return False
+            if exc.category != 'conflict':
+                raise
+            if attempt + 1 < attempts:
+                time.sleep(pause * (attempt + 1))
+    print(f"MIRROR_BOARD_SKIPPED {what} {row_id}: board kept conflicting (x{attempts}); the bus row stands", file=sys.stderr)
+    return False
+
+
+def move_to_review(client, card, row_id, attempts=3, pause=1.0):
+    """The column is cosmetic; the note is the record."""
+    return board_write(client, row_id, f'move {card}', 'cards', 'move', card, '--column', 'review',
+                       attempts=attempts, pause=pause)
+
+
 def mirror(manifest, row, rows):
     kind = row['kind']
     if kind in ('fyi', 'msg') or row.get('copy_of'):
@@ -51,15 +78,18 @@ def mirror(manifest, row, rows):
     if kind in ('hold', 'unhold'):
         for pr in row['prs']:
             if kind == 'hold':
-                client.call('cards', 'create', '--board', manifest.anx.board, '--handle',
-                            f"hold-pr-{pr}-{row['frm']}", '--title', f"Hold PR {pr}: {row['text']}",
+                board_write(client, row.get('id'), f"hold PR {pr}", 'cards', 'create', '--board', manifest.anx.board,
+                            '--handle', f"hold-pr-{pr}-{row['frm']}", '--title', f"Hold PR {pr}: {row['text']}",
                             '--body', row['text'], '--column', 'blocked',
-                            '--request-key', f"ck-{manifest.project.name}-hold-{pr}-{row['frm']}", write=True)
+                            '--request-key', f"ck-{manifest.project.name}-hold-{pr}-{row['frm']}")
             else:
                 posters = {r['frm'] for r in rows if r.get('kind') == 'hold' and pr in r.get('prs', [])
                            and (r['frm'] == row['frm'] or row['frm'] == 'lead')}
                 for poster in sorted(posters):
-                    client.call('cards', 'resolve', f'card:hold-pr-{pr}-{poster}', '--reason', 'unhold', write=True)
+                    # ANX resolve needs evidence (--body or --resolution-ref); --reason only stamps the audit.
+                    board_write(client, row.get('id'), f"unhold PR {pr}", 'cards', 'resolve', f'card:hold-pr-{pr}-{poster}',
+                                '--reason', 'unhold', '--body', f"unhold {row.get('id')} ({row['frm']}): {row.get('text') or 'released'}"[:400],
+                                missing_ok=True)  # a hold card that was never projected is already released
         return
     if kind == 'ack':
         original = next(r for r in rows if r.get('id') == row['re'])
@@ -84,5 +114,5 @@ def mirror(manifest, row, rows):
                                  else row['to'] if kind == 'ask' else row['frm'])
     card = card_for(manifest, label, subject)
     if kind == 'handoff' and not card.removeprefix('card:').startswith(manifest.loop.receipt_prefix):
-        client.call('cards', 'move', card, '--column', 'review', write=True)
+        move_to_review(client, card, row['id'])
     client.note(card, f"{kind} {row['id']}: {row.get('needs') or row['text']}", evidence=row.get('evidence'))

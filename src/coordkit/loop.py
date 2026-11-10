@@ -309,7 +309,7 @@ def stop(manifest, name, reason):
     state.mkdir(parents=True, exist_ok=True)
     # STOP is the crash-safe intent; failed resolution is retried by repeating this verb.
     (state/'STOP').write_text(reason+'\n')
-    AnxClient(manifest).call('cards','resolve','card:'+handle,'--reason',reason,write=True)
+    AnxClient(manifest).call('cards','resolve','card:'+handle,'--reason',reason,'--body',f'Loop {name} stopped: {reason}',write=True)
     print(f'CYCLE_STOP {name}: {reason}')
     return 0
 

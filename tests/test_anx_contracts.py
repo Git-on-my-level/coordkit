@@ -60,7 +60,7 @@ class AnxContractsTests(FakeCase):
         mirror.mirror(self.manifest, dict(kind='unhold', frm='lead', prs=['142']), rows + [fixtures[-1]])
         calls = self.anx_calls()
         self.assertTrue(any(a[-4:] == ['--column', 'blocked', '--request-key', 'ck-sample-hold-142-worker'] for a in calls))
-        self.assertTrue(any(a[-5:] == ['cards', 'resolve', 'card:hold-pr-142-worker', '--reason', 'unhold'] for a in calls))
+        self.assertTrue(any(a[-7:-1] == ['cards', 'resolve', 'card:hold-pr-142-worker', '--reason', 'unhold', '--body'] for a in calls))
         self.assertTrue(any(a[-2:] == ['--next', '30m'] for a in calls))
         self.assertTrue(any(a[-3:] == ['--evidence', 'bus:a1', '--met'] for a in calls))
         self.assertTrue(any(a[-2:] == ['--evidence', 'bus:b1'] for a in calls))
