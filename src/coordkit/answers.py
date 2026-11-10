@@ -299,5 +299,6 @@ def health(manifest):
     pending = [read_json(p) for p in home(manifest).glob('*.json') if p.name != 'status.json']
     unresolved = [r for r in pending if r.get('phase') != 'read']
     if status.get('poll_error') or unresolved:
-        return f'WARN unread answer delivery pending={len(unresolved)} poll_error={status.get("poll_error")} details={home(manifest)}'
+        invalid = sum(r.get('phase') == 'invalid' for r in unresolved)
+        return f'WARN unread answer delivery pending={len(unresolved)} invalid={invalid} poll_error={status.get("poll_error")} details={home(manifest)}'
     return 'requester answers delivered before read acknowledgement' if status else 'not yet polled'

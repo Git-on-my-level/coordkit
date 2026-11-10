@@ -238,7 +238,7 @@ class AnswerConsumptionTests(FakeCase):
                 else:
                     self.respond(self.listing([bad, self.item]))
                     self.consume()
-                self.assertIn('WARN', answers.health(self.manifest))
+                self.assertIn('invalid=', answers.health(self.manifest))
         self.assertEqual(len(self.rows()), 2)
         self.assertEqual(len(self.reads()), 2)
         out = io.StringIO()
@@ -259,7 +259,15 @@ class AnswerConsumptionTests(FakeCase):
         self.assertFalse(answers.receipt_path(self.manifest, foreign).exists())
         self.assertEqual(loop_answers.deferred(self.manifest), [])
 
-    def test_dry_run_neither_polls_consumes_nor_acknowledges_pending_answers(self):
+    def test_explicit_requester_matching_own_principal_is_delivered(self):
+        self.item['requester_actor_id'] = 'actor:own-principal'
+        self.respond(self.listing(), {'tool': 'anx', 'contains': ['orient'],
+                     'json': {'ok': True, 'result': {'principal': {'id': 'own-principal'}}}})
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_dry_run_neither_consumes_nor_acknowledges_pending_answers(self):
         self.respond(self.listing())
         with patch.object(answers.bus, 'main', side_effect=SystemExit(1)):
             self.consume()
@@ -272,7 +280,7 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(self.rows(), [])
         self.assertEqual(self.reads(), [])
         calls = self.calls()[call_count:]
-        self.assertFalse(any(c['tool'] == 'anx' and ('inbox' in c['args'] or 'await' in c['args']) for c in calls))
+        self.assertFalse(any(c['tool'] == 'anx' and ('--unread' in c['args'] or 'await' in c['args']) for c in calls))
 
     def test_empty_read_response_is_not_accepted_as_acknowledgement(self):
         self.respond(self.listing(), {'tool': 'anx', 'contains': ['/agent-inbox/answers/read'],
