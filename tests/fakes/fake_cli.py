@@ -28,7 +28,7 @@ if name == 'anx':
         ('cards', 'get'): (1, set(), set(), set()),
         ('cards', 'list'): (0, set(), {'--board'}, set()),
         ('cards', 'move'): (1, {'--column'}, {'--reason'}, set()),
-        ('cards', 'resolve'): (1, {'--reason'}, set(), set()),
+        ('cards', 'resolve'): (1, set(), {'--reason', '--body', '--body-file', '--resolution-ref', '--column'}, set()),
         ('boards', 'get'): (1, set(), set(), set()),
         ('boards', 'create'): (0, {'--title', '--summary'}, set(), set()),
         ('work', 'cadence'): (1, {'--every', '--budget', '--stop-rule'}, set(), set()),
@@ -60,6 +60,8 @@ if name == 'anx':
                 positionals.append(token)
         if path == ('cards', 'create') and not {'--body', '--body-file'} & seen:
             error = '--body or --body-file is required'
+        if path == ('cards', 'resolve') and not {'--body', '--body-file', '--resolution-ref'} & seen:
+            error = 'resolution evidence (--body, --body-file or --resolution-ref) is required'
         if error or required - seen or len(positionals) != count:
             print(f'ANX contract {path}: {error or "missing flags/positionals"} {sorted(required-seen)}', file=sys.stderr)
             sys.exit(2)
@@ -71,7 +73,8 @@ if "--request-file" in args:
 # ANX rejects untyped local evidence; enforce that boundary in offline tests.
 if name == "anx" and "--evidence" in args:
     evidence = args[args.index("--evidence") + 1]
-    if ":" not in evidence:
+    prefix, sep, value = evidence.strip().partition(":")
+    if not (sep and prefix.strip() and value.strip()):
         print("--evidence requires a typed ref", file=sys.stderr)
         sys.exit(2)
 if name == "anx" and "ask" in args:

@@ -9,6 +9,12 @@ class CardUnresolved(ToolError):
         super().__init__("anx", 9, f"{card}: {detail}", "card_unresolved")
 
 
+def is_typed_ref(ref):
+    """ANX's own rule (validateTypedRef): a nonblank prefix and a nonblank value around the first colon."""
+    prefix, sep, value = ref.strip().partition(":")
+    return bool(sep and prefix.strip() and value.strip())
+
+
 class AnxClient:
     def __init__(self, manifest, actor=None):
         self.manifest = manifest
@@ -85,9 +91,18 @@ class AnxClient:
         args = ["note", card, text]
         if evidence:
             evidence = str(evidence)
-            if evidence.startswith(("/", "./", "../", "~")) or self.manifest.path(evidence).exists():
+            # An explicit path wins; then an explicit typed ref, even if a file of that name exists.
+            if evidence.startswith(("/", "./", "../", "~")) or (
+                    not is_typed_ref(evidence) and self.manifest.path(evidence).exists()):
                 evidence = "path:" + str(self.manifest.path(evidence))
-            args += ["--evidence", evidence]
+            # A SHA needs a digit and a letter; a numeric run id is not a commit.
+            elif re.fullmatch(r"(?=[0-9a-fA-F]*\d)(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{7,40}", evidence):
+                evidence = "commit:" + evidence.lower()
+            if is_typed_ref(evidence):
+                args += ["--evidence", evidence]
+            else:
+                # ANX rejects untyped refs; keep the value in the text so a bus row never blocks projection.
+                args[2] = f"{text} (evidence: {evidence})"
         if met:
             args += ["--met"]
         if next_in:

@@ -163,6 +163,56 @@ class EvidenceTests(FakeCase):
         AnxClient(self.manifest).note('card:x','receipt',evidence='event:receipt',met=True)
         self.assertIn('event:receipt',self.calls()[0]['args'])
 
+    def test_bare_commit_sha_gets_typed_commit_ref(self):
+        AnxClient(self.manifest).note('card:x','handoff',evidence='ABCDEF0123456789ABCDEF0123456789ABCDEF01')
+        args=self.calls()[0]['args']
+        self.assertEqual(args[args.index('--evidence')+1],'commit:abcdef0123456789abcdef0123456789abcdef01')
+
+    def test_numeric_run_id_stays_untyped(self):
+        AnxClient(self.manifest).note('card:x','handoff',evidence='12345678901')
+        args=self.calls()[0]['args']
+        self.assertNotIn('--evidence',args)
+        self.assertEqual(args[args.index('note')+2],'handoff (evidence: 12345678901)')
+
+    def test_untyped_evidence_moves_into_text(self):
+        AnxClient(self.manifest).note('card:x','handoff',evidence='data/missing/README.md')
+        args=self.calls()[0]['args']
+        self.assertNotIn('--evidence',args)
+        self.assertEqual(args[args.index('note')+2],'handoff (evidence: data/missing/README.md)')
+
+    def test_evidence_forms_match_anx_typed_ref_rule(self):
+        spaced = self.root/'meeting notes.md'
+        spaced.write_text('evidence')
+        repo = 'repo:workspace:handoffs/a--meeting notes.md@' + '0'*40 + '#sha256:' + 'a'*64
+        cases = [('bus:2e1688', 'bus:2e1688'), ('event:x', 'event:x'),
+                 ('https://example.com/pr/1', 'https://example.com/pr/1'),
+                 (repo, repo), (str(spaced), 'path:'+str(spaced)),
+                 ('path:', None), ('path:  ', None), (':x', None), ('word', None)]
+        for given, expected in cases:
+            with self.subTest(given=given):
+                calls = len(self.calls())
+                AnxClient(self.manifest).note('card:x', 'n', evidence=given)
+                args = self.calls()[calls]['args']
+                if expected is None:
+                    self.assertNotIn('--evidence', args)
+                    self.assertEqual(args[args.index('note')+2], f'n (evidence: {given})')
+                else:
+                    self.assertEqual(args[args.index('--evidence')+1], expected)
+
+    def test_typed_ref_wins_over_same_named_file(self):
+        (self.root/'event:receipt').write_text('collision')
+        AnxClient(self.manifest).note('card:x','n',evidence='event:receipt')
+        args=self.calls()[0]['args']
+        self.assertEqual(args[args.index('--evidence')+1],'event:receipt')
+
+    def test_empty_evidence_is_omitted(self):
+        for given in (None, ''):
+            calls = len(self.calls())
+            AnxClient(self.manifest).note('card:x', 'n', evidence=given)
+            args = self.calls()[calls]['args']
+            self.assertNotIn('--evidence', args)
+            self.assertEqual(args[args.index('note')+2], 'n')
+
     def test_false_success_not_found_envelope_refuses_card(self):
         self.respond({'tool':'anx','json':{'ok':False,'error':{'code':'not_found'}}})
         with self.assertRaises(CardUnresolved):
