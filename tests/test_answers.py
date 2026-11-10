@@ -200,6 +200,56 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(read_json(answers.receipt_path(self.manifest, self.item))['phase'], 'read')
         self.assertFalse(loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json').exists())
 
+    def test_subjectless_stream_reply_retries_after_loop_correlation_arrives(self):
+        from coordkit import loop_answers
+        from coordkit.anxcli import AnxClient
+        self.item.pop('subject_ref')
+        self.respond({'tool': 'anx', 'contains': ['await'],
+                      'json': {'ok': True, 'result': {'answers': [self.item]}}})
+        AnxClient(self.manifest).call('await', '--answers')
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.reads(), [])
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        self.respond()  # the shared stream will never return this response again
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            reconcile.reconcile(self.manifest)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['subject'], 'card:loop-audit')
+        self.assertEqual(len(self.reads()), 1)
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, self.item))['phase'], 'read')
+
+    def test_subjectless_reply_can_be_routed_by_later_question_correlation(self):
+        from coordkit import questions
+        self.item.pop('subject_ref')
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.reads(), [])
+        record = self.question()
+        with contextlib.redirect_stderr(io.StringIO()):
+            questions.relay_anx_answer(self.manifest, record, self.item['answer'])
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual((self.rows()[0]['to'], self.rows()[0]['re']), ('worker', 'q-123abc'))
+        self.assertEqual(len(self.reads()), 1)
+        # Stale subjectless data and later metadata cannot reopen the read receipt.
+        self.consume()
+        with contextlib.redirect_stderr(io.StringIO()):
+            questions.relay_anx_answer(self.manifest, record, self.item['answer'])
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_known_question_supplies_card_for_subjectless_shared_reply(self):
+        from coordkit.anxcli import AnxClient
+        self.question()
+        self.item.pop('subject_ref')
+        self.respond({'tool': 'anx', 'contains': ['await'],
+                      'json': {'ok': True, 'result': {'answers': [self.item]}}})
+        with contextlib.redirect_stderr(io.StringIO()):
+            AnxClient(self.manifest).call('await', '--answers')
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual((self.rows()[0]['subject'], self.rows()[0]['re']), ('card:loop-audit', 'q-123abc'))
+        self.assertEqual(len(self.reads()), 1)
+
     def test_loop_stream_without_exact_response_id_waits_instead_of_legacy_publication(self):
         from coordkit import loop_answers
         from coordkit.anxcli import AnxClient

@@ -77,17 +77,28 @@ def unread(client):
     raise ValueError('incomplete unread answer snapshot')
 
 
+def card_subject(item):
+    subject = item.get('subject_ref')
+    if not subject and isinstance(item.get('subject'), dict):
+        subject = item['subject'].get('ref')
+    if not isinstance(subject, str) or not re.fullmatch(r'card:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', subject):
+        raise ValueError('answer has no valid card subject')
+    return subject
+
+
 def route(manifest, item):
     from .questions import load_all
     ask_id = reference(item['ask_id'])
-    subject = item.get('subject_ref') or (item.get('subject') or {}).get('ref')
-    if not isinstance(subject, str) or not re.fullmatch(r'card:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', subject):
-        raise ValueError('answer has no valid card subject')
     # Exact question correlation retains its original asker and reply edge, even
     # if an agent already closed it before the human answered.
     for record in load_all(manifest).values():
         if record.get('anx_ask_id') and reference(record['anx_ask_id']) == ask_id:
+            try:
+                subject = card_subject(item)
+            except ValueError:
+                subject = card_subject({'subject_ref': manifest.escalation.card})
             return subject, record['asker'], record['qid'], record
+    subject = card_subject(item)
     rows = bus.read()
     from .briefs import blocker_title
     blockers = [r for r in bus.open_blockers(rows) if r.get('subject') == subject
@@ -156,6 +167,19 @@ def stage(manifest, item):
     existing = read_json(path, {})
     if existing.get('item', {}).get('answer') != item['answer']:
         write_json(path, {'item': item, 'phase': 'pending'})
+    elif existing.get('phase') not in ('delivered', 'read'):
+        # Correlation may be registered after the consuming stream retained the
+        # response. Enrich missing routing without reopening a delivered receipt.
+        try:
+            card_subject(existing['item'])
+        except ValueError:
+            try:
+                subject = card_subject(item)
+            except ValueError:
+                pass
+            else:
+                existing['item']['subject_ref'] = subject
+                write_json(path, existing)
     return path
 
 
@@ -286,9 +310,6 @@ def question_answer(manifest, record, answer):
             return False  # owning consumer will settle it; the question remains pending
         item = {'ask_id': reference(record['anx_ask_id']), 'subject_ref': manifest.escalation.card,
                 'answer': answer}
-        existing = read_json(receipt_path(manifest, item), {})
-        if existing.get('item'):
-            item = existing['item']
         path = stage(manifest, item)
         bus.configure(manifest)
         return process(manifest, path, AnxClient(manifest))

@@ -175,7 +175,9 @@ exact-response acknowledgement, including replies arriving after the unread
 snapshot. Loop replies without response event IDs remain pending rather than being
 published through a second legacy path. Malformed ask references are quarantined
 as doctor-visible receipts without blocking later replies; explicit foreign
-requester IDs are ignored. Dry runs never consume answers. Keep these receipts
+requester IDs are ignored. Pending subjectless receipts accept a validated card
+from later loop or exact question correlation without reopening delivered replies.
+Dry runs never consume answers. Keep these receipts
 with their corresponding ask and bus history.
 
 ## Per-loop model selection
