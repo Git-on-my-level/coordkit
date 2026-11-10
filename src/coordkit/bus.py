@@ -962,8 +962,14 @@ def dispatch(o):
         else:
             for r in rows:
                 state = 'STALE (recorded RUNNING)' if r['stale'] else r['state']
-                print(line(r, full=True) if o.full else f"{r.get('id', '-')} {r['frm']} {r['subject']} {state} age={age_minutes(r)}m "
-                      f"{' '.join((r.get('text') or '').split())[:160]}")
+                if o.full:
+                    text = line(r, full=True)
+                    if r.get('effective_state') != r.get('state'):
+                        text += f" [effective_state={r['effective_state']}]"
+                    print(text)
+                else:
+                    print(f"{r.get('id', '-')} {r['frm']} {r['subject']} {state} age={age_minutes(r)}m "
+                          f"{' '.join((r.get('text') or '').split())[:160]}")
             if not rows: print('no state rows')
     elif o.cmd == 'open-blockers':
         rows = [r for r in open_blockers(read(), orphaned=o.orphaned) if not o.owner or r.get('owner') == o.owner]

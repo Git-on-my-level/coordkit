@@ -297,6 +297,18 @@ class DerivedClosureTests(FakeCase):
         self.assertEqual(states['job-alpha']['effective_state'], 'RUNNING')
         self.assertFalse(states['job-alpha']['stale'])
 
+    def test_cli_state_full_shows_effective_state_when_it_differs(self):
+        by_id = {r['id']: r for r in self.fixture()}
+        live = row('worker-i-live', '2026-11-10T02:00:00Z', frm='worker-i', to='lead', kind='fyi')
+        selected = [by_id['r-010'], by_id['r-011'], live]
+        self.manifest.paths.bus_log.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest.paths.bus_log.write_text(''.join(json.dumps(r) + '\n' for r in selected))
+        bus.configure(self.manifest)
+        with patch.object(bus, 'now', return_value=dt.datetime.fromtimestamp(AT, dt.timezone.utc)):
+            out = self.invoke('state', '--full')[0]
+        self.assertIn('effective_state=STALE', out)
+        self.assertNotIn('effective_state=RUNNING', out)
+
     def test_latest_states_later_done_supersedes_running(self):
         running = row('s1', '2026-11-01T00:00:00Z', frm='worker', to='lead', kind='state',
                       state='RUNNING', subject='job')
