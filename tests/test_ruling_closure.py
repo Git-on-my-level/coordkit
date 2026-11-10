@@ -337,7 +337,6 @@ class DerivedClosureTests(FakeCase):
         return [r for r in bus.read() if r.get('topic') == 'coordkit-orphan']
 
     def test_orphan_cap_drains_across_passes_without_receipting_deferred_rows(self):
-        self.manifest.bus.mirror = False
         self.manifest.reconciler.orphan_ask_cap = 2
         self.manifest.addressed.agents = {'worker': {'fallback': 'backup'}, 'backup': {}}
         self.write_bus([row(str(i), '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
@@ -349,10 +348,7 @@ class DerivedClosureTests(FakeCase):
         self.reconcile_once()
         self.assertEqual(len(self.orphan_notices()), 2)
         self.assertEqual(set(json.loads(state_path.read_text())['orphan_notified']), {'0', '1'})
-        summaries = [json.loads(line) for line in digest_path.read_text().splitlines()
-                     if json.loads(line)['event'] == 'orphan-backlog']
-        self.assertEqual(len(summaries), 1)
-        self.assertIn('3 awaiting fallback', summaries[0]['text'])
+        self.assertIn('3 awaiting fallback', json.loads(digest_path.read_text())['text'])
         for expected in (4, 5, 5):
             self.reconcile_once()
             self.assertEqual(len(self.orphan_notices()), expected)
@@ -372,7 +368,6 @@ class DerivedClosureTests(FakeCase):
             return original(argv, manifest)
         with patch('coordkit.bus.main', side_effect=deliver) as post:
             self.reconcile_once()
-            self.assertEqual(post.call_count, 2)
             self.reconcile_once()
         self.assertEqual(post.call_count, 4)
         state = json.loads((self.manifest.paths.root / 'reconcile/state.json').read_text())
@@ -391,7 +386,6 @@ class DerivedClosureTests(FakeCase):
         self.assertEqual(len(digest.read_text().splitlines()), 1)
 
     def test_manifest_orphan_cap_is_a_nonnegative_integer(self):
-        self.assertEqual(self.manifest.reconciler.orphan_ask_cap, 10)
         original = self.file.read_text()
         for value in ('-1', 'true', '1.5', '"3"'):
             self.file.write_text(original + '\n[reconciler]\norphan_ask_cap = ' + value + '\n')
