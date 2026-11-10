@@ -64,11 +64,32 @@ def _superseder(candidates, index, numbers):
 
 
 def _fallback(owner, retired, fallbacks, default_fallback):
-    record = retired.get(name_key(owner), {})
-    target = record.get('owner') or fallbacks.get(name_key(owner)) or default_fallback or 'lead'
+    def redirect(name):
+        record = retired.get(name_key(name), {})
+        return record.get('owner') or fallbacks.get(name_key(name))
+
+    target = redirect(owner) or default_fallback or 'lead'
     # A malformed retirement record must not route an orphan back to its dead owner.
     if name_key(target) == name_key(owner):
         target = default_fallback or 'lead'
+    # Follow retirement redirects and declared fallbacks until a live name is
+    # reached. A cycle is not a recipient: fall through to the coordinator/lead.
+    seen = {name_key(owner)}
+    while name_key(target) in retired:
+        key = name_key(target)
+        if key in seen:
+            target = None
+            break
+        seen.add(key)
+        target = redirect(target)
+        if not target:
+            target = None
+            break
+    if target is None or name_key(target) in retired:
+        for candidate in (default_fallback, 'lead'):
+            if candidate and name_key(candidate) not in retired:
+                return candidate
+        return 'lead'
     return target
 
 

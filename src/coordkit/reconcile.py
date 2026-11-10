@@ -11,7 +11,7 @@ from . import bus, deadletters, lane, loop, loop_answers, escalation
 from .stock import held, report
 from .actl import AgentctlClient
 from .anxcli import AnxClient, CardUnresolved, past_promises
-from .manifest import duration
+from .manifest import ManifestError, duration
 from .merge import gh
 from .mirror import card_for
 from .process import ToolError, parse_ts, run
@@ -81,10 +81,11 @@ def reconcile(manifest, dry_run=False, at=None):
         if not dry_run:
             try:
                 perform()
-            except ToolError as exc:
+            except (ToolError, ManifestError) as exc:
                 if not ask:
                     raise
-                # An undeliverable escalation (the bus itself failing, no relay) is retried next run, never lost.
+                # An undeliverable escalation (the bus itself failing, no relay, or
+                # an unroutable retired target) is retried next run, never lost.
                 print(f'RECONCILE {check} escalation_failed {detail}: {exc}')
                 findings=True
                 return

@@ -117,6 +117,28 @@ class DerivedClosureTests(FakeCase):
         revived = closure.derive([ruling, row('new-post', '2026-11-10T00:00:00Z', frm='worker', to='lead', kind='msg')], AT)
         self.assertEqual([r['id'] for r in revived['open']], ['r'])
 
+    def test_retired_fallback_follows_redirects_and_avoids_cycles(self):
+        ruling = row('r', '2026-11-01T00:00:00Z', frm='lead', to='worker', kind='ruling', owner='worker')
+        # A retirement redirect that is itself retired follows its own redirect.
+        view = closure.derive([ruling], AT,
+                              retired={'worker': {'owner': 'backup'}, 'backup': {'owner': 'lead'}},
+                              fallbacks={'worker': 'backup'}, default_fallback='lead')
+        self.assertEqual(view['orphaned'][0]['fallback'], 'lead')
+        # A declared fallback that is itself retired follows its own redirect.
+        view = closure.derive([ruling], AT, retired={'backup': {'owner': 'lead'}},
+                              fallbacks={'worker': 'backup'}, default_fallback='lead')
+        self.assertEqual(view['orphaned'][0]['fallback'], 'lead')
+        # A cycle never loops and falls back to the coordinator, then lead.
+        view = closure.derive([ruling], AT,
+                              retired={'worker': {'owner': 'backup'}, 'backup': {'owner': 'worker'}},
+                              fallbacks={'worker': 'backup'}, default_fallback='coordinator')
+        self.assertEqual(view['orphaned'][0]['fallback'], 'coordinator')
+        view = closure.derive([ruling], AT,
+                              retired={'worker': {'owner': 'backup'}, 'backup': {'owner': 'worker'},
+                                       'coordinator': {'owner': 'backup'}},
+                              fallbacks={'worker': 'backup'}, default_fallback='coordinator')
+        self.assertEqual(view['orphaned'][0]['fallback'], 'lead')
+
     def test_supersession_precedes_silence_and_unknown_precedes_open(self):
         rows = {r['id']: r for r in self.fixture()}
         activity = row('act', '2026-10-22T00:00:00Z', frm='worker-b', to='lead', kind='fyi')
@@ -361,6 +383,26 @@ class DerivedClosureTests(FakeCase):
         self.assertEqual(len(self.orphan_notices()), 1)
         state = json.loads((self.manifest.paths.root / 'reconcile/state.json').read_text())
         self.assertIn('r', state['orphan_notified'])
+
+    def test_reconcile_unroutable_orphan_does_not_abort_other_orphans(self):
+        self.manifest.bus.mirror = False
+        self.manifest.obligations.coordinator = 'lead'
+        self.manifest.addressed.agents = {'a': {}, 'b': {}, 'c': {'fallback': 'd'}, 'd': {}}
+        lanes = self.manifest.paths.bus_log.parent / 'state' / 'lanes.json'
+        lanes.parent.mkdir(parents=True, exist_ok=True)
+        # a and b redirect to each other; the coordinator and lead are retired too,
+        # so the first orphan has no live recipient at all.
+        lanes.write_text(json.dumps({'a': {'owner': 'b'}, 'b': {'owner': 'a'},
+                                     'lead': {'owner': 'a'}}))
+        rows = [row('a-r', '2026-10-31T00:00:00Z', origin='coordkit', frm='lead', to='a',
+                    kind='ruling', owner='a'),
+                row('c-r', '2026-10-31T00:00:00Z', origin='coordkit', frm='lead', to='c',
+                    kind='ruling', owner='c')]
+        self.write_bus(rows)
+        self.reconcile_once()
+        targets = {re.search(r'Orphaned \w+ (\S+):', r['text']).group(1): r['to']
+                   for r in self.orphan_notices()}
+        self.assertEqual(targets, {'c-r': 'd'})
 
     def test_reconcile_live_blocker_is_not_orphaned(self):
         self.manifest.bus.mirror = False
