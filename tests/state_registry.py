@@ -76,7 +76,11 @@ row('mcp_server.py', 'state:preauth|state:work|state:timer', 'a connection is ac
 row('mcp_server.py', 'kill', 'an operator disables the connector', 'operator removes the file', 'until removed (explicit kill switch)', 'every request answers 503 while present')
 row('mcp_server.py', 'cursors|aliases.json', 'observe existing bus CLI state for read receipts and routing', 'CLI replaces cursors/address book; MCP never writes them', 'snapshot per request, no persisted cache', 'missing/malformed cursors give no receipt; aliases fall back to manifest')
 row('roster.py', 'readers.json|state', 'doctor roster check reads the incumbent reader declaration and bus state directory', 'read-only; doctor writes no roster state', 'bounded bus tail per doctor run; no latch', 'doctor roster warning only')
-row('addressed.py', 'lead-digest.ndjson|state:lead_digest_at|writer:flush_lead_digest', 'an escalation or machine finding that would wake the lead (lead_escalations=false)', 'flushed into one fyi to the lead, queue truncated under its writer lock', 'one hour (DIGEST_EVERY)', 'the hourly digest itself')
+row('addressed.py', 'lead-digest.ndjson|state:lead_digest_at|writer:flush_lead_digest', 'an escalation or machine finding that would wake the lead (lead_escalations=false); orphan batches replace one recipient snapshot in place', 'oldest 12 entries published and removed under writer lock; remainder retained; absent orphan groups clear queued snapshots', 'one hour (DIGEST_EVERY); 1000 entries or 8 MiB reject enqueue without eviction', 'the hourly digest itself plus remaining count and inspection commands')
+row('addressed.py', 'reconcile|state.json|run.lock|writer:_flush_lead_digest', 'hourly digest publication succeeds for queued orphan batches',
+    'batch and member receipts persist in reconcile/state.json before rendered queue entries are removed',
+    'shared nonblocking reconcile/run.lock prevents concurrent state overwrites; busy reconciler defers flush until next sweep',
+    'unrendered or failed batches stay queued and unreceipted; published batches suppress reconciliation retries')
 row('addressed.py', 'state:dead_owner_ids', 'obligations whose owner is not listening at the hourly digest', 'replaced by each digest; an unchanged set downgrades the digest from ask to fyi', 'one hour (DIGEST_EVERY)', 'the digest RE-HOME line, as an ask to the lead')
 row('bus.py', 'mirror-dead-letters.jsonl', 'a mirrored row whose card definitely does not exist', 'append-only audit; reconcile counts new entries', 'next reconcile interval', 'internal mirror ask (escalation.internal_to)')
 row('reconcile.py', 'state/mirror-dead-letters.jsonl|state:mirror_dead_seen', 'reconcile reports new mirror dead letters', 'advances to the dead-letter count', 'one reconcile interval', 'internal mirror ask')
@@ -139,8 +143,18 @@ row('reconcile.py', 'state:unresolved_obligations|writer:obligation_card|writer:
 row('stock.py', 'reconcile/state.json', 'read obligations_since (adoption baseline)', 'set once by the first live reconcile; archived by a cutover apply', 'persistent baseline, no latch', 'stock counts only adopted rows; reconcile asks on thresholds')
 row('reconcile.py', 'run.lock|skip.json', 'reconciler invocation', 'kernel unlock; next run replaces skip receipt', 'nonblocking lock; two interval health limit', 'skip receipt and doctor red')
 row('reconcile.py', 'state:fired|writer:action', 'successful action receipt', 'age GC or normal recovery clears alarm key', 'reconciler.state_max_age', 're-ask unresolved obligation after retention window')
-row('reconcile.py', 'state:orphan_notified', 'orphan routed to its retirement redirect or declared fallback',
-    'one permanent receipt per original obligation id; no repeat while history is retained',
+row('reconcile.py', 'state:orphan_recipient_cursor', 'recipient batch fallback attempted', 'next attempt replaces cursor',
+    'one durable recipient; pending recipients rotate after it; legacy orphan_cursor is ignored', 'failed routes remain retryable without starving later orphans')
+row('reconcile.py', 'state:orphan_batches', 'recipient batch delivered successfully; digest flush writes only rendered batches under reconcile/run.lock',
+    'next delivered batch replaces recipient digest and post ID; retained across empty sets and fired GC',
+    'one receipt per fallback recipient; stable publication ID retries after a crash before receipt',
+    'changed batches retry via the recipient cursor and supersede the prior keyed ask')
+row('reconcile.py', 'state:orphan_pending', 'batch first attempted; digest and age clock persist before publication',
+    'successful ask or digest flush clears matching attempt; absent groups clear pending clocks; changed batch replaces clock',
+    'one clock per pending fallback recipient; independent of delivery receipts',
+    'delayed retries preserve text and publication ID without prematurely marking delivery')
+row('reconcile.py', 'state:orphan_notified', 'orphan routed to its retirement redirect or declared fallback; digest flush writes only after publication',
+    'one durable receipt per original obligation id, refreshed only by delivered changed batches',
     'obligations.inactive_after controls entry, not receipt expiry; stable ask id/key aids crash recovery',
     'unreceipted orphan is retried; separate bus orphaned list keeps it visible for re-homing')
 row('reconcile.py', 'state:dead', 'known owner absent', 'release clears key; live owner clears; age GC', 'stale_lease_grace / state_max_age', 'lead lease handoff with note')
