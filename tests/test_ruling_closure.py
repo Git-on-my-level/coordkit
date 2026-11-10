@@ -383,6 +383,9 @@ class DerivedClosureTests(FakeCase):
         self.assertEqual(state['orphan_notified'], {})
         digest = self.manifest.paths.root / 'state/addressed/lead-digest.ndjson'
         self.assertEqual(len(digest.read_text().splitlines()), 1)
+        self.write_bus([])
+        self.reconcile_once()
+        self.assertEqual(digest.read_text(), '')
 
     def test_manifest_orphan_cap_is_a_nonnegative_integer(self):
         original = self.file.read_text()

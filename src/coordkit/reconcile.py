@@ -312,7 +312,7 @@ def reconcile(manifest, dry_run=False, at=None):
             if not dry_run:
                 write_json(state_path, state)
     awaiting_orphans = [row for row in eligible_orphans if row['id'] not in orphan_notified]
-    if eligible_orphans:
+    if eligible_orphans or not dry_run:
         findings = findings or bool(awaiting_orphans)
         summary = (f'Orphan backlog: {len(awaiting_orphans)} awaiting fallback; '
                    f'per-pass attempt cap={manifest.reconciler.orphan_ask_cap}; '
