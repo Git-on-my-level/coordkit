@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from coordkit import bus, closure, incumbent, reconcile
+from coordkit import addressed, bus, closure, incumbent, reconcile
 from coordkit.manifest import ManifestError, duration, load
 from tests.support import FakeCase
 
@@ -353,6 +353,33 @@ class DerivedClosureTests(FakeCase):
             self.reconcile_once()
             self.assertEqual(len(self.orphan_notices()), expected)
         self.assertEqual(digest_path.read_text(), '')
+
+    def test_resolved_orphans_drop_the_stale_backlog_snapshot(self):
+        self.manifest.reconciler.orphan_ask_cap = 0
+        ruling = row('r', '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
+                     to='worker', kind='ruling', owner='worker')
+        self.write_bus([ruling])
+        digest_path = self.manifest.paths.root / 'state/addressed/lead-digest.ndjson'
+        self.reconcile_once()
+        self.assertIn('1 awaiting fallback', digest_path.read_text())
+        addressed.to_lead_digest(self.manifest, 'finding', 'keep me', at=AT)
+        self.write_bus([ruling, row('ack', '2026-11-01T00:00:00Z', origin='coordkit', frm='worker',
+                                    to='lead', kind='ack', re='r')])
+        queued = digest_path.read_text()
+        self.reconcile_once(dry_run=True)
+        self.assertEqual(digest_path.read_text(), queued)
+        self.reconcile_once()
+        cleared = digest_path.read_text()
+        self.assertIn('keep me', cleared)
+        self.assertNotIn('orphan-backlog', cleared)
+        self.assertNotIn('awaiting fallback', cleared)
+        self.reconcile_once()
+        self.assertEqual(digest_path.read_text(), cleared)
+
+    def test_reconcile_without_orphans_does_not_create_a_digest(self):
+        self.write_bus([])
+        self.reconcile_once()
+        self.assertFalse((self.manifest.paths.root / 'state/addressed/lead-digest.ndjson').exists())
 
     def test_failed_orphan_attempts_are_capped_and_remain_retryable(self):
         from coordkit.process import ToolError

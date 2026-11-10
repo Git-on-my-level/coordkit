@@ -307,12 +307,18 @@ def lead_names(manifest):
 
 def to_lead_digest(manifest, event, text, row=None, at=None):
     path = home(manifest)/'lead-digest.ndjson'
+    # Empty orphan-backlog means the snapshot is gone. A missing queue stays missing.
+    if event == 'orphan-backlog' and not text and not path.is_file():
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         items = digest_items(stream)
         if event == 'orphan-backlog':
-            items = [i for i in items if i.get('event') != event]
+            kept = [i for i in items if i.get('event') != event]
+            if not text and len(kept) == len(items):
+                return
+            items = kept
         item = {'at': time.time() if at is None else at, 'event': event, 'text': text[:400],
                 'id': (row or {}).get('id')}
         if any(all(old.get(k) == item[k] for k in ('event', 'text', 'id')) for old in items):

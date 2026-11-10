@@ -312,16 +312,19 @@ def reconcile(manifest, dry_run=False, at=None):
             if not dry_run:
                 write_json(state_path, state)
     awaiting_orphans = [row for row in eligible_orphans if row['id'] not in orphan_notified]
-    if eligible_orphans or not dry_run:
+    summary = ''
+    if eligible_orphans:
         findings = findings or bool(awaiting_orphans)
         summary = (f'Orphan backlog: {len(awaiting_orphans)} awaiting fallback; '
                    f'per-pass attempt cap={manifest.reconciler.orphan_ask_cap}; '
                    'sample IDs: ' + ', '.join(row['id'] for row in awaiting_orphans[:6]) +
                    '. Inspect bus open-rulings --orphaned and open-blockers --orphaned.')
         print('RECONCILE orphans ' + summary)
-        if not dry_run:
-            from .addressed import to_lead_digest
-            to_lead_digest(manifest, 'orphan-backlog', summary if awaiting_orphans else '', at=at)
+    # Refresh the replaceable snapshot after the derived set drains too. Empty text
+    # drops the prior count so a close, reassignment, or revival cannot flush stale IDs.
+    if not dry_run:
+        from .addressed import to_lead_digest
+        to_lead_digest(manifest, 'orphan-backlog', summary if awaiting_orphans else '', at=at)
     if eligible_orphans and not dry_run:
         # Once-only receipt retention deliberately survives closed rows and fired GC.
         print(f'RECONCILE orphans count={len(eligible_orphans)} awaiting_fallback={len(awaiting_orphans)}')
