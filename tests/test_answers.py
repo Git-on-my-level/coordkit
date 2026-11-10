@@ -502,6 +502,34 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(decisions), 1)
         self.assertEqual((decisions[0]['to'], decisions[0]['re']), ('worker', 'first-blocker'))
 
+    def test_published_blocker_proof_survives_identically_titled_open_blocker(self):
+        from coordkit import briefs
+        first = {'id': 'first-blocker', 'kind': 'blocker', 'origin': 'coordkit',
+                 'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
+                 'text': 'Need a decision', 'ts': '2026-01-01T00:00:00Z'}
+        second = dict(first, id='second-blocker')
+        bus.configure(self.manifest)
+        bus.append([first], project=False)
+        self.item.update(title=briefs.blocker_title(first), answer={'text': 'Repair it now'})
+        self.respond(self.listing())
+        self.consume()
+        self.item['answer'] = {'text': 'Repair it now', 'response_event_id': 'response'}
+        self.respond(self.listing())
+        original = answers.bus.main
+        def publish_then_open_another(*args):
+            original(*args)
+            bus.append([second], project=False)
+            raise OSError('crash after publish, before receipt settlement')
+        with patch.object(answers.bus, 'main', side_effect=publish_then_open_another):
+            self.consume()
+        self.consume()
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.assertEqual(len(self.reads()), 1)
+        self.assertEqual([r['id'] for r in bus.open_blockers(self.rows())], ['second-blocker'])
+        decisions = [r for r in self.rows() if r['kind'] == 'decision']
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual((decisions[0]['to'], decisions[0]['re']), ('worker', 'first-blocker'))
+
     def test_matching_blocker_reply_settles_legacy_receipt_after_blocker_closes(self):
         from coordkit import briefs
         blocker = {'id': 'need-worker', 'kind': 'blocker', 'origin': 'coordkit',

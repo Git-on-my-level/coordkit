@@ -101,13 +101,18 @@ def route(manifest, item, publication=None):
     subject = card_subject(item)
     rows = bus.read()
     from .briefs import blocker_title
-    candidates = bus.open_blockers(rows)
+    def matches(row):
+        return row.get('subject') == subject and item.get('title') in (
+            blocker_title(row), ('Coordkit: ' + row['text'])[:99].rstrip('.?') + '?')
     if publication and publication.get('re'):
-        # A prior verified decision may already have closed its exact blocker.
-        proven = [r for r in rows if r.get('kind') == 'blocker' and r.get('id') == publication['re']]
-        candidates = list({r['id']: r for r in [*candidates, *proven]}.values())
-    blockers = [r for r in candidates if r.get('subject') == subject
-                and item.get('title') in (blocker_title(r), ('Coordkit: ' + r['text'])[:99].rstrip('.?') + '?')]
+        # The immutable reply edge proves the original matching blocker even if
+        # another identically titled blocker opened after publication. A title
+        # mismatch must still use normal routing, preserving other recipients.
+        proven = [r for r in rows if r.get('kind') == 'blocker'
+                  and r.get('id') == publication['re'] and matches(r)]
+        if len(proven) == 1:
+            return subject, proven[0]['frm'], proven[0]['id'], None
+    blockers = [r for r in bus.open_blockers(rows) if matches(r)]
     if len(blockers) == 1:
         return subject, blockers[0]['frm'], blockers[0]['id'], None
     # A card-level answer is still work for the configured coordinator. Never
