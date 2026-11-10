@@ -34,7 +34,7 @@ def card_for(manifest, label, subject=None, *, resolve=None):
     return card
 
 
-def board_write(client, row_id, what, *args, attempts=3, pause=1.0):
+def board_write(client, row_id, what, *args, attempts=3, pause=1.0, missing_ok=False):
     """Board-column writes (move, resolve, hold create) are projections of bus state, which stays
     authoritative. A busy shared board answers them with a stale-token or reused-request conflict
     (409, retryable), so retry, then skip loudly: one conflicting row must never stall projection."""
@@ -43,6 +43,9 @@ def board_write(client, row_id, what, *args, attempts=3, pause=1.0):
             client.call(*args, write=True)
             return True
         except ToolError as exc:
+            if missing_ok and exc.category == 'not_found':
+                print(f"MIRROR_BOARD_SKIPPED {what} {row_id}: card not found (never projected or already gone)", file=sys.stderr)
+                return False
             if exc.category != 'conflict':
                 raise
             if attempt + 1 < attempts:
@@ -85,7 +88,8 @@ def mirror(manifest, row, rows):
                 for poster in sorted(posters):
                     # ANX resolve needs evidence (--body or --resolution-ref); --reason only stamps the audit.
                     board_write(client, row.get('id'), f"unhold PR {pr}", 'cards', 'resolve', f'card:hold-pr-{pr}-{poster}',
-                                '--reason', 'unhold', '--body', f"unhold {row.get('id')} ({row['frm']}): {row.get('text') or 'released'}"[:400])
+                                '--reason', 'unhold', '--body', f"unhold {row.get('id')} ({row['frm']}): {row.get('text') or 'released'}"[:400],
+                                missing_ok=True)  # a hold card that was never projected is already released
         return
     if kind == 'ack':
         original = next(r for r in rows if r.get('id') == row['re'])

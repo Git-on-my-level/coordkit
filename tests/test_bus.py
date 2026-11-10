@@ -307,6 +307,14 @@ class BusTests(FakeCase):
         self.assertTrue(any('hold-pr-123-worker' in a for a in args))
         self.assertTrue(any('card:hold-pr-123-worker' in a and 'unhold' in a for a in args))
 
+    def test_unhold_of_never_projected_hold_advances_cursor(self):
+        self.post('hold','--pr','777','--no-mirror')
+        self.respond({'tool':'anx','contains':['cards','resolve'],'exit':4,
+                      'json':{'ok':False,'error':{'code':'not_found','message':'card not found'}}})
+        out, err = self.post('unhold','--pr','777')
+        self.assertIn('MIRROR_BOARD_SKIPPED unhold PR 777', err)
+        self.assertEqual(int((self.manifest.paths.root/'state/mirror.cursor').read_text()), len(self.rows()))
+
     def test_no_mirror_after_separator_is_text_and_keeps_mirroring(self):
         self.post('lesson', '--', text='--no-mirror')
         self.assertEqual(self.rows()[0]['text'], '--no-mirror')
