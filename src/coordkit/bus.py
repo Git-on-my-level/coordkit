@@ -408,6 +408,12 @@ def open_blockers(rows, at=None, *, orphaned=False):
     return [r for r in closure_view(rows, at)[group] if r.get('kind') == 'blocker']
 
 
+def unresolved_blockers(rows, at=None):
+    """Open and orphaned blockers: both still need an answer to close them."""
+    view = closure_view(rows, at)
+    return [r for group in ('open', 'orphaned') for r in view[group] if r.get('kind') == 'blocker']
+
+
 def latest_states(rows):
     """{(lane, subject): newest state row}."""
     out = {}

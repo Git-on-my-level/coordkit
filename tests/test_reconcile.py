@@ -152,6 +152,20 @@ class ReconcileTests(FakeCase):
             self.run_reconcile()
             self.assertEqual(len([r for r in bus.read() if r['kind']=='decision' and not r.get('copy_of')]),1)
 
+    def test_answer_to_an_orphaned_blocker_keeps_its_reply_edge(self):
+        p=self.manifest.paths.bus_log; p.parent.mkdir(parents=True)
+        p.write_text(json.dumps({'kind':'blocker','id':'b1','origin':'coordkit','frm':'worker','owner':'lead','to':'lead',
+                                'subject':'card:task','topic':'t','needs':'decide','text':'question','ts':'1970-01-01T00:00:00Z'})+'\n')
+        (self.manifest.paths.root/'state').mkdir()
+        (self.manifest.paths.root/'state/mirror.cursor').write_text('1')
+        self.respond({'tool':'anx','contains':['await'],'json':{'ok':True,'result':{'answers':[
+            {'ask_id':'a1','subject_ref':'card:task','answer':{'text':'proceed'}}]}}})
+        with patch('coordkit.closure.time.time',return_value=300000):
+            self.run_reconcile(at=300000)
+        bus.configure(self.manifest)
+        decisions=[r for r in bus.read() if r['kind']=='decision' and not r.get('copy_of')]
+        self.assertEqual([(r['to'],r.get('re')) for r in decisions],[('worker','b1')])
+
     def test_lead_principal_id_lease_is_the_lead(self):
         self.respond(self.cards({'handle':'loop-audit','column_key':'in_progress'}),
                      {'tool':'anx','contains':['lease','show'],'json':{'ok':True,'result':{'lease':{'owner':'actor:agent_lead','epoch':1}}}},

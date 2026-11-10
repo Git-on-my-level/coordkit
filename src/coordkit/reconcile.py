@@ -454,7 +454,7 @@ def reconcile(manifest, dry_run=False, at=None):
                     pending.remove(item)
                     write_json(pending_path,pending)
                 continue
-            candidates=[r for r in bus.open_blockers(bus.read()) if r.get('subject') == subject and r.get('owner') == 'lead']
+            candidates=[r for r in bus.unresolved_blockers(bus.read()) if r.get('subject') == subject and r.get('owner') == 'lead']
             if len(candidates) > 1 and item.get('title'):
                 candidates=[r for r in candidates if item['title'] in (briefs.blocker_title(r), ('Coordkit: '+r['text'])[:99].rstrip('.?')+'?')]
             if len(candidates) != 1:

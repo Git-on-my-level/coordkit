@@ -716,6 +716,21 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(decisions), 1)
         self.assertEqual((decisions[0]['to'], decisions[0]['re']), ('worker', 'first-blocker'))
 
+    def test_orphaned_blocker_still_correlates_an_answer(self):
+        from coordkit import briefs
+        blocker = {'id': 'orphan-blocker', 'kind': 'blocker', 'origin': 'coordkit',
+                   'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
+                   'text': 'Need a decision', 'ts': '2020-01-01T00:00:00Z'}
+        bus.configure(self.manifest)
+        bus.append([blocker], project=False)
+        self.assertEqual(bus.open_blockers(self.rows()), [])
+        self.assertEqual([r['id'] for r in bus.open_blockers(self.rows(), orphaned=True)],
+                         ['orphan-blocker'])
+        self.item.update(title=briefs.blocker_title(blocker), answer={'text': 'Repair it now'})
+        subject, owner, re_id, question = answers.route(self.manifest, self.item)
+        self.assertEqual((subject, owner, re_id, question),
+                         ('card:loop-audit', 'worker', 'orphan-blocker', None))
+
     def test_published_blocker_proof_survives_identically_titled_open_blocker(self):
         from coordkit import briefs
         first = {'id': 'first-blocker', 'kind': 'blocker', 'origin': 'coordkit',

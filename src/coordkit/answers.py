@@ -140,7 +140,7 @@ def route(manifest, item, publication=None, sweep=None, fallback=None):
                   and r.get('id') == publication['re'] and matches(r)]
         if len(proven) == 1:
             return subject, proven[0]['frm'], proven[0]['id'], None
-    blockers = [r for r in bus.open_blockers(rows) if matches(r)]
+    blockers = [r for r in bus.unresolved_blockers(rows) if matches(r)]
     if len(blockers) == 1:
         return subject, blockers[0]['frm'], blockers[0]['id'], None
     # A card-level answer is still work for the configured coordinator. Never
