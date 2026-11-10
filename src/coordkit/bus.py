@@ -408,6 +408,16 @@ def open_blockers(rows, at=None, *, orphaned=False):
     return [r for r in closure_view(rows, at)[group] if r.get('kind') == 'blocker']
 
 
+def unclosed_blockers(rows, at=None):
+    """Blockers with no closing decision yet, including silent-owner orphans.
+
+    The live open list hides an owner who never posts. A later answer still has
+    to bind that row so the decision carries ``--re`` and derived closure counts it.
+    """
+    view = closure_view(rows, at)
+    return [r for group in ('open', 'orphaned') for r in view[group] if r.get('kind') == 'blocker']
+
+
 def latest_states(rows):
     """{(lane, subject): newest state row}."""
     out = {}

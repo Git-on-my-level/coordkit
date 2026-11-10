@@ -140,7 +140,9 @@ def route(manifest, item, publication=None, sweep=None, fallback=None):
                   and r.get('id') == publication['re'] and matches(r)]
         if len(proven) == 1:
             return subject, proven[0]['frm'], proven[0]['id'], None
-    blockers = [r for r in bus.open_blockers(rows) if matches(r)]
+    # Orphans stay unclosed. A human owner who never posts leaves the live set
+    # after inactive_after; the decision must still name that blocker.
+    blockers = [r for r in bus.unclosed_blockers(rows) if matches(r)]
     if len(blockers) == 1:
         return subject, blockers[0]['frm'], blockers[0]['id'], None
     # A card-level answer is still work for the configured coordinator. Never

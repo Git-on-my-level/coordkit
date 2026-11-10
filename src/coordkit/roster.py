@@ -48,6 +48,9 @@ def _declared_names(manifest):
     names.update(agent.label for agent in manifest.agents)
     names.update(lane.name for lane in manifest.lanes)
     names.update(manifest.mcp.post_as)
+    # Reconcile, wakes and orphan asks post as these names all day. They are
+    # declared toolkit traffic, not unenrolled agents.
+    names.update(manifest.addressed.internal_senders)
     parent = manifest.paths.bus_log.parent
     for path in (parent / 'readers.json', parent / 'state' / 'readers.json',
                  manifest.paths.root / 'readers.json'):

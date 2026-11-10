@@ -909,6 +909,24 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(self.rows()), 1)
         self.assertIn('pending=1', answers.health(self.manifest))
 
+    def test_orphaned_blocker_answer_still_binds_reply_edge(self):
+        from coordkit import briefs
+        blocker = {'id': 'need-worker', 'kind': 'blocker', 'origin': 'coordkit',
+                   'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
+                   'text': 'Need a decision', 'ts': '2026-01-01T00:00:00Z'}
+        bus.configure(self.manifest)
+        bus.append([blocker], project=False)
+        self.assertEqual(bus.open_blockers(self.rows()), [])
+        self.assertEqual([r['id'] for r in bus.open_blockers(self.rows(), orphaned=True)], ['need-worker'])
+        self.item.update(title=briefs.blocker_title(blocker),
+                         answer={'text': 'Repair it now', 'response_event_id': 'response'})
+        self.respond(self.listing())
+        self.consume()
+        decisions = [r for r in self.rows() if r['kind'] == 'decision']
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual((decisions[0]['to'], decisions[0].get('re')), ('worker', 'need-worker'))
+        self.assertEqual(bus.open_blockers(self.rows(), orphaned=True), [])
+
     def test_card_level_answer_never_closes_an_unrelated_blocker(self):
         bus.configure(self.manifest)
         bus.append([{'id': 'unrelated-blocker', 'kind': 'blocker', 'origin': 'coordkit',
