@@ -86,7 +86,7 @@ def card_subject(item):
     return subject
 
 
-def route(manifest, item):
+def route(manifest, item, publication=None):
     from .questions import load_all
     ask_id = reference(item['ask_id'])
     # Exact question correlation retains its original asker and reply edge, even
@@ -101,7 +101,11 @@ def route(manifest, item):
     subject = card_subject(item)
     rows = bus.read()
     from .briefs import blocker_title
-    blockers = [r for r in bus.open_blockers(rows) if r.get('subject') == subject
+    candidates = bus.open_blockers(rows)
+    if publication and publication.get('re'):
+        # A prior verified decision may already have closed its exact blocker.
+        candidates = [r for r in rows if r.get('kind') == 'blocker' and r.get('id') == publication['re']]
+    blockers = [r for r in candidates if r.get('subject') == subject
                 and item.get('title') in (blocker_title(r), ('Coordkit: ' + r['text'])[:99].rstrip('.?') + '?')]
     if len(blockers) == 1:
         return subject, blockers[0]['frm'], blockers[0]['id'], None
@@ -130,7 +134,11 @@ def receipt_path(manifest, item):
     response = answer.get('response_event_id') or answer.get('response_event_ref')
     if isinstance(response, str):
         response = response.removeprefix('event:')
-    key = json.dumps([reference(item['ask_id']), response or answer], sort_keys=True)
+    # Without an event ID, keep conflicting routing metadata as separate work.
+    # Otherwise a local delivery on one card could overwrite another's receipt.
+    identity = response or {'answer': answer, 'subject': item.get('subject_ref') or item.get('subject'),
+                            'title': item.get('title')}
+    key = json.dumps([reference(item['ask_id']), identity], sort_keys=True)
     return home(manifest)/(hashlib.sha256(key.encode()).hexdigest() + '.json')
 
 
@@ -163,13 +171,21 @@ def delivered(row, subject, owner, text):
     return True
 
 
+def legacy_route(manifest, item, publication=None):
+    from .loop_answers import path as loop_ask_path
+    loop_record = read_json(loop_ask_path(manifest, reference(item['ask_id'])), {})
+    if loop_record and not (item.get('subject_ref') or item.get('subject')):
+        item = dict(item, subject_ref=loop_record['card'])
+    return route(manifest, item, publication)
+
+
 def legacy_path(manifest, ask_id):
     return home(manifest)/('legacy-' + hashlib.sha256(reference(ask_id).encode()).hexdigest() + '.json')
 
 
-def legacy_match(manifest, item, owner):
+def legacy_match(manifest, item, owner=None):
     """Find a verified publication for a response-less loop representation."""
-    ask_id, subject = reference(item['ask_id']), card_subject(item)
+    ask_id = reference(item['ask_id'])
     text = str(item['answer'].get('text') or item['answer'].get('outcome') or '')
     prefix = 'answer-' + ask_id
     rows = bus.read()
@@ -178,7 +194,14 @@ def legacy_match(manifest, item, owner):
         if not isinstance(row_id, str):
             continue
         if (row_id == prefix or re.fullmatch(re.escape(prefix) + r'-[0-9a-f]{16}', row_id)):
-            if delivered(row, subject, owner, text):
+            try:
+                if owner is None:
+                    subject, target, _, _ = legacy_route(manifest, item, row)
+                else:
+                    subject, target = card_subject(item), owner
+            except ValueError:
+                continue
+            if delivered(row, subject, target, text):
                 return row_id
     return None
 
@@ -225,6 +248,9 @@ def settle_legacy_receipts(manifest, item, row_id, pending=None):
     ask_id = reference(item['ask_id'])
     text = str(item['answer'].get('text') or item['answer'].get('outcome') or '')
     paths = home(manifest).glob('*.json') if pending is None else pending.pop((ask_id, text), [])
+    row = next((r for r in bus.read() if r.get('id') == row_id), None)
+    if row is None:
+        return
     for path in paths:
         queued = read_json(path, {})
         if queued.get('phase') != 'pending':
@@ -236,8 +262,17 @@ def settle_legacy_receipts(manifest, item, row_id, pending=None):
         if (payload.get('ask_id') == ask_id
                 and isinstance(answer, dict) and not (answer.get('response_event_id') or answer.get('response_event_ref'))
                 and str(answer.get('text') or answer.get('outcome') or '') == text):
-            queued.update(phase='legacy-delivered', bus_id=row_id, source_read=False)
-            write_json(path, queued)
+            try:
+                subject, owner, _, _ = legacy_route(manifest, payload, row)
+            except ValueError:
+                if pending is not None:
+                    pending.setdefault((ask_id, text), []).append(path)
+                continue
+            if delivered(row, subject, owner, text):
+                queued.update(phase='legacy-delivered', bus_id=row_id, source_read=False)
+                write_json(path, queued)
+            elif pending is not None:
+                pending.setdefault((ask_id, text), []).append(path)
 
 
 def stage(manifest, item):
@@ -248,23 +283,15 @@ def stage(manifest, item):
     existing = read_json(path, {})
     answer = item['answer']
     if not (answer.get('response_event_id') or answer.get('response_event_ref')):
-        from .loop_answers import path as loop_ask_path
-        loop_record = read_json(loop_ask_path(manifest, item['ask_id']), {})
-        local = item
-        if loop_record and not (item.get('subject_ref') or item.get('subject')):
-            local = dict(item, subject_ref=loop_record['card'])
         bus.configure(manifest)
-        try:
-            subject, owner, _, _ = route(manifest, local)
-        except ValueError:
-            pass  # retain the unrouteable reply for doctor, as for identified replies
-        else:
-            row_id = legacy_match(manifest, dict(local, subject_ref=subject), owner)
-            if row_id:
-                record_legacy_delivery(manifest, dict(local, subject_ref=subject), owner, row_id)
-                write_json(path, {'item': item, 'phase': 'legacy-delivered',
-                                  'bus_id': row_id, 'source_read': False})
-                return path
+        row_id = legacy_match(manifest, item)
+        if row_id:
+            row = next(r for r in bus.read() if r.get('id') == row_id)
+            subject, owner, _, _ = legacy_route(manifest, item, row)
+            record_legacy_delivery(manifest, dict(item, subject_ref=subject), owner, row_id)
+            write_json(path, {'item': item, 'phase': 'legacy-delivered',
+                              'bus_id': row_id, 'source_read': False})
+            return path
     # This path identifies one immutable response event. Different CLI shapes
     # of that event must not replace its saved payload or reopen its receipt.
     if not existing:
@@ -317,6 +344,12 @@ def process(manifest, path, client, legacy_pending=None):
     item = record['item']
     ask_id = item['ask_id']
     try:
+        answer = item['answer']
+        if not (answer.get('response_event_id') or answer.get('response_event_ref')):
+            # Correlation can arrive after publication and after the source read
+            # ack. Recheck retained legacy work even when no new inbox item arrives.
+            if read_json(stage(manifest, item)).get('phase') == 'legacy-delivered':
+                return True
         response_id = answer_id(item)
         subject, owner, re_id, question = route(manifest, item)
         answer = item['answer']

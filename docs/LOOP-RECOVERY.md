@@ -183,6 +183,7 @@ ask-only row and acknowledges that exact response. Further distinct event IDs
 still publish separately, including identical answer text. In the reverse order,
 a response-less representation reuses the verified canonical bus row. Both paths
 verify the complete payload, including spill files, before recording delivery.
+Conflicting card or recipient metadata remains pending and doctor-visible.
 Malformed ask references are quarantined as doctor-visible receipts without blocking later replies; explicit foreign
 requester IDs are ignored. Pending subjectless receipts accept a validated card
 from later loop or exact question correlation without reopening delivered replies.

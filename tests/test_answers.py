@@ -428,6 +428,109 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(self.reads()), 1)
         self.assertIn('invalid=1', answers.health(self.manifest))
 
+    def test_response_less_receipts_keep_conflicting_cards_separate(self):
+        alpha = dict(self.item, subject_ref='card:alpha', answer={'text': 'Repair it now'})
+        beta = dict(alpha, subject_ref='card:beta')
+        self.respond(self.listing([alpha, beta]))
+        self.consume()
+        self.assertNotEqual(answers.receipt_path(self.manifest, alpha), answers.receipt_path(self.manifest, beta))
+        self.assertIn('pending=2', answers.health(self.manifest))
+
+    def test_legacy_delivery_cannot_overwrite_another_cards_pending_receipt(self):
+        alpha = dict(self.item, subject_ref='card:alpha', answer={'text': 'Repair it now'})
+        self.respond(self.listing([alpha]))
+        self.consume()
+        self.legacy_reply()  # publishes the loop-audit decision, not card:alpha
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, alpha))['phase'], 'pending')
+        self.assertIn('pending=1', answers.health(self.manifest))
+        self.assertEqual(self.rows()[0]['subject'], 'card:loop-audit')
+
+    def test_legacy_receipt_for_different_card_stays_pending(self):
+        self.item.update(subject_ref='card:alpha', answer={'text': 'Repair it now'})
+        legacy = dict(self.item)
+        self.respond(self.listing())
+        self.consume()
+        self.item.update(subject_ref='card:beta', answer={'text': 'Repair it now', 'response_event_id': 'response'})
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(self.rows()[0]['subject'], 'card:beta')
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, legacy))['phase'], 'pending')
+        self.assertIn('pending=1', answers.health(self.manifest))
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_legacy_receipt_for_different_recipient_stays_pending(self):
+        from coordkit import briefs
+        blocker = {'id': 'need-worker', 'kind': 'blocker', 'origin': 'coordkit',
+                   'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
+                   'text': 'Need a decision', 'ts': '2026-01-01T00:00:00Z'}
+        bus.configure(self.manifest)
+        bus.append([blocker], project=False)
+        self.item.update(title=briefs.blocker_title(blocker), answer={'text': 'Repair it now'})
+        legacy = dict(self.item)
+        self.respond(self.listing())
+        self.consume()
+        self.item.pop('title')
+        self.item['answer'] = {'text': 'Repair it now', 'response_event_id': 'response'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, legacy))['phase'], 'pending')
+        self.assertIn('pending=1', answers.health(self.manifest))
+        decisions = [r for r in self.rows() if r['kind'] == 'decision']
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]['to'], 'coordinator')
+
+    def test_matching_blocker_reply_settles_legacy_receipt_after_blocker_closes(self):
+        from coordkit import briefs
+        blocker = {'id': 'need-worker', 'kind': 'blocker', 'origin': 'coordkit',
+                   'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
+                   'text': 'Need a decision', 'ts': '2026-01-01T00:00:00Z'}
+        bus.configure(self.manifest)
+        bus.append([blocker], project=False)
+        self.item.update(title=briefs.blocker_title(blocker), answer={'text': 'Repair it now'})
+        self.respond(self.listing())
+        self.consume()
+        self.item['answer'] = {'text': 'Repair it now', 'response_event_id': 'response'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(bus.open_blockers(self.rows()), [])
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.item['answer'] = {'text': 'Repair it now', 'outcome': 'answered'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_subjectless_legacy_receipt_settles_with_matching_loop_destination(self):
+        from coordkit import loop_answers
+        self.item.pop('subject_ref')
+        self.item['answer'] = {'text': 'Repair it now'}
+        self.respond(self.listing())
+        self.consume()
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        self.item.update(subject_ref='card:loop-audit', answer={'text': 'Repair it now', 'response_event_id': 'response'})
+        self.respond(self.listing())
+        self.consume()
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_late_correlation_settles_legacy_receipt_after_identified_reply_is_read(self):
+        from coordkit import loop_answers
+        self.item.pop('subject_ref')
+        self.item['answer'] = {'text': 'Repair it now'}
+        self.respond(self.listing())
+        self.consume()
+        self.item.update(subject_ref='card:loop-audit', answer={'text': 'Repair it now', 'response_event_id': 'response'})
+        self.respond(self.listing())
+        self.consume()
+        self.assertIn('pending=1', answers.health(self.manifest))
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        self.respond(self.listing([]))
+        self.consume()
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+
     def test_legacy_binding_survives_archived_loop_correlation(self):
         from coordkit import loop_answers
         self.legacy_reply()
