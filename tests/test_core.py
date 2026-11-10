@@ -168,6 +168,12 @@ class EvidenceTests(FakeCase):
         args=self.calls()[0]['args']
         self.assertEqual(args[args.index('--evidence')+1],'commit:abcdef0123456789abcdef0123456789abcdef01')
 
+    def test_numeric_run_id_stays_untyped(self):
+        AnxClient(self.manifest).note('card:x','handoff',evidence='12345678901')
+        args=self.calls()[0]['args']
+        self.assertNotIn('--evidence',args)
+        self.assertEqual(args[args.index('note')+2],'handoff (evidence: 12345678901)')
+
     def test_untyped_evidence_moves_into_text(self):
         AnxClient(self.manifest).note('card:x','handoff',evidence='data/missing/README.md')
         args=self.calls()[0]['args']

@@ -93,7 +93,8 @@ class AnxClient:
             evidence = str(evidence)
             if evidence.startswith(("/", "./", "../", "~")) or self.manifest.path(evidence).exists():
                 evidence = "path:" + str(self.manifest.path(evidence))
-            elif re.fullmatch(r"[0-9a-fA-F]{7,40}", evidence):
+            # A SHA needs a digit and a letter; a numeric run id is not a commit.
+            elif re.fullmatch(r"(?=[0-9a-fA-F]*\d)(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{7,40}", evidence):
                 evidence = "commit:" + evidence.lower()
             if is_typed_ref(evidence):
                 args += ["--evidence", evidence]
