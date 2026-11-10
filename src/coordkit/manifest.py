@@ -165,7 +165,8 @@ class Reconciler:
     blocker_ask_after: str = "30m"
     answer_max_age: str = "1h"
     state_max_age: str = "7d"
-    orphan_ask_cap: int = 10          # per-pass attempts; zero queues only a digest summary
+    orphan_ask_cap: int = 10          # recipients per pass; zero queues only a digest summary
+    orphan_batch_lines: int = 10     # displayed orphan lines per recipient (1..50)
     # Git directories shared by linked worktrees (object stores). A core.worktree in their
     # common config silently redirects every linked worktree to one tree.
     shared_git_dirs: list = field(default_factory=list)
@@ -356,7 +357,7 @@ def _table(cls, data, section, required=()):
     lists = {"failure_realert_intervals", "directories", "flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as", "observed_labels"}
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects", "repos", "selector"}
     booleans = {"required", "stop_requires_waiter", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
-    integers = {"orphan_ask_cap", "fetch_timeout_seconds", "max_bytes", "auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes", "roster_unenrolled_posts", "roster_sink_received"} | {f.name for f in fields(Limits)}
+    integers = {"orphan_batch_lines", "orphan_ask_cap", "fetch_timeout_seconds", "max_bytes", "auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes", "roster_unenrolled_posts", "roster_sink_received"} | {f.name for f in fields(Limits)}
     numbers = {"wake_debounce_minutes", "idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
     for key, value in data.items():
         ok = (isinstance(value, list) and all(type(x) is (int if key == "ci" else str) for x in value)) if key in lists else (
@@ -366,6 +367,8 @@ def _table(cls, data, section, required=()):
             raise ManifestError(f"invalid_type: {section}.{key}")
         if key in (integers | numbers) and value < 0:
             raise ManifestError(f"invalid_value: {section}.{key} must be nonnegative")
+        if key == "orphan_batch_lines" and not 1 <= value <= 50:
+            raise ManifestError(f"invalid_value: {section}.{key} must be between 1 and 50")
         if key in {"aliases", "pools", "projects", "repos", "selector"} and not all(isinstance(v, str) and v for v in value.values()):
             raise ManifestError(f"invalid_type: {section}.{key} values must be nonempty strings")
     return cls(**data)

@@ -307,24 +307,25 @@ def lead_names(manifest):
 
 def to_lead_digest(manifest, event, text, row=None, at=None):
     path = home(manifest)/'lead-digest.ndjson'
-    # Empty orphan-backlog means the snapshot is gone. A missing queue stays missing.
-    if event == 'orphan-backlog' and not text and not path.is_file():
+    snapshot = event == 'orphan-backlog' or event.startswith('orphan-batch:')
+    # Empty text removes a replaceable orphan snapshot. A missing queue stays missing.
+    if snapshot and not text and not path.is_file():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         items = digest_items(stream)
-        if event == 'orphan-backlog':
+        if snapshot:
             kept = [i for i in items if i.get('event') != event]
             if not text and len(kept) == len(items):
                 return
             items = kept
-        item = {'at': time.time() if at is None else at, 'event': event, 'text': text[:400],
+        item = {'at': time.time() if at is None else at, 'event': event, 'text': text if event.startswith('orphan-batch:') else text[:400],
                 'id': (row or {}).get('id')}
         if any(all(old.get(k) == item[k] for k in ('event', 'text', 'id')) for old in items):
             return
         stream.seek(0); stream.truncate()
-        tail = [*items[-999:], item] if text or event != 'orphan-backlog' else items[-999:]
+        tail = [*items[-999:], item] if text or not snapshot else items[-999:]
         stream.write(b''.join((json.dumps(i) + '\n').encode() for i in tail))
         stream.flush(); os.fsync(stream.fileno())
         fcntl.flock(stream, fcntl.LOCK_UN)
@@ -364,7 +365,8 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
         items = digest_items(stream)
         if not items and not backlog and not pending and not dead and not opened and not missing and not machine_lines:
             return
-        lines = [f"- {i.get('event')}: {i.get('text', '')[:200]}" for i in items[-12:]]
+        lines = [f"- {i.get('event')}: " + (i.get('text', '') if i.get('event', '').startswith('orphan-batch:')
+                                                 else i.get('text', '')[:200]) for i in items[-12:]]
         lines.extend(machine_lines)
         lines += ['- ' + i['text'] for i in missing[:12]]
         lines += [f"- {r['qid']}: unanswered, no default ({r.get('reasks', 0)} re-asks)" for r in unanswered[:12]]

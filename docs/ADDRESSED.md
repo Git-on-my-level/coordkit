@@ -79,11 +79,23 @@ ruling sharing a PR supersedes the earlier one.
 Rulings and blockers do not remain actionable forever when their owner cannot answer.
 `[obligations].inactive_after` (default `72h`) derives retired or silent owners into the
 separate `bus open-rulings --orphaned` / `open-blockers --orphaned` lists. Reconciliation
-routes each orphan once to the retirement redirect, declared agent fallback, or coordinator.
-Digest-only targets, including the obligations coordinator, queue a lead-digest finding.
-`[reconciler].orphan_ask_cap` limits attempts per pass (default `10`, `0` for summary
-only). Deferred and failed items retain no delivery receipt and rotate across passes;
-one replaceable digest summary reports the latest remaining backlog. Dry runs write nothing.
+groups orphans by retirement redirect, declared agent fallback, or coordinator. Each pass
+sends at most one batched ask per fallback recipient. Each ask lists up to
+`[reconciler].orphan_batch_lines` orphans (default `10`, integer `1..50`), with kind,
+ID, original owner and a one-line subject. The rest appear as a count plus
+`bus open-rulings --orphaned` and `bus open-blockers --orphaned` to inspect all items.
+The full batch content determines a stable post ID; unchanged batches send nothing,
+and changed batches supersede the previous ask under the same recipient key.
+Digest-only targets, including the obligations coordinator, queue one replaceable
+batched lead-digest entry per recipient instead of an ask.
+`[reconciler].orphan_ask_cap` bounds recipient batches attempted per pass (default
+`10`, nonnegative integer; `0` queues only the global backlog summary). Digest-only
+batches also count toward this cap. A durable recipient cursor advances before
+attempting delivery, so failures and aborted passes cannot starve other recipients.
+Only delivered batches earn durable `orphan_notified` receipts for their members;
+retries reuse the stable post ID after an abort. Batch receipts survive action-receipt
+expiry. One replaceable digest summary reports the remaining unnotified backlog and
+clears when it drains. Dry runs write nothing.
 The fallback never creates a second owner-bearing ruling or blocker. A latest `RUNNING`
 state from an equally silent lane is reported as `STALE`, without changing the retained row.
 MCP's `ack` and `inbox` tools retain their addressed behavior. The thin CLI wrappers are retired.

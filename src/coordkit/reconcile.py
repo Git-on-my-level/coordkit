@@ -65,6 +65,7 @@ def reconcile(manifest, dry_run=False, at=None):
     state.setdefault('holds', {})
     # One durable receipt per orphan, independent of fired's rolling retention.
     orphan_notified = state.setdefault('orphan_notified', {})
+    orphan_batches = state.setdefault('orphan_batches', {})
     missing = state.setdefault('missing_cards', {})
     cache_scope = card_cache_scope(manifest)
     prune_missing_cards(missing, cache_scope, at)
@@ -292,42 +293,73 @@ def reconcile(manifest, dry_run=False, at=None):
     rulings = [row for row in derived['open'] if row.get('kind') == 'ruling']
     blockers = [row for row in derived['open'] if row.get('kind') == 'blocker']
     open_obligations = {row['id'] for row in rulings + blockers}
-    # Orphans are not repeatedly chased as if their dead owner were live. Route a
-    # single plain ask to the retirement redirect, declared fallback, or coordinator.
+    # Group the complete current orphan set, including already notified members:
+    # grouping only pending rows would shrink/repost the batch on the next pass.
+    from .addressed import digest_only, to_lead_digest
     eligible_orphans = [row for row in derived['orphaned'] if since_adoption(row)]
-    pending_orphans = [row for row in eligible_orphans if row['id'] not in orphan_notified]
-    pending_orphans.sort(key=lambda row: (row['id'] <= state.get('orphan_cursor', ''), row['id']))
-    for row in pending_orphans[:manifest.reconciler.orphan_ask_cap]:
-        state['orphan_cursor'] = row['id']
-        # Keep retry rotation across aborted passes; delivery receipts still wait
-        # for a successful send, retried with the same stable post ID.
-        if not dry_run:
-            write_json(state_path, state)
-        key = 'orphan:' + row['kind'] + ':' + row['id']
-        fallback = row['fallback']
-        text = (f'Orphaned {row["kind"]} {row["id"]}: owner {row["owner"]} is {row["orphan_reason"]}; '
-                f'from {row["frm"]}: {(row.get("text") or "")[:120]}. Reassign, answer or close it.')
-        action('orphans', key, fallback, lambda notify_row=row, notify_text=text, target=fallback: notify(
-            ['post', '--from', 'coordkit', '--to', target, '--kind', 'ask', '--topic', 'coordkit-orphan',
-             '--id', 'orphan-' + hashlib.sha256(key.encode()).hexdigest()[:24],
-             '--key', key, '--no-auto-default', '--no-mirror', '--force', notify_text], manifest), ask=True)
-        if key in fired and row['id'] not in orphan_notified:
-            orphan_notified[row['id']] = {'kind': row['kind'], 'fallback': fallback, 'at': at}
-            if not dry_run:
-                write_json(state_path, state)
-    awaiting_orphans = [row for row in eligible_orphans if row['id'] not in orphan_notified]
+    groups = {}
+    for row in eligible_orphans:
+        groups.setdefault(row['fallback'], []).append(row)
+    pending_batches = []
+    for target, members in sorted(groups.items()):
+        members.sort(key=lambda row: row['id'])
+        content = [[row['kind'], row['id'], row['owner'],
+                    ' '.join((row.get('text') or '').split())] for row in members]
+        digest = hashlib.sha256(json.dumps([target, content, manifest.reconciler.orphan_batch_lines],
+                                          separators=(',', ':')).encode()).hexdigest()
+        if orphan_batches.get(target, {}).get('digest') == digest:
+            continue
+        lines = [f'Orphan backlog for {target}: {len(members)} items; batch {digest}.']
+        lines += [f'- {kind} {rid}: owner {owner}; {subject[:120]}'
+                  for kind, rid, owner, subject in content[:manifest.reconciler.orphan_batch_lines]]
+        omitted = max(0, len(members) - manifest.reconciler.orphan_batch_lines)
+        lines.append(f'{omitted} more. Inspect bus open-rulings --orphaned and '
+                     'bus open-blockers --orphaned. Reassign, answer or close them.')
+        pending_batches.append((target, members, digest, '\n'.join(lines)))
+    findings = findings or bool(pending_batches)
+    # This is a recipient cursor, deliberately separate from the legacy orphan-ID
+    # cursor. Persist before attempting delivery so an abort cannot starve others.
+    pending_batches.sort(key=lambda batch: (batch[0] <= state.get('orphan_recipient_cursor', ''), batch[0]))
+    for target, members, digest, text in pending_batches[:manifest.reconciler.orphan_ask_cap]:
+        state['orphan_recipient_cursor'] = target
+        findings = True
+        print(f'RECONCILE orphans {"would_fix" if dry_run else "fix"} {target} count={len(members)}')
+        if dry_run:
+            continue
+        write_json(state_path, state)
+        key = 'orphan-batch:' + target
+        post_id = 'orphan-' + hashlib.sha256((target + ':' + digest).encode()).hexdigest()[:24]
+        try:
+            if digest_only(manifest, target):
+                to_lead_digest(manifest, key, text, row={'id': post_id}, at=at)
+            else:
+                bus.main(['post', '--from', 'coordkit', '--to', target, '--kind', 'ask',
+                          '--topic', 'coordkit-orphan', '--id', post_id, '--key', key,
+                          '--no-auto-default', '--no-mirror', '--force', text], manifest)
+        except (ToolError, ManifestError) as exc:
+            print(f'RECONCILE orphans escalation_failed {target}: {exc}')
+            continue
+        # Atomic batch + member receipts only after delivery. A crash before this
+        # write retries the same post ID (or replaces the same digest entry).
+        orphan_batches[target] = {'digest': digest, 'id': post_id, 'at': at}
+        for row in members:
+            orphan_notified[row['id']] = {'kind': row['kind'], 'fallback': target, 'at': at}
+        write_json(state_path, state)
+    awaiting_orphans = [row for row in eligible_orphans
+                        if orphan_notified.get(row['id'], {}).get('fallback') != row['fallback']]
     summary = ''
     if eligible_orphans:
         findings = findings or bool(awaiting_orphans)
         summary = (f'Orphan backlog: {len(awaiting_orphans)} awaiting fallback; '
-                   f'per-pass attempt cap={manifest.reconciler.orphan_ask_cap}; '
+                   f'per-pass recipient cap={manifest.reconciler.orphan_ask_cap}; '
                    'sample IDs: ' + ', '.join(row['id'] for row in awaiting_orphans[:6]) +
                    '. Inspect bus open-rulings --orphaned and open-blockers --orphaned.')
         print('RECONCILE orphans ' + summary)
     # Refresh the replaceable snapshot after the derived set drains too. Empty text
     # drops the prior count so a close, reassignment, or revival cannot flush stale IDs.
     if not dry_run:
-        from .addressed import to_lead_digest
+        for target in orphan_batches.keys() - groups.keys():
+            to_lead_digest(manifest, 'orphan-batch:' + target, '', at=at)
         to_lead_digest(manifest, 'orphan-backlog', summary if awaiting_orphans else '', at=at)
     if eligible_orphans and not dry_run:
         # Once-only receipt retention deliberately survives closed rows and fired GC.

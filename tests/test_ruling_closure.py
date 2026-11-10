@@ -336,22 +336,77 @@ class DerivedClosureTests(FakeCase):
     def orphan_notices(self):
         return [r for r in bus.read() if r.get('topic') == 'coordkit-orphan']
 
+    def orphan_fixture(self, count=50, recipients=3):
+        self.manifest.addressed.agents = {
+            **{f'worker-{i}': {'fallback': f'backup-{i}'} for i in range(recipients)},
+            **{f'backup-{i}': {} for i in range(recipients)}}
+        return [row(f'r-{i:03}', '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
+                    to=f'worker-{i % recipients}', kind='blocker' if i % 2 else 'ruling',
+                    owner=f'worker-{i % recipients}', text=f'Subject {i}\nsecond line') for i in range(count)]
+
+    def test_fifty_orphans_make_three_bounded_batches_and_unchanged_rerun_is_silent(self):
+        self.write_bus(self.orphan_fixture())
+        self.reconcile_once()
+        notices = self.orphan_notices()
+        self.assertEqual(len(notices), 3)
+        self.assertEqual({r['to'] for r in notices}, {'backup-0', 'backup-1', 'backup-2'})
+        for notice in notices:
+            text = Path(notice['spill_ref']).read_text().strip() if notice.get('spill_ref') else notice['text']
+            lines = text.splitlines()
+            self.assertEqual(len([line for line in lines if line.startswith('- ')]), 10)
+            self.assertRegex(text, r'[67] more\.')
+            self.assertIn('bus open-rulings --orphaned', text)
+            self.assertIn('bus open-blockers --orphaned', text)
+            self.assertRegex(lines[1], r'- (ruling|blocker) r-\d+: owner worker-\d; Subject \d+ second line')
+        state_path = self.manifest.paths.root / 'reconcile/state.json'
+        state = json.loads(state_path.read_text())
+        self.assertEqual(len(state['orphan_notified']), 50)
+        # Batch receipts outlive the rolling action retention.
+        state['fired'] = {}
+        state_path.write_text(json.dumps(state))
+        self.reconcile_once()
+        self.assertEqual(self.orphan_notices(), notices)
+
+    def test_new_orphan_supersedes_only_its_recipient_even_outside_displayed_lines(self):
+        from coordkit import questions
+        rows = self.orphan_fixture()
+        self.write_bus(rows)
+        self.reconcile_once()
+        original = {r['to']: r for r in self.orphan_notices()}
+        rows.append(row('r-999', '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
+                        to='worker-1', kind='ruling', owner='worker-1', text='New work'))
+        self.write_bus([*rows, *bus.read()[50:]])
+        self.reconcile_once()
+        notices = self.orphan_notices()
+        self.assertEqual(len(notices), 4)
+        updated = notices[-1]
+        self.assertEqual(updated['to'], 'backup-1')
+        self.assertNotEqual(updated['id'], original['backup-1']['id'])
+        self.assertEqual(updated['key'], original['backup-1']['key'])
+        records = questions.load_all(self.manifest)
+        self.assertEqual(records[original['backup-1']['id']]['closed_by'], 'superseded')
+        self.assertEqual({r['qid'] for r in records.values() if r['state'] == 'open'},
+                         {original['backup-0']['id'], updated['id'], original['backup-2']['id']})
+        self.reconcile_once()
+        self.assertEqual(self.orphan_notices(), notices)
+
     def test_orphan_cap_drains_across_passes_without_receipting_deferred_rows(self):
-        self.manifest.reconciler.orphan_ask_cap = 2
-        self.manifest.addressed.agents = {'worker': {'fallback': 'backup'}, 'backup': {}}
-        self.write_bus([row(str(i), '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
-                            to='worker', kind='ruling', owner='worker') for i in range(5)])
+        self.manifest.reconciler.orphan_ask_cap = 1
+        self.write_bus(self.orphan_fixture())
         state_path = self.manifest.paths.root / 'reconcile/state.json'
         digest_path = self.manifest.paths.root / 'state/addressed/lead-digest.ndjson'
         self.reconcile_once(dry_run=True)
         self.assertFalse(digest_path.exists())
         self.reconcile_once()
-        self.assertEqual(len(self.orphan_notices()), 2)
-        self.assertEqual(set(json.loads(state_path.read_text())['orphan_notified']), {'0', '1'})
-        self.assertIn('3 awaiting fallback', json.loads(digest_path.read_text())['text'])
-        for expected in (4, 5, 5):
+        self.assertEqual(len(self.orphan_notices()), 1)
+        state = json.loads(state_path.read_text())
+        self.assertEqual(len(state['orphan_notified']), 17)
+        self.assertEqual(state['orphan_recipient_cursor'], 'backup-0')
+        self.assertIn('33 awaiting fallback', json.loads(digest_path.read_text())['text'])
+        for expected in (2, 3, 3):
             self.reconcile_once()
             self.assertEqual(len(self.orphan_notices()), expected)
+        self.assertEqual(len(json.loads(state_path.read_text())['orphan_notified']), 50)
         self.assertEqual(digest_path.read_text(), '')
 
     def test_resolved_orphans_drop_the_stale_backlog_snapshot(self):
@@ -384,12 +439,10 @@ class DerivedClosureTests(FakeCase):
     def test_failed_orphan_attempts_are_capped_and_remain_retryable(self):
         from coordkit.process import ToolError
         self.manifest.reconciler.orphan_ask_cap = 2
-        self.manifest.addressed.agents = {'worker': {'fallback': 'backup'}, 'backup': {}}
-        self.write_bus([row(str(i), '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
-                            to='worker', kind='ruling', owner='worker') for i in range(5)])
+        self.write_bus(self.orphan_fixture(count=10, recipients=5))
         original = bus.main
         def deliver(argv, manifest):
-            if argv[-1].startswith(('Orphaned ruling 0:', 'Orphaned ruling 1:')):
+            if argv[argv.index('--to') + 1] in ('backup-0', 'backup-1'):
                 raise ToolError('bus', 6, 'failed', 'transport')
             return original(argv, manifest)
         with patch('coordkit.bus.main', side_effect=deliver) as post:
@@ -397,19 +450,17 @@ class DerivedClosureTests(FakeCase):
             self.reconcile_once()
         self.assertEqual(post.call_count, 4)
         state = json.loads((self.manifest.paths.root / 'reconcile/state.json').read_text())
-        self.assertEqual(set(state['orphan_notified']), {'2', '3'})
+        self.assertEqual(set(state['orphan_notified']), {'r-002', 'r-007', 'r-003', 'r-008'})
 
     def test_orphan_cursor_survives_repeated_aborts_after_failed_attempts(self):
         from coordkit.process import ToolError
         self.manifest.reconciler.orphan_ask_cap = 2
-        self.manifest.addressed.agents = {'worker': {'fallback': 'backup'}, 'backup': {}}
-        self.write_bus([row(str(i), '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
-                            to='worker', kind='ruling', owner='worker') for i in range(5)])
+        self.write_bus(self.orphan_fixture(count=10, recipients=5))
         state_path = self.manifest.paths.root / 'reconcile/state.json'
         attempted, post_ids = [], {}
 
         def fail(argv, manifest):
-            rid = argv[argv.index('--key') + 1].removeprefix('orphan:ruling:')
+            rid = argv[argv.index('--key') + 1].removeprefix('orphan-batch:')
             post_id = argv[argv.index('--id') + 1]
             self.assertEqual(post_ids.setdefault(rid, post_id), post_id)
             attempted.append(rid)
@@ -418,32 +469,30 @@ class DerivedClosureTests(FakeCase):
             raise ToolError('bus', 6, 'failed', 'transport')
 
         with patch('coordkit.bus.main', side_effect=fail):
-            for expected in (['0', '1'], ['2', '3'], ['4', '0']):
+            for expected in (['backup-0', 'backup-1'], ['backup-2', 'backup-3'], ['backup-4', 'backup-0']):
                 with self.assertRaisesRegex(RuntimeError, 'pass aborted during delivery'):
                     self.reconcile_once()
                 self.assertEqual(attempted[-2:], expected)
                 state = json.loads(state_path.read_text())
-                self.assertEqual(state['orphan_cursor'], expected[-1])
+                self.assertEqual(state['orphan_recipient_cursor'], expected[-1])
                 self.assertEqual(state['orphan_notified'], {})
-                self.assertFalse(any(key.startswith('orphan:') for key in state['fired']))
-        self.assertEqual(set(attempted), set(map(str, range(5))))
+                self.assertFalse(any(key.startswith('orphan-batch:') for key in state['fired']))
+        self.assertEqual(set(attempted), {f'backup-{i}' for i in range(5)})
         self.assertEqual(self.orphan_notices(), [])
         # Failures remain eligible, and only a successful send earns a receipt.
         self.reconcile_once()
         state = json.loads(state_path.read_text())
-        self.assertEqual(set(state['orphan_notified']), {'1', '2'})
-        self.assertEqual({r['id'] for r in self.orphan_notices()}, {post_ids['1'], post_ids['2']})
+        self.assertEqual(set(state['orphan_notified']), {'r-001', 'r-006', 'r-002', 'r-007'})
+        self.assertEqual({r['id'] for r in self.orphan_notices()}, {post_ids['backup-1'], post_ids['backup-2']})
 
     def test_orphan_cursor_survives_abort_after_failed_delivery_batch(self):
         from coordkit.process import ToolError
         self.manifest.reconciler.orphan_ask_cap = 2
-        self.manifest.addressed.agents = {'worker': {'fallback': 'backup'}, 'backup': {}}
-        self.write_bus([row(str(i), '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
-                            to='worker', kind='ruling', owner='worker') for i in range(5)])
+        self.write_bus(self.orphan_fixture(count=10, recipients=5))
         attempted = []
 
         def fail(argv, manifest):
-            attempted.append(argv[argv.index('--key') + 1].removeprefix('orphan:ruling:'))
+            attempted.append(argv[argv.index('--key') + 1].removeprefix('orphan-batch:'))
             raise ToolError('bus', 6, 'failed', 'transport')
 
         original_digest = addressed.to_lead_digest
@@ -454,14 +503,120 @@ class DerivedClosureTests(FakeCase):
 
         with patch('coordkit.bus.main', side_effect=fail), \
                 patch('coordkit.addressed.to_lead_digest', side_effect=abort_digest):
-            for expected in (['0', '1'], ['2', '3'], ['4', '0']):
+            for expected in (['backup-0', 'backup-1'], ['backup-2', 'backup-3'], ['backup-4', 'backup-0']):
                 with self.assertRaisesRegex(RuntimeError, 'digest aborted'):
                     self.reconcile_once()
                 self.assertEqual(attempted[-2:], expected)
                 state = json.loads((self.manifest.paths.root / 'reconcile/state.json').read_text())
-                self.assertEqual(state['orphan_cursor'], expected[-1])
+                self.assertEqual(state['orphan_recipient_cursor'], expected[-1])
                 self.assertEqual(state['orphan_notified'], {})
-        self.assertEqual(set(attempted), set(map(str, range(5))))
+        self.assertEqual(set(attempted), {f'backup-{i}' for i in range(5)})
+
+    def test_abort_after_publication_before_receipt_retries_without_duplicate_batches(self):
+        self.manifest.reconciler.orphan_ask_cap = 1
+        self.write_bus(self.orphan_fixture())
+        original = bus.main
+        def abort_after_post(argv, manifest):
+            original(argv, manifest)
+            raise RuntimeError('aborted after publication')
+        with patch('coordkit.bus.main', side_effect=abort_after_post):
+            with self.assertRaisesRegex(RuntimeError, 'aborted after publication'):
+                self.reconcile_once()
+        state_path = self.manifest.paths.root / 'reconcile/state.json'
+        state = json.loads(state_path.read_text())
+        self.assertEqual(state['orphan_notified'], {})
+        self.assertEqual(state['orphan_batches'], {})
+        self.assertEqual(state['orphan_recipient_cursor'], 'backup-0')
+        first_id = self.orphan_notices()[0]['id']
+        for _ in range(4):
+            self.reconcile_once()
+        self.assertEqual(len(self.orphan_notices()), 3)
+        self.assertEqual(self.orphan_notices()[0]['id'], first_id)
+        self.assertEqual(len(json.loads(state_path.read_text())['orphan_notified']), 50)
+
+    def test_abort_after_receipts_does_not_resend_delivered_batch(self):
+        self.write_bus(self.orphan_fixture())
+        original = addressed.to_lead_digest
+        def abort_summary(manifest, source, text, **kwargs):
+            if source == 'orphan-backlog':
+                raise RuntimeError('aborted summary')
+            return original(manifest, source, text, **kwargs)
+        with patch('coordkit.addressed.to_lead_digest', side_effect=abort_summary):
+            with self.assertRaisesRegex(RuntimeError, 'aborted summary'):
+                self.reconcile_once()
+        self.assertEqual(len(self.orphan_notices()), 3)
+        self.reconcile_once()
+        self.assertEqual(len(self.orphan_notices()), 3)
+        state = json.loads((self.manifest.paths.root / 'reconcile/state.json').read_text())
+        self.assertEqual(len(state['orphan_notified']), 50)
+
+    def test_coordinator_fallback_is_one_complete_replaceable_digest_batch(self):
+        self.manifest.obligations.coordinator = 'coordinator'
+        rows = self.orphan_fixture()
+        self.manifest.addressed.agents = {}
+        self.write_bus(rows)
+        self.reconcile_once()
+        digest_path = self.manifest.paths.root / 'state/addressed/lead-digest.ndjson'
+        entries = [json.loads(line) for line in digest_path.read_text().splitlines()]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]['event'], 'orphan-batch:coordinator')
+        self.assertEqual(entries[0]['text'].count('\n- '), 10)
+        self.assertIn('40 more.', entries[0]['text'])
+        self.assertIn('bus open-blockers --orphaned', entries[0]['text'])
+        self.assertEqual(self.orphan_notices(), [])
+        self.reconcile_once()
+        self.assertEqual(len(digest_path.read_text().splitlines()), 1)
+        rows.append(row('r-999', '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
+                        to='worker-1', kind='ruling', owner='worker-1'))
+        self.write_bus(rows)
+        self.reconcile_once()
+        entries = [json.loads(line) for line in digest_path.read_text().splitlines()]
+        self.assertEqual(len(entries), 1)
+        self.assertIn('41 more.', entries[0]['text'])
+        # Flushing keeps the full bounded listing and command footer, rather than
+        # truncating the batch to the generic finding preview.
+        sent = []
+        with patch('coordkit.bus.main', side_effect=lambda argv, m, **kwargs: sent.append(argv)):
+            addressed.flush_lead_digest(self.manifest, {}, AT, out=lambda _: None, rows=[])
+        self.assertEqual(len(sent), 1)
+        self.assertIn(entries[0]['text'], sent[0][-1])
+
+    def test_failed_digest_batch_has_no_receipts_and_uses_recipient_cap(self):
+        from coordkit.process import ToolError
+        self.manifest.reconciler.orphan_ask_cap = 1
+        rows = self.orphan_fixture(count=6, recipients=2)
+        self.manifest.obligations.coordinator = 'backup-0'
+        self.write_bus(rows)
+        original = addressed.to_lead_digest
+        def fail_batch(manifest, source, text, **kwargs):
+            if source == 'orphan-batch:backup-0':
+                raise ToolError('digest', 6, 'delivery failed', 'transport')
+            return original(manifest, source, text, **kwargs)
+        with patch('coordkit.addressed.to_lead_digest', side_effect=fail_batch):
+            self.reconcile_once()
+        state_path = self.manifest.paths.root / 'reconcile/state.json'
+        state = json.loads(state_path.read_text())
+        self.assertEqual(state['orphan_notified'], {})
+        self.assertEqual(state['orphan_batches'], {})
+        self.assertEqual(self.orphan_notices(), [])
+        self.reconcile_once()
+        self.assertEqual([r['to'] for r in self.orphan_notices()], ['backup-1'])
+        self.assertEqual(len(json.loads(state_path.read_text())['orphan_notified']), 3)
+        self.reconcile_once()
+        self.assertEqual(len(json.loads(state_path.read_text())['orphan_notified']), 6)
+        self.write_bus([])
+        self.reconcile_once()
+        digest_path = self.manifest.paths.root / 'state/addressed/lead-digest.ndjson'
+        self.assertEqual(digest_path.read_text(), '')
+
+    def test_batch_line_limit_is_configurable(self):
+        self.manifest.reconciler.orphan_batch_lines = 2
+        self.write_bus(self.orphan_fixture(count=5, recipients=1))
+        self.reconcile_once()
+        notice = self.orphan_notices()[0]
+        text = Path(notice['spill_ref']).read_text() if notice.get('spill_ref') else notice['text']
+        self.assertEqual(text.count('\n- '), 2)
+        self.assertIn('3 more.', text)
 
     def test_zero_orphan_cap_preserves_backlog_and_only_queues_summary(self):
         self.manifest.reconciler.orphan_ask_cap = 0
@@ -484,6 +639,17 @@ class DerivedClosureTests(FakeCase):
             self.file.write_text(original + '\n[reconciler]\norphan_ask_cap = ' + value + '\n')
             with self.assertRaisesRegex(ManifestError, 'orphan_ask_cap'):
                 load(self.file)
+
+    def test_manifest_batch_lines_are_bounded_positive_integers(self):
+        original = self.file.read_text()
+        self.assertEqual(load(self.file).reconciler.orphan_ask_cap, 10)
+        self.assertEqual(load(self.file).reconciler.orphan_batch_lines, 10)
+        for value in ('0', '-1', '51', 'true', '1.5', '"3"'):
+            self.file.write_text(original + '\n[reconciler]\norphan_batch_lines = ' + value + '\n')
+            with self.assertRaisesRegex(ManifestError, 'orphan_batch_lines'):
+                load(self.file)
+        self.file.write_text(original + '\n[reconciler]\norphan_ask_cap = 0\norphan_batch_lines = 50\n')
+        self.assertEqual(load(self.file).reconciler.orphan_batch_lines, 50)
 
     def test_reconcile_routes_an_orphan_to_fallback_once(self):
         self.manifest.bus.mirror = False
@@ -517,7 +683,7 @@ class DerivedClosureTests(FakeCase):
                     kind='ruling', owner='nobody')]
         self.write_bus(rows)
         self.reconcile_once()
-        targets = {re.search(r'Orphaned \w+ (\S+):', r['text']).group(1): r['to']
+        targets = {re.search(r'- \w+ (\S+):', r['text']).group(1): r['to']
                    for r in self.orphan_notices()}
         self.assertEqual(targets, {'retired-r': 'replacement', 'fallback-r': 'backup'})
         # The coordinator is digest-only, so its orphan is routed to the lead digest.
@@ -561,7 +727,7 @@ class DerivedClosureTests(FakeCase):
                     kind='ruling', owner='c')]
         self.write_bus(rows)
         self.reconcile_once()
-        targets = {re.search(r'Orphaned \w+ (\S+):', r['text']).group(1): r['to']
+        targets = {re.search(r'- \w+ (\S+):', r['text']).group(1): r['to']
                    for r in self.orphan_notices()}
         self.assertEqual(targets, {'c-r': 'd'})
 
