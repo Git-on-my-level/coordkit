@@ -296,7 +296,9 @@ def reconcile(manifest, dry_run=False, at=None):
     # single plain ask to the retirement redirect, declared fallback, or coordinator.
     eligible_orphans = [row for row in derived['orphaned'] if since_adoption(row)]
     pending_orphans = [row for row in eligible_orphans if row['id'] not in orphan_notified]
+    pending_orphans.sort(key=lambda row: (row['id'] <= state.get('orphan_cursor', ''), row['id']))
     for row in pending_orphans[:manifest.reconciler.orphan_ask_cap]:
+        state['orphan_cursor'] = row['id']
         key = 'orphan:' + row['kind'] + ':' + row['id']
         fallback = row['fallback']
         text = (f'Orphaned {row["kind"]} {row["id"]}: owner {row["owner"]} is {row["orphan_reason"]}; '
@@ -310,8 +312,8 @@ def reconcile(manifest, dry_run=False, at=None):
             if not dry_run:
                 write_json(state_path, state)
     awaiting_orphans = [row for row in eligible_orphans if row['id'] not in orphan_notified]
-    if awaiting_orphans:
-        findings = True
+    if eligible_orphans:
+        findings = findings or bool(awaiting_orphans)
         summary = (f'Orphan backlog: {len(awaiting_orphans)} awaiting fallback; '
                    f'per-pass attempt cap={manifest.reconciler.orphan_ask_cap}; '
                    'sample IDs: ' + ', '.join(row['id'] for row in awaiting_orphans[:6]) +

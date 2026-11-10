@@ -311,6 +311,8 @@ def to_lead_digest(manifest, event, text, row=None, at=None):
     with path.open('a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         items = digest_items(stream)
+        if event == 'orphan-backlog':
+            items = [i for i in items if i.get('event') != event]
         item = {'at': time.time() if at is None else at, 'event': event, 'text': text[:400],
                 'id': (row or {}).get('id')}
         if any(all(old.get(k) == item[k] for k in ('event', 'text', 'id')) for old in items):

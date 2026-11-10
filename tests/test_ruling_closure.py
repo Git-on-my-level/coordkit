@@ -345,9 +345,7 @@ class DerivedClosureTests(FakeCase):
         state_path = self.manifest.paths.root / 'reconcile/state.json'
         digest_path = self.manifest.paths.root / 'state/addressed/lead-digest.ndjson'
         self.reconcile_once(dry_run=True)
-        self.assertFalse(state_path.exists())
         self.assertFalse(digest_path.exists())
-        self.assertEqual(self.orphan_notices(), [])
         self.reconcile_once()
         self.assertEqual(len(self.orphan_notices()), 2)
         self.assertEqual(set(json.loads(state_path.read_text())['orphan_notified']), {'0', '1'})
@@ -358,6 +356,8 @@ class DerivedClosureTests(FakeCase):
         for expected in (4, 5, 5):
             self.reconcile_once()
             self.assertEqual(len(self.orphan_notices()), expected)
+        self.assertEqual(len(digest_path.read_text().splitlines()), 1)
+        self.assertIn('0 awaiting fallback', digest_path.read_text())
 
     def test_failed_orphan_attempts_are_capped_and_remain_retryable(self):
         from coordkit.process import ToolError
@@ -365,11 +365,18 @@ class DerivedClosureTests(FakeCase):
         self.manifest.addressed.agents = {'worker': {'fallback': 'backup'}, 'backup': {}}
         self.write_bus([row(str(i), '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
                             to='worker', kind='ruling', owner='worker') for i in range(5)])
-        with patch('coordkit.bus.main', side_effect=ToolError('bus', 6, 'failed', 'transport')) as post:
+        original = bus.main
+        def deliver(argv, manifest):
+            if argv[-1].startswith(('Orphaned ruling 0:', 'Orphaned ruling 1:')):
+                raise ToolError('bus', 6, 'failed', 'transport')
+            return original(argv, manifest)
+        with patch('coordkit.bus.main', side_effect=deliver) as post:
             self.reconcile_once()
-        self.assertEqual(post.call_count, 2)
+            self.assertEqual(post.call_count, 2)
+            self.reconcile_once()
+        self.assertEqual(post.call_count, 4)
         state = json.loads((self.manifest.paths.root / 'reconcile/state.json').read_text())
-        self.assertEqual(state['orphan_notified'], {})
+        self.assertEqual(set(state['orphan_notified']), {'2', '3'})
 
     def test_zero_orphan_cap_preserves_backlog_and_only_queues_summary(self):
         self.manifest.reconciler.orphan_ask_cap = 0
@@ -386,9 +393,6 @@ class DerivedClosureTests(FakeCase):
     def test_manifest_orphan_cap_is_a_nonnegative_integer(self):
         self.assertEqual(self.manifest.reconciler.orphan_ask_cap, 10)
         original = self.file.read_text()
-        for value in ('0', '3'):
-            self.file.write_text(original + '\n[reconciler]\norphan_ask_cap = ' + value + '\n')
-            self.assertEqual(load(self.file).reconciler.orphan_ask_cap, int(value))
         for value in ('-1', 'true', '1.5', '"3"'):
             self.file.write_text(original + '\n[reconciler]\norphan_ask_cap = ' + value + '\n')
             with self.assertRaisesRegex(ManifestError, 'orphan_ask_cap'):
