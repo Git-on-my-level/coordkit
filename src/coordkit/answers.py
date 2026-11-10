@@ -104,7 +104,8 @@ def route(manifest, item, publication=None):
     candidates = bus.open_blockers(rows)
     if publication and publication.get('re'):
         # A prior verified decision may already have closed its exact blocker.
-        candidates = [r for r in rows if r.get('kind') == 'blocker' and r.get('id') == publication['re']]
+        proven = [r for r in rows if r.get('kind') == 'blocker' and r.get('id') == publication['re']]
+        candidates = list({r['id']: r for r in [*candidates, *proven]}.values())
     blockers = [r for r in candidates if r.get('subject') == subject
                 and item.get('title') in (blocker_title(r), ('Coordkit: ' + r['text'])[:99].rstrip('.?') + '?')]
     if len(blockers) == 1:

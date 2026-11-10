@@ -479,6 +479,29 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(decisions), 1)
         self.assertEqual(decisions[0]['to'], 'coordinator')
 
+    def test_closed_blocker_proof_does_not_override_another_open_blockers_recipient(self):
+        from coordkit import briefs
+        self.manifest.obligations.coordinator = 'worker'
+        first = {'id': 'first-blocker', 'kind': 'blocker', 'origin': 'coordkit',
+                 'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
+                 'text': 'First issue', 'ts': '2026-01-01T00:00:00Z'}
+        second = dict(first, id='second-blocker', frm='other-worker', text='Second issue')
+        bus.configure(self.manifest)
+        bus.append([first, second], project=False)
+        self.item.update(title=briefs.blocker_title(second), answer={'text': 'Repair it now'})
+        legacy = dict(self.item)
+        self.respond(self.listing())
+        self.consume()
+        self.item.update(title=briefs.blocker_title(first),
+                         answer={'text': 'Repair it now', 'response_event_id': 'response'})
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, legacy))['phase'], 'pending')
+        self.assertIn('pending=1', answers.health(self.manifest))
+        decisions = [r for r in self.rows() if r['kind'] == 'decision']
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual((decisions[0]['to'], decisions[0]['re']), ('worker', 'first-blocker'))
+
     def test_matching_blocker_reply_settles_legacy_receipt_after_blocker_closes(self):
         from coordkit import briefs
         blocker = {'id': 'need-worker', 'kind': 'blocker', 'origin': 'coordkit',
