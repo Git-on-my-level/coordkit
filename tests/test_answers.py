@@ -346,6 +346,125 @@ class AnswerConsumptionTests(FakeCase):
         self.assertNotIn('WARN', answers.health(self.manifest))
         self.assertFalse(loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json').exists())
 
+    def legacy_reply(self):
+        from coordkit import loop_answers
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        item = dict(self.item, answer={'text': 'Repair it now'})
+        with contextlib.redirect_stderr(io.StringIO()):
+            loop_answers.receive(self.manifest, item)
+        return loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json')
+
+    def test_legacy_then_identified_reply_reuses_one_row_but_distinct_events_stay_distinct(self):
+        self.assertFalse(self.legacy_reply().exists())
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+        self.assertEqual(self.rows()[0]['id'], 'answer-' + self.item['ask_id'])
+        self.item['answer'] = {'text': 'Repair it now', 'response_event_id': 'another-response'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(len(self.reads()), 2)
+        binding = read_json(answers.legacy_path(self.manifest, self.item['ask_id']))
+        self.assertEqual(binding['response_event_id'], 'response')
+
+    def test_identified_then_legacy_reply_reuses_canonical_row(self):
+        self.respond(self.listing())
+        self.consume()
+        self.assertFalse(self.legacy_reply().exists())
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['id'], answers.publication_id(self.item))
+        self.assertEqual(len(self.reads()), 1)
+        self.item['answer'] = {'text': 'Repair it now', 'response_event_id': 'another-response'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertFalse(self.legacy_reply().exists())
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(len(self.reads()), 2)
+
+    def test_unread_poll_first_legacy_delivery_settles_local_receipt_without_false_read_ack(self):
+        full = self.item['answer']
+        self.item['answer'] = {'text': 'Repair it now'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertIn('pending=1', answers.health(self.manifest))
+        self.assertFalse(self.legacy_reply().exists())
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.assertIn('source_read_unconfirmed=1', answers.health(self.manifest))
+        self.assertEqual(self.reads(), [])
+        local = read_json(answers.receipt_path(self.manifest, self.item))
+        self.assertEqual(local['phase'], 'legacy-delivered')
+        self.assertIs(local['source_read'], False)
+        self.item['answer'] = {'text': 'Repair it now', 'outcome': 'answered'}
+        self.respond(self.listing())
+        self.consume()  # another response-less shape must not recreate a warning
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.item['answer'] = full
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+        self.assertIn('source_read_unconfirmed=0', answers.health(self.manifest))
+
+    def test_identified_delivery_settles_prior_response_less_poll_without_shared_stream(self):
+        full = self.item['answer']
+        self.item['answer'] = {'text': 'Repair it now'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertIn('pending=1', answers.health(self.manifest))
+        self.item['answer'] = full
+        self.respond(self.listing())
+        self.consume()
+        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+        self.assertIn('source_read_unconfirmed=0', answers.health(self.manifest))
+
+    def test_non_object_quarantine_does_not_block_delivery_or_local_settlement(self):
+        self.respond(self.listing([None, self.item]))
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+        self.assertIn('invalid=1', answers.health(self.manifest))
+
+    def test_legacy_binding_survives_archived_loop_correlation(self):
+        from coordkit import loop_answers
+        self.legacy_reply()
+        loop_answers.path(self.manifest, self.item['ask_id']).unlink()
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_legacy_append_crash_then_identified_reply_does_not_republish(self):
+        from coordkit import loop_answers
+        with patch.object(answers, 'record_legacy_delivery', side_effect=OSError('crash after append')):
+            pending = self.legacy_reply()
+        self.assertTrue(pending.exists())
+        self.respond(self.listing())
+        self.consume()
+        with contextlib.redirect_stderr(io.StringIO()):
+            loop_answers.drain(self.manifest)
+        self.assertFalse(pending.exists())
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_identified_append_crash_then_legacy_reply_does_not_republish(self):
+        self.respond(self.listing())
+        original = answers.bus.main
+        def append_then_fail(*args):
+            original(*args)
+            raise OSError('crash after append')
+        with patch.object(answers.bus, 'main', side_effect=append_then_fail):
+            self.consume()
+        self.assertEqual(self.reads(), [])
+        self.assertFalse(self.legacy_reply().exists())
+        self.assertEqual(len(self.rows()), 1)
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+
     def test_option_shaped_answer_is_inert_bus_text(self):
         for index, text in enumerate(('--force', '--no-mirror')):
             with self.subTest(text=text):

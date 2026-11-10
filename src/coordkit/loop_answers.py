@@ -116,7 +116,7 @@ def deliver(manifest, pending):
     record = read_json(pending)
     if not record:
         return
-    from .answers import delivery_lock, shared_answer
+    from .answers import delivery_lock, shared_answer, legacy_match, record_legacy_delivery
     answer = record['answer']
     if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')):
         item = {'ask_id': record['ask_id'], 'subject_ref': record['card'], 'answer': answer}
@@ -130,12 +130,21 @@ def deliver(manifest, pending):
             return
         owner = manifest.escalation.internal_to or manifest.obligations.coordinator or 'lead'
         try:
-            with contextlib.redirect_stdout(sys.stderr):
-                bus.main(['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
-                          '--topic', 'loop-failure-answer', '--subject', record['card'],
-                          '--rollback', 'Follow up on the original ANX ask to revise this answer.',
-                          '--id', 'answer-' + record['ask_id'], '--force', '--no-mirror',
-                          '--', answer_text(answer)], manifest)
+            bus.configure(manifest)
+            item = {'ask_id': record['ask_id'], 'subject_ref': record['card'],
+                    'answer': {'text': answer_text(answer)}}
+            row_id = legacy_match(manifest, item, owner)
+            if row_id is None:
+                row_id = 'answer-' + record['ask_id']
+                with contextlib.redirect_stdout(sys.stderr):
+                    bus.main(['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
+                              '--topic', 'loop-failure-answer', '--subject', record['card'],
+                              '--rollback', 'Follow up on the original ANX ask to revise this answer.',
+                              '--id', row_id, '--force', '--no-mirror',
+                              '--', answer_text(answer)], manifest)
+            if legacy_match(manifest, item, owner) != row_id:
+                raise ValueError('legacy publication does not contain the full reply')
+            record_legacy_delivery(manifest, item, owner, row_id)
             pending.unlink(missing_ok=True)
         except (SystemExit, ToolError, OSError, ValueError) as exc:
             print(f'LOOP_ANSWER_PENDING {record["ask_id"]}: {exc}', file=sys.stderr)

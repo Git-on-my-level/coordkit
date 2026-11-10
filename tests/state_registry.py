@@ -378,9 +378,9 @@ row('mcp_server.py', 'clients.json|clients.json.lock|writer:clients_main',
     'opened-file validation per request; atomic edits; bounded metadata-keyed parsed cache',
     'malformed/insecure file refuses admission; absent file permits legacy fallback')
 
-row('answers.py', 'reconcile/unread-answers|consume.lock|*.json|.json|status.json|refs|.read-body|invalid-|phase:invalid|writer:delivery_lock|writer:reject|writer:consume|writer:stage|writer:process',
+row('answers.py', 'reconcile/unread-answers|consume.lock|*.json|.json|status.json|refs|.read-body|invalid-|phase:invalid|writer:delivery_lock|writer:reject|writer:consume|writer:stage|writer:process|legacy-|writer:record_legacy_delivery|writer:settle_legacy_receipts',
     'reconciler polls only its configured actor unread answers, retaining payloads before delivery',
-    'bus fsync then per-answer read acknowledgement; pending receipts retry after failure; operator archives dispositioned invalid receipts per LOOP-RECOVERY.md',
+    'bus fsync then exact read ack when identity exists; legacy-delivered proves only local publication, one ask-only row binds at most one response; operator archives dispositioned invalid receipts per LOOP-RECOVERY.md',
     'snapshot bounded to ten pages and 2000 items; scope includes workspace actor and server; receipts retained',
     'doctor warns on unread delivery, quarantined malformed items or polling failures; no automatic execution or STOP changes')
 

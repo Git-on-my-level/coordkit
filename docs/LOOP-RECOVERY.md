@@ -174,8 +174,15 @@ reconciliation use the same `consume.lock`, per-response publication ID and
 exact-response acknowledgement, including replies arriving after the unread
 snapshot. Legacy loop replies without response event IDs retain their direct
 `answer-<ask_id>` publication under the same lock. Successful delivery removes the
-loop's pending file; retries deduplicate that stable ID. These older replies
-cannot acknowledge an exact response event until the source supplies its ID.
+loop's pending file; retries deduplicate that stable ID. A `legacy-delivered`
+receipt records local bus delivery with `source_read=false`, settling any earlier
+response-less unread receipt. Doctor reports `legacy_local_deliveries` and
+`source_read_unconfirmed` separately, without claiming an unavailable ANX read
+acknowledgement. If the response ID later arrives, one durable binding reuses the
+ask-only row and acknowledges that exact response. Further distinct event IDs
+still publish separately, including identical answer text. In the reverse order,
+a response-less representation reuses the verified canonical bus row. Both paths
+verify the complete payload, including spill files, before recording delivery.
 Malformed ask references are quarantined as doctor-visible receipts without blocking later replies; explicit foreign
 requester IDs are ignored. Pending subjectless receipts accept a validated card
 from later loop or exact question correlation without reopening delivered replies.
