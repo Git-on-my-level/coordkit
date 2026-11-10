@@ -366,6 +366,9 @@ def process(manifest, path, client, legacy_pending=None):
         # publication identity to the event, never merely the ask or its text.
         row_id = record.get('bus_id') or publication_id(item)
         # Reuse an ask-only publication once when its response identity arrives.
+        # This also recovers an old loop writer that appended its bus row and
+        # crashed before unlinking .answer.json: deliver/shared_answer both
+        # enter here under the same lock, before publication or exact read ack.
         # A durable binding prevents a second, genuinely distinct event from
         # being swallowed even if its text is identical.
         from .loop_answers import path as loop_ask_path

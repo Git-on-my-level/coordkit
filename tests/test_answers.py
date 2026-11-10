@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from coordkit import answers, bus, reconcile
 from coordkit.manifest import load, ManifestError
-from coordkit.state import read_json
+from coordkit.state import read_json, write_json
 from tests.support import FakeCase
 
 
@@ -353,6 +353,72 @@ class AnswerConsumptionTests(FakeCase):
         with contextlib.redirect_stderr(io.StringIO()):
             loop_answers.receive(self.manifest, item)
         return loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json')
+
+    def interrupted_pre_upgrade_loop_reply(self):
+        """Old releases appended ask-only rows before deleting the pending file."""
+        from coordkit import loop_answers
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        provenance = loop_answers.path(self.manifest, self.item['ask_id'])
+        record = read_json(provenance)
+        record['answer'] = self.item['answer']
+        pending = provenance.with_suffix('.answer.json')
+        write_json(pending, record)
+        bus.configure(self.manifest)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            bus.main(['post', '--from', 'coordkit', '--to', 'coordinator', '--kind', 'decision',
+                      '--topic', 'loop-failure-answer', '--subject', record['card'],
+                      '--rollback', 'Revise the answer on its original ANX ask.',
+                      '--id', 'answer-' + record['ask_id'], '--force', '--no-mirror',
+                      '--', record['answer']['text']], self.manifest)
+        # Seed only the old release's artifacts, not new compatibility receipts.
+        self.assertFalse(answers.legacy_path(self.manifest, self.item['ask_id']).exists())
+        self.assertFalse(answers.receipt_path(self.manifest, self.item).exists())
+        return pending
+
+    def assert_upgraded_loop_reply(self, pending):
+        self.assertFalse(pending.exists())
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['id'], 'answer-' + self.item['ask_id'])
+        receipt = answers.receipt_path(self.manifest, self.item)
+        self.assertEqual(read_json(receipt)['phase'], 'read')
+        self.assertEqual(read_json(receipt.with_suffix('.read-body')), {'answer_event_id': 'response'})
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_upgrade_drain_reuses_legacy_publication_and_acks_exact_response(self):
+        from coordkit import loop_answers
+        pending = self.interrupted_pre_upgrade_loop_reply()
+        with patch.object(bus, 'main', side_effect=AssertionError('must reuse legacy row')):
+            loop_answers.drain(self.manifest)
+            loop_answers.drain(self.manifest)
+        self.assert_upgraded_loop_reply(pending)
+
+    def test_upgrade_shared_answer_reuses_legacy_publication_and_acks_exact_response(self):
+        from coordkit import loop_answers
+        pending = self.interrupted_pre_upgrade_loop_reply()
+        with patch.object(bus, 'main', side_effect=AssertionError('must reuse legacy row')):
+            self.assertTrue(answers.shared_answer(self.manifest, self.item))
+            self.assertTrue(answers.shared_answer(self.manifest, self.item))
+            loop_answers.drain(self.manifest)
+        self.assert_upgraded_loop_reply(pending)
+
+    def test_upgrade_drain_retains_pending_until_exact_ack_succeeds_without_reposting(self):
+        from coordkit import loop_answers
+        pending = self.interrupted_pre_upgrade_loop_reply()
+        self.respond({'tool': 'anx', 'contains': ['/agent-inbox/answers/read'], 'exit': 6})
+        with patch.object(bus, 'main', side_effect=AssertionError('must reuse legacy row')):
+            loop_answers.drain(self.manifest)
+            self.assertTrue(pending.exists())
+            self.assertEqual(len(self.rows()), 1)
+            self.assertEqual(read_json(answers.receipt_path(self.manifest, self.item))['phase'], 'delivered')
+            failed_reads = len(self.reads())
+            self.assertGreater(failed_reads, 0)
+            self.respond()
+            loop_answers.drain(self.manifest)
+            loop_answers.drain(self.manifest)
+        self.assertFalse(pending.exists())
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), failed_reads + 1)
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, self.item))['phase'], 'read')
 
     def test_legacy_then_identified_reply_reuses_one_row_but_distinct_events_stay_distinct(self):
         self.assertFalse(self.legacy_reply().exists())
