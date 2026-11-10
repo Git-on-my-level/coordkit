@@ -108,8 +108,8 @@ row('loop_answers.py', 'state/loop-asks|.json|writer:remember',
 row('loop_answers.py', '.answer.json|writer:receive|writer:deliver',
     'any consuming ANX answer reader receives a registered loop reply through the shared client',
     'durable decision bus row with deterministic ID, then pending answer removed; answer remains in correlation receipt for reminder context',
-    'reconciler retries each sweep; external calls bounded by the bus command',
-    'modern replies retain unread_answers warnings until exact acknowledgement; response-less legacy replies use a stable direct post and LOOP_ANSWER_PENDING on failure')
+    'reconciler retries each sweep; doctor warns after one reconcile interval, unchanged retry observations preserve age',
+    'unread_answers and loop_answers warnings retain failures/invalid evidence; both reply shapes share deterministic publication, modern replies require exact acknowledgement')
 row('loop_answers.py', 'reconcile/received-answers|*.json|writer:defer',
     'shared ANX client consumes a reply from the stream, before returning it to any caller',
     'reconciler durably merges into answers.json then unlinks the received file',
@@ -380,7 +380,7 @@ row('mcp_server.py', 'clients.json|clients.json.lock|writer:clients_main',
 
 row('answers.py', 'reconcile/unread-answers|consume.lock|*.json|.json|status.json|refs|.read-body|invalid-|phase:invalid|writer:delivery_lock|writer:reject|writer:consume|writer:stage|writer:process|legacy-|writer:record_legacy_delivery|writer:settle_legacy_receipts',
     'reconciler polls only its configured actor unread answers, retaining payloads before delivery',
-    'bus fsync then exact read ack when identity exists; legacy-delivered proves only local publication, one ask-only row binds at most one response; operator archives dispositioned invalid receipts per LOOP-RECOVERY.md',
+    'bus fsync then exact read ack when identity exists; legacy-delivered proves only local publication, each legacy row binds at most one response; operator archives dispositioned invalid receipts per LOOP-RECOVERY.md',
     'snapshot bounded to ten pages and 2000 items; scope includes workspace actor and server; receipts retained',
     'doctor warns on unread delivery, quarantined malformed items or polling failures; no automatic execution or STOP changes')
 

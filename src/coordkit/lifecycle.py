@@ -391,6 +391,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
     check('unresolved_obligations',unresolved_obligations)
     from .answers import health as answer_health
     check('unread_answers', lambda: answer_health(manifest))
+    from .loop_answers import health as loop_answer_health
+    check('loop_answers', lambda: loop_answer_health(manifest))
     check('github',github); check('launchd',jobs); check('dead_letters',deadletters); check('shadow_guard',guard)
     from .relay import health as relay_health
     check('relay', lambda: relay_health(manifest))

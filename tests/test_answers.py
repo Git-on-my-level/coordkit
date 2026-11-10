@@ -1,6 +1,7 @@
 """A read acknowledgement must never be the first durable handling of a reply."""
 import contextlib
 import io
+import sys
 import time
 from unittest.mock import patch
 
@@ -257,7 +258,7 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(len(self.reads()), 1)
 
-    def test_incomplete_pending_response_accepts_full_reply_before_publication(self):
+    def test_invalid_empty_reply_keeps_quarantine_evidence_after_full_reply_delivered(self):
         self.item['answer'] = {'response_event_id': 'response'}
         self.respond(self.listing())
         self.consume()
@@ -269,7 +270,7 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(self.rows()[0]['text'], 'Repair it now')
         self.assertEqual(len(self.reads()), 1)
-        self.assertNotIn('WARN', answers.health(self.manifest))
+        self.assertIn('invalid=1', answers.health(self.manifest))  # keep the original invalid evidence
 
     def test_partial_pending_receipt_cannot_replace_an_existing_publication(self):
         from coordkit.state import write_json
@@ -287,7 +288,7 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(self.rows()[0]['text'], 'Repair it now')
         self.assertEqual(len(self.reads()), 1)
-        self.assertIn('pending=1', answers.health(self.manifest))
+        self.assertIn('invalid=', answers.health(self.manifest))
 
     def test_question_sweep_metadata_variants_do_not_reopen_read_response(self):
         from coordkit import questions
@@ -353,6 +354,127 @@ class AnswerConsumptionTests(FakeCase):
         with contextlib.redirect_stderr(io.StringIO()):
             loop_answers.receive(self.manifest, item)
         return loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json')
+
+    def test_subjectless_identified_question_reply_reuses_prior_legacy_delivery(self):
+        from coordkit import questions
+        self.legacy_reply()
+        record = self.question()
+        record['asker'] = 'coordinator'
+        write_json(questions.home(self.manifest)/'questions.json', {record['qid']: record})
+        self.item.pop('subject_ref')
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['id'], 'answer-' + self.item['ask_id'])
+        self.assertEqual(len(self.reads()), 1)
+        receipt = answers.receipt_path(self.manifest, self.item)
+        self.assertEqual(read_json(receipt)['phase'], 'read')
+        self.assertEqual(read_json(receipt.with_suffix('.read-body')), {'answer_event_id': 'response'})
+        self.assertEqual(questions.load_all(self.manifest)[record['qid']]['state'], 'answered')
+        self.assertNotIn('WARN', answers.health(self.manifest))
+
+    def test_response_less_unread_reply_publishes_once_without_source_ack(self):
+        self.item['answer'] = {'text': 'Repair it now'}
+        self.respond(self.listing())
+        self.consume()
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['id'], 'answer-' + self.item['ask_id'])
+        receipt = read_json(answers.receipt_path(self.manifest, self.item))
+        self.assertEqual(receipt['phase'], 'legacy-delivered')
+        self.assertIs(receipt['source_read'], False)
+        self.assertEqual(self.reads(), [])
+
+    def test_response_less_inbox_append_crash_then_exact_reply_deduplicates_without_loop_provenance(self):
+        legacy = dict(self.item, answer={'text': 'Repair it now'})
+        self.respond(self.listing([legacy]))
+        original = bus.main
+        def append_then_fail(*args):
+            original(*args)
+            raise OSError('crash after append, before compatibility receipt')
+        with patch.object(bus, 'main', side_effect=append_then_fail):
+            self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.reads(), [])
+        self.respond(self.listing([legacy, self.item]))
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, legacy))['phase'], 'legacy-delivered')
+
+    def test_empty_unread_answer_is_quarantined_without_blocking_next_reply(self):
+        empty = dict(self.item, ask_id='event:empty-inbox', answer={})
+        self.respond(self.listing([empty, self.item]))
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['text'], 'Repair it now')
+        self.assertEqual(len(self.reads()), 1)
+        invalid = [read_json(p) for p in answers.home(self.manifest).glob('invalid-*.json')]
+        self.assertEqual([r['item'] for r in invalid], [empty])
+        self.assertIn('invalid=1', answers.health(self.manifest))
+
+    def test_revised_response_less_unread_reply_has_distinct_retry_stable_id(self):
+        self.item['answer'] = {'text': 'First ruling'}
+        self.respond(self.listing())
+        self.consume()
+        self.item['answer'] = {'text': 'Revised ruling'}
+        self.respond(self.listing())
+        original = bus.main
+        def append_then_fail(*args):
+            original(*args)
+            raise OSError('crash after append')
+        with patch.object(bus, 'main', side_effect=append_then_fail):
+            self.consume()
+        self.consume()
+        self.consume()
+        self.assertEqual({row['text'] for row in self.rows()}, {'First ruling', 'Revised ruling'})
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(len({row['id'] for row in self.rows()}), 2)
+        self.assertEqual(self.reads(), [])
+        # The revised row must also bind to its own later exact response once.
+        self.item['answer']['response_event_id'] = 'revision-response'
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(len(self.reads()), 1)
+
+    def test_unchanged_legacy_snapshot_scans_retained_receipts_and_bus_once_per_sweep(self):
+        items = [dict(self.item, ask_id=f'event:batch-{i}', answer={'text': f'Ruling {i}'}) for i in range(8)]
+        self.respond(self.listing(items))
+        self.consume()
+        for i in range(75):
+            write_json(answers.home(self.manifest)/f'retained-{i}.json', {'phase': 'read'})
+        retained = len(list(answers.home(self.manifest).glob('*.json')))
+        with patch.object(answers, 'read_json', wraps=read_json) as reads, \
+                patch.object(bus, 'read', wraps=bus.read) as bus_reads, \
+                patch.object(answers, 'legacy_pending', wraps=answers.legacy_pending) as index, \
+                patch.object(answers, 'legacy_match', side_effect=AssertionError('terminal item must not rescan')):
+            self.consume()
+        self.assertEqual(bus_reads.call_count, 1)
+        self.assertEqual(index.call_count, 1)
+        self.assertLessEqual(reads.call_count, retained + len(items) + 1)
+        self.assertEqual(len(self.rows()), len(items))
+        self.assertEqual(self.reads(), [])
+
+    def test_identified_sweep_reuses_one_bus_snapshot_until_each_append(self):
+        items = [dict(self.item, ask_id=f'event:new-{i}',
+                      answer={'text': f'Ruling {i}', 'response_event_id': f'response-{i}'}) for i in range(3)]
+        self.respond(self.listing(items))
+        original, callers = bus.read, []
+        def read():
+            # Bus writers retain their own authoritative reads. The consumer
+            # must use its snapshot everywhere except after a possible append.
+            frame = sys._getframe(1)
+            while frame.f_code.co_filename.endswith('/unittest/mock.py'):
+                frame = frame.f_back
+            if frame.f_code.co_filename == answers.__file__:
+                callers.append(frame.f_code.co_name)
+            return original()
+        with patch.object(bus, 'read', side_effect=read):
+            self.consume()
+        self.assertEqual(callers, ['refresh'] * (1 + len(items)))
+        self.assertEqual(len(self.rows()), len(items))
+        self.assertEqual(len(self.reads()), len(items))
 
     def interrupted_pre_upgrade_loop_reply(self):
         """Old releases appended ask-only rows before deleting the pending file."""
@@ -454,7 +576,7 @@ class AnswerConsumptionTests(FakeCase):
         self.item['answer'] = {'text': 'Repair it now'}
         self.respond(self.listing())
         self.consume()
-        self.assertIn('pending=1', answers.health(self.manifest))
+        self.assertIn('source_read_unconfirmed=1', answers.health(self.manifest))
         self.assertFalse(self.legacy_reply().exists())
         self.assertNotIn('WARN', answers.health(self.manifest))
         self.assertIn('source_read_unconfirmed=1', answers.health(self.manifest))
@@ -478,7 +600,7 @@ class AnswerConsumptionTests(FakeCase):
         self.item['answer'] = {'text': 'Repair it now'}
         self.respond(self.listing())
         self.consume()
-        self.assertIn('pending=1', answers.health(self.manifest))
+        self.assertIn('source_read_unconfirmed=1', answers.health(self.manifest))
         self.item['answer'] = full
         self.respond(self.listing())
         self.consume()
@@ -500,12 +622,13 @@ class AnswerConsumptionTests(FakeCase):
         self.respond(self.listing([alpha, beta]))
         self.consume()
         self.assertNotEqual(answers.receipt_path(self.manifest, alpha), answers.receipt_path(self.manifest, beta))
-        self.assertIn('pending=2', answers.health(self.manifest))
+        self.assertEqual({row['subject'] for row in self.rows()}, {'card:alpha', 'card:beta'})
+        self.assertIn('legacy_local_deliveries=2', answers.health(self.manifest))
 
     def test_legacy_delivery_cannot_overwrite_another_cards_pending_receipt(self):
         alpha = dict(self.item, subject_ref='card:alpha', answer={'text': 'Repair it now'})
         self.respond(self.listing([alpha]))
-        self.consume()
+        answers.stage(self.manifest, alpha)  # retain an undelivered receipt
         self.legacy_reply()  # publishes the loop-audit decision, not card:alpha
         self.assertEqual(read_json(answers.receipt_path(self.manifest, alpha))['phase'], 'pending')
         self.assertIn('pending=1', answers.health(self.manifest))
@@ -515,10 +638,11 @@ class AnswerConsumptionTests(FakeCase):
         self.item.update(subject_ref='card:alpha', answer={'text': 'Repair it now'})
         legacy = dict(self.item)
         self.respond(self.listing())
-        self.consume()
+        answers.stage(self.manifest, self.item)  # retain an undelivered receipt
         self.item.update(subject_ref='card:beta', answer={'text': 'Repair it now', 'response_event_id': 'response'})
         self.respond(self.listing())
-        self.consume()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(answers.shared_answer(self.manifest, self.item))
         self.assertEqual(self.rows()[0]['subject'], 'card:beta')
         self.assertEqual(read_json(answers.receipt_path(self.manifest, legacy))['phase'], 'pending')
         self.assertIn('pending=1', answers.health(self.manifest))
@@ -534,11 +658,12 @@ class AnswerConsumptionTests(FakeCase):
         self.item.update(title=briefs.blocker_title(blocker), answer={'text': 'Repair it now'})
         legacy = dict(self.item)
         self.respond(self.listing())
-        self.consume()
+        answers.stage(self.manifest, self.item)  # retain an undelivered receipt
         self.item.pop('title')
         self.item['answer'] = {'text': 'Repair it now', 'response_event_id': 'response'}
         self.respond(self.listing())
-        self.consume()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(answers.shared_answer(self.manifest, self.item))
         self.assertEqual(read_json(answers.receipt_path(self.manifest, legacy))['phase'], 'pending')
         self.assertIn('pending=1', answers.health(self.manifest))
         decisions = [r for r in self.rows() if r['kind'] == 'decision']
@@ -557,11 +682,12 @@ class AnswerConsumptionTests(FakeCase):
         self.item.update(title=briefs.blocker_title(second), answer={'text': 'Repair it now'})
         legacy = dict(self.item)
         self.respond(self.listing())
-        self.consume()
+        answers.stage(self.manifest, self.item)  # retain an undelivered receipt
         self.item.update(title=briefs.blocker_title(first),
                          answer={'text': 'Repair it now', 'response_event_id': 'response'})
         self.respond(self.listing())
-        self.consume()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(answers.shared_answer(self.manifest, self.item))
         self.assertEqual(read_json(answers.receipt_path(self.manifest, legacy))['phase'], 'pending')
         self.assertIn('pending=1', answers.health(self.manifest))
         decisions = [r for r in self.rows() if r['kind'] == 'decision']
@@ -578,7 +704,7 @@ class AnswerConsumptionTests(FakeCase):
         bus.append([first], project=False)
         self.item.update(title=briefs.blocker_title(first), answer={'text': 'Repair it now'})
         self.respond(self.listing())
-        self.consume()
+        answers.stage(self.manifest, self.item)  # retain an undelivered receipt
         self.item['answer'] = {'text': 'Repair it now', 'response_event_id': 'response'}
         self.respond(self.listing())
         original = answers.bus.main
@@ -842,7 +968,7 @@ class AnswerConsumptionTests(FakeCase):
         self.respond(self.listing())
         self.consume()
         self.assertFalse(self.reads())
-        self.assertIn('pending=1', answers.health(self.manifest))
+        self.assertIn('source_read_unconfirmed=1', answers.health(self.manifest))
 
     def test_concurrent_question_settlement_is_preserved(self):
         from coordkit import questions

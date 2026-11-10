@@ -172,32 +172,61 @@ keep separate receipts and decision rows. Shared answer-stream consumers skip
 responses already delivered through this path. Loop relays and shared-stream
 reconciliation use the same `consume.lock`, per-response publication ID and
 exact-response acknowledgement, including replies arriving after the unread
-snapshot. Legacy loop replies without response event IDs retain their direct
-`answer-<ask_id>` publication under the same lock. Successful delivery removes the
-loop's pending file; retries deduplicate that stable ID. A `legacy-delivered`
+snapshot. Replies without response event IDs, including normal unread inbox
+replies, use the same lock and deterministic legacy publication. The first uses
+`answer-<ask_id>`. A revised answer or different destination uses
+`answer-<ask_id>:legacy:<hash>` derived from its full text, card, recipient and
+reply edge, so revisions publish separately and retries deduplicate. Successful
+delivery removes the loop's pending file. A `legacy-delivered`
 receipt records local bus delivery with `source_read=false`, settling any earlier
 response-less unread receipt. Doctor reports `legacy_local_deliveries` and
 `source_read_unconfirmed` separately, without claiming an unavailable ANX read
 acknowledgement. If the response ID later arrives, one durable binding reuses the
-ask-only row and acknowledges that exact response. Further distinct event IDs
+matching legacy row and acknowledges that exact response. Each legacy publication
+can bind to one response event. Further distinct event IDs
 still publish separately, including identical answer text. In the reverse order,
 a response-less representation reuses the verified canonical bus row. Both paths
 verify the complete payload, including spill files, before recording delivery.
-Conflicting card or recipient metadata remains pending and doctor-visible.
+Destination mismatches never settle another receipt. Independently routable
+replies deliver to their own destination; missing correlation remains pending
+and doctor-visible.
+An answer with neither text nor outcome is quarantined with its original payload;
+it never publishes a placeholder decision. `doctor` also reports `loop_answers`
+warnings for `.answer.json` files older than one configured reconciler interval.
+Unchanged retry observations preserve that age. Inspect the exact pending file
+privately, repair its delivery or disposition invalid source input and archive
+its quarantine receipt as below; retain loop provenance and bus history. A valid
+retry clears the pending file only after durable delivery (and exact read ack
+when an event ID exists).
 Malformed ask references are quarantined as doctor-visible receipts without blocking later replies; explicit foreign
 requester IDs are ignored. Pending subjectless receipts accept a validated card
 from later loop or exact question correlation without reopening delivered replies.
 Dry runs never consume answers. Keep these receipts
 with their corresponding ask and bus history.
 
+Each answer delivery sweep builds one receipt index and one bus snapshot. Routing,
+legacy publication checks and settlement share them; only a publication attempt
+refreshes the bus snapshot. An unchanged `legacy-delivered` unread item needs
+only its direct receipt lookup on later sweeps. The synthetic performance probe
+and measurements are documented in [ANSWER-DELIVERY-PERF.md](ANSWER-DELIVERY-PERF.md).
+
 ### Clearing a quarantined invalid answer
 
 `doctor` includes `invalid=N` and a `details=...` directory for malformed input.
 Inspect the exact `invalid-<hash>.json` receipt privately and correct or explicitly
 disposition its source item through the owning tool. Otherwise the next poll can
-recreate it. Preserve that disposition with the incident evidence. Then archive
-only that receipt under the same consumer lock (substitute the directory printed
-by doctor and the exact inspected filename):
+recreate it. Preserve that disposition with the incident evidence.
+
+For an invalid loop reply, the source also includes its retained
+`state/loop-asks/<hash>.answer.json`. After explicitly dispositioning that reply,
+hold the same scoped unread-answer `consume.lock` and move that exact pending
+file into `state/loop-asks/archive/` (refuse an existing destination). Preserve it
+with the quarantine receipt and incident evidence. Keep the sibling `<hash>.json`
+provenance file. This removes the invalid work from the retry glob and clears
+the age warning without inventing a decision or acknowledging an absent event.
+
+Archive only the inspected quarantine receipt under the same consumer lock
+(substitute the directory printed by doctor and the exact inspected filename):
 
 ```sh
 python3 - '/path/from/doctor/details' 'invalid-<64-hex>.json' <<'PYTHON'

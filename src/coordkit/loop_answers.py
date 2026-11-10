@@ -1,10 +1,8 @@
 """Correlate direct loop asks across recovery and either shared answer consumer."""
-import contextlib
 import hashlib
 import re
-import sys
+import time
 
-from . import bus
 from .process import ToolError
 from .state import read_json, write_json
 
@@ -58,16 +56,17 @@ def receive(manifest, item):
     if not record:
         return False
     manifest.writable()
-    record['answer'] = item.get('answer') or item
+    record['answer'] = item['answer'] if 'answer' in item else item
     pending = target.with_suffix('.answer.json')
-    write_json(pending, record)
+    if read_json(pending) != record:
+        write_json(pending, record)  # unchanged retries retain their original age
     write_json(target, record)  # retain earlier rulings after successful bus delivery
     deliver(manifest, pending)
     return True
 
 
 def answer_text(answer):
-    return str(answer.get('text') or answer.get('outcome') or 'ANX answer received') if isinstance(answer, dict) else str(answer)
+    return str(answer.get('text') or answer.get('outcome') or '') if isinstance(answer, dict) else (answer if isinstance(answer, str) else '')
 
 
 def retained_answers(report):
@@ -112,44 +111,38 @@ def answer_context(manifest, ask_id):
     raise ToolError('anx', 6, 'earlier loop answer lookup incomplete; reminder retained for retry', 'protocol_error')
 
 
-def deliver(manifest, pending):
+def deliver(manifest, pending, sweep=None):
     record = read_json(pending)
     if not record:
         return
-    from .answers import delivery_lock, shared_answer, legacy_match, record_legacy_delivery
-    answer = record['answer']
-    if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')):
-        item = {'ask_id': record['ask_id'], 'subject_ref': record['card'], 'answer': answer}
-        if shared_answer(manifest, item):
-            pending.unlink(missing_ok=True)
-        return
-    # Older CLI replies have no response identity to acknowledge. Preserve their
-    # original deterministic publication, including retries after append.
-    with delivery_lock(manifest) as acquired:
-        if not acquired:
-            return
-        owner = manifest.escalation.internal_to or manifest.obligations.coordinator or 'lead'
-        try:
-            bus.configure(manifest)
-            item = {'ask_id': record['ask_id'], 'subject_ref': record['card'],
-                    'answer': {'text': answer_text(answer)}}
-            row_id = legacy_match(manifest, item, owner)
-            if row_id is None:
-                row_id = 'answer-' + record['ask_id']
-                with contextlib.redirect_stdout(sys.stderr):
-                    bus.main(['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
-                              '--topic', 'loop-failure-answer', '--subject', record['card'],
-                              '--rollback', 'Follow up on the original ANX ask to revise this answer.',
-                              '--id', row_id, '--force', '--no-mirror',
-                              '--', answer_text(answer)], manifest)
-            if legacy_match(manifest, item, owner) != row_id:
-                raise ValueError('legacy publication does not contain the full reply')
-            record_legacy_delivery(manifest, item, owner, row_id)
-            pending.unlink(missing_ok=True)
-        except (SystemExit, ToolError, OSError, ValueError) as exc:
-            print(f'LOOP_ANSWER_PENDING {record["ask_id"]}: {exc}', file=sys.stderr)
+    from .answers import shared_answer
+    item = {'ask_id': record['ask_id'], 'subject_ref': record['card'], 'answer': record['answer']}
+    # Identified and response-less replies share publication verification,
+    # quarantine, the delivery lock and durable receipts. Never invent text.
+    if shared_answer(manifest, item, sweep=sweep):
+        pending.unlink(missing_ok=True)
 
 
 def drain(manifest):
-    for pending in (manifest.paths.root/'state/loop-asks').glob('*.answer.json'):
-        deliver(manifest, pending)
+    from .answers import delivery_lock, DeliverySweep
+    with delivery_lock(manifest) as acquired:
+        if not acquired:
+            return
+        sweep = DeliverySweep(manifest)
+        for pending in (manifest.paths.root/'state/loop-asks').glob('*.answer.json'):
+            deliver(manifest, pending, sweep)
+
+
+def health(manifest, at=None):
+    at = time.time() if at is None else at
+    directory = manifest.paths.root/'state/loop-asks'
+    stale = []
+    for pending in directory.glob('*.answer.json'):
+        try:
+            if at - pending.stat().st_mtime > manifest.reconciler.interval_seconds:
+                stale.append(pending)
+        except FileNotFoundError:
+            pass  # a concurrent successful drain is recovery, not a red finding
+    if stale:
+        return f'WARN loop answer delivery stale={len(stale)} details={directory}'
+    return 'no overdue loop answers'

@@ -18,6 +18,34 @@ MAX_PAGES = 10
 MAX_ITEMS = 2000
 
 
+class DeliverySweep:
+    """One lock-owned snapshot and pending index shared by every relay in a pass."""
+    def __init__(self, manifest):
+        bus.configure(manifest)
+        self.refresh()
+        self.paths = set(home(manifest).glob('*.json'))
+        self.records = {path: read_json(path, {}) for path in self.paths}
+        self.pending = legacy_pending(manifest, self.records)
+
+    def refresh(self):
+        # The writer lock's publication check is still authoritative. Refresh
+        # only after append, including a writer that appended and then raised.
+        self.rows = bus.read()
+        self.by_id = {row.get('id'): row for row in self.rows}
+        self.by_ask = {}
+        for row in self.rows:
+            row_id = row.get('id', '')
+            if not isinstance(row_id, str) or not row_id.startswith('answer-event:'):
+                continue
+            ask = row_id.removeprefix('answer-')
+            self.by_ask.setdefault(ask, []).append(row)
+            if ':legacy:' in ask:
+                self.by_ask.setdefault(ask.split(':legacy:', 1)[0], []).append(row)
+            elif re.search(r'-[0-9a-f]{16}$', ask):
+                base = ask.rsplit('-', 1)[0]
+                self.by_ask.setdefault(base, []).append(row)
+
+
 def home(manifest):
     scope = json.dumps([manifest.anx.workspace, manifest.anx.lead_actor, manifest.anx.base_url])
     return manifest.paths.root/'reconcile/unread-answers'/hashlib.sha256(scope.encode()).hexdigest()[:24]
@@ -86,7 +114,7 @@ def card_subject(item):
     return subject
 
 
-def route(manifest, item, publication=None):
+def route(manifest, item, publication=None, sweep=None, fallback=None):
     from .questions import load_all
     ask_id = reference(item['ask_id'])
     # Exact question correlation retains its original asker and reply edge, even
@@ -99,7 +127,7 @@ def route(manifest, item, publication=None):
                 subject = card_subject({'subject_ref': manifest.escalation.card})
             return subject, record['asker'], record['qid'], record
     subject = card_subject(item)
-    rows = bus.read()
+    rows = sweep.rows if sweep is not None else bus.read()
     from .briefs import blocker_title
     def matches(row):
         return row.get('subject') == subject and item.get('title') in (
@@ -117,7 +145,7 @@ def route(manifest, item, publication=None):
         return subject, blockers[0]['frm'], blockers[0]['id'], None
     # A card-level answer is still work for the configured coordinator. Never
     # infer permission to execute its text or choose one of ambiguous blockers.
-    owner = manifest.escalation.internal_to or manifest.obligations.coordinator
+    owner = manifest.escalation.internal_to or manifest.obligations.coordinator or fallback
     if not owner:
         raise ValueError('answer has no configured coordinating lane')
     return subject, owner, None, None
@@ -177,32 +205,33 @@ def delivered(row, subject, owner, text):
     return True
 
 
-def legacy_route(manifest, item, publication=None):
+def legacy_route(manifest, item, publication=None, sweep=None):
     from .loop_answers import path as loop_ask_path
     loop_record = read_json(loop_ask_path(manifest, reference(item['ask_id'])), {})
     if loop_record and not (item.get('subject_ref') or item.get('subject')):
         item = dict(item, subject_ref=loop_record['card'])
-    return route(manifest, item, publication)
+    return route(manifest, item, publication, sweep, 'lead' if loop_record else None)
 
 
-def legacy_path(manifest, ask_id):
-    return home(manifest)/('legacy-' + hashlib.sha256(reference(ask_id).encode()).hexdigest() + '.json')
+def legacy_path(manifest, ask_id, row_id=None):
+    key = reference(ask_id) if row_id in (None, 'answer-' + reference(ask_id)) else row_id
+    return home(manifest)/('legacy-' + hashlib.sha256(key.encode()).hexdigest() + '.json')
 
 
-def legacy_match(manifest, item, owner=None):
+def legacy_match(manifest, item, owner=None, sweep=None):
     """Find a verified publication for a response-less loop representation."""
     ask_id = reference(item['ask_id'])
     text = str(item['answer'].get('text') or item['answer'].get('outcome') or '')
     prefix = 'answer-' + ask_id
-    rows = bus.read()
+    rows = sweep.by_ask.get(ask_id, []) if sweep is not None else bus.read()
     for row in reversed(rows):
         row_id = row.get('id', '')
         if not isinstance(row_id, str):
             continue
-        if (row_id == prefix or re.fullmatch(re.escape(prefix) + r'-[0-9a-f]{16}', row_id)):
+        if (row_id == prefix or re.fullmatch(re.escape(prefix) + r'(?:-|:legacy:)[0-9a-f]{16}', row_id)):
             try:
                 if owner is None:
-                    subject, target, _, _ = legacy_route(manifest, item, row)
+                    subject, target, _, _ = legacy_route(manifest, item, row, sweep)
                 else:
                     subject, target = card_subject(item), owner
             except ValueError:
@@ -212,7 +241,7 @@ def legacy_match(manifest, item, owner=None):
     return None
 
 
-def record_legacy_delivery(manifest, item, owner, row_id, response_id=None, pending=None):
+def record_legacy_delivery(manifest, item, owner, row_id, response_id=None, pending=None, sweep=None):
     """Retain local delivery without claiming an unavailable source read ack.
 
     The ask-only publication can be bound to at most one subsequently observed
@@ -224,21 +253,23 @@ def record_legacy_delivery(manifest, item, owner, row_id, response_id=None, pend
     local = {'ask_id': ask_id, 'subject_ref': card_subject(item), 'answer': {'text': text}}
     record = {'item': local, 'owner': owner, 'phase': 'legacy-delivered',
               'bus_id': row_id, 'source_read': False}
-    if row_id == 'answer-' + ask_id:
-        previous = read_json(legacy_path(manifest, ask_id), {})
+    if row_id == 'answer-' + ask_id or row_id.startswith('answer-' + ask_id + ':legacy:'):
+        binding_path = legacy_path(manifest, ask_id, row_id)
+        previous = read_json(binding_path, {})
         binding = previous.get('response_event_id') or response_id
         if binding:
             record['response_event_id'] = binding
-        write_json(legacy_path(manifest, ask_id), record)
+        write_json(binding_path, record)
     write_json(receipt_path(manifest, local), record)
-    settle_legacy_receipts(manifest, item, row_id, pending)
+    settle_legacy_receipts(manifest, item, row_id, pending, sweep)
 
 
-def legacy_pending(manifest):
+def legacy_pending(manifest, records=None):
     """Index response-less pending receipts once per sweep, rather than per reply."""
     pending = {}
-    for path in home(manifest).glob('*.json'):
-        record = read_json(path, {})
+    records = ({path: read_json(path, {}) for path in home(manifest).glob('*.json')}
+               if records is None else records)
+    for path, record in records.items():
         item = record.get('item')
         if record.get('phase') != 'pending' or not isinstance(item, dict):
             continue
@@ -250,11 +281,14 @@ def legacy_pending(manifest):
     return pending
 
 
-def settle_legacy_receipts(manifest, item, row_id, pending=None):
+def settle_legacy_receipts(manifest, item, row_id, pending=None, sweep=None):
     ask_id = reference(item['ask_id'])
     text = str(item['answer'].get('text') or item['answer'].get('outcome') or '')
+    pending = sweep.pending if sweep is not None else pending
     paths = home(manifest).glob('*.json') if pending is None else pending.pop((ask_id, text), [])
-    row = next((r for r in bus.read() if r.get('id') == row_id), None)
+    if not paths:
+        return
+    row = sweep.by_id.get(row_id) if sweep is not None else next((r for r in bus.read() if r.get('id') == row_id), None)
     if row is None:
         return
     for path in paths:
@@ -269,7 +303,7 @@ def settle_legacy_receipts(manifest, item, row_id, pending=None):
                 and isinstance(answer, dict) and not (answer.get('response_event_id') or answer.get('response_event_ref'))
                 and str(answer.get('text') or answer.get('outcome') or '') == text):
             try:
-                subject, owner, _, _ = legacy_route(manifest, payload, row)
+                subject, owner, _, _ = legacy_route(manifest, payload, row, sweep)
             except ValueError:
                 if pending is not None:
                     pending.setdefault((ask_id, text), []).append(path)
@@ -281,27 +315,28 @@ def settle_legacy_receipts(manifest, item, row_id, pending=None):
                 pending.setdefault((ask_id, text), []).append(path)
 
 
-def stage(manifest, item):
+def stage(manifest, item, sweep=None):
     item = dict(item, ask_id=reference(item['ask_id']))
     if isinstance(item.get('answer'), str):
         item['answer'] = {'text': item['answer']}
     path = receipt_path(manifest, item)
     existing = read_json(path, {})
+    # An unchanged response-less item can remain unread forever. Its durable
+    # terminal receipt makes subsequent staging O(1), without any bus lookup.
+    if existing.get('phase') in ('delivered', 'read', 'legacy-delivered'):
+        return path
     answer = item['answer']
-    if not (answer.get('response_event_id') or answer.get('response_event_ref')):
-        bus.configure(manifest)
-        row_id = legacy_match(manifest, item)
-        if row_id:
-            row = next(r for r in bus.read() if r.get('id') == row_id)
-            subject, owner, _, _ = legacy_route(manifest, item, row)
-            record_legacy_delivery(manifest, dict(item, subject_ref=subject), owner, row_id)
-            write_json(path, {'item': item, 'phase': 'legacy-delivered',
-                              'bus_id': row_id, 'source_read': False})
-            return path
+    text = str(answer.get('text') or answer.get('outcome') or '')
+    if not text.strip() or len(text.encode()) > 1024 * 1024:
+        raise ValueError('answer text missing or too large')
+    sweep = sweep if sweep is not None else DeliverySweep(manifest)
+    sweep.paths.add(path)
     # This path identifies one immutable response event. Different CLI shapes
     # of that event must not replace its saved payload or reopen its receipt.
     if not existing:
         write_json(path, {'item': item, 'phase': 'pending'})
+        if not (answer.get('response_event_id') or answer.get('response_event_ref')):
+            sweep.pending.setdefault((item['ask_id'], text), []).append(path)
     elif existing.get('phase') not in ('delivered', 'read', 'legacy-delivered'):
         changed = False
         saved, incoming = existing['item']['answer'], item['answer']
@@ -313,8 +348,7 @@ def stage(manifest, item):
             except ValueError:
                 pass
             else:
-                bus.configure(manifest)
-                if not any(row.get('id') == row_id for row in bus.read()):
+                if row_id not in sweep.by_id:
                     existing['item']['answer'] = incoming
                     changed = True
         # Correlation may be registered after the consuming stream retained the
@@ -343,28 +377,44 @@ def queued(manifest, item):
         return False
 
 
-def process(manifest, path, client, legacy_pending=None):
+def process(manifest, path, client, legacy_pending=None, sweep=None):
     record = read_json(path)
     if record.get('phase') in ('read', 'invalid', 'legacy-delivered'):
         return record['phase'] != 'invalid'
     item = record['item']
     ask_id = item['ask_id']
     try:
+        sweep = sweep if sweep is not None else DeliverySweep(manifest)
         answer = item['answer']
-        if not (answer.get('response_event_id') or answer.get('response_event_ref')):
-            # Correlation can arrive after publication and after the source read
-            # ack. Recheck retained legacy work even when no new inbox item arrives.
-            if read_json(stage(manifest, item)).get('phase') == 'legacy-delivered':
-                return True
-        response_id = answer_id(item)
-        subject, owner, re_id, question = route(manifest, item)
+        if not str(answer.get('text') or answer.get('outcome') or '').strip():
+            reject(manifest, item)
+            path.unlink(missing_ok=True)  # full evidence now lives in invalid-*.json
+            return False
+        identified = bool(answer.get('response_event_id') or answer.get('response_event_ref'))
+        response_id = answer_id(item) if identified else None
+        prior_id = record.get('bus_id') or (publication_id(item) if identified else None)
+        subject, owner, re_id, question = legacy_route(manifest, item, sweep.by_id.get(prior_id), sweep)
         answer = item['answer']
         text = str(answer.get('text') or answer.get('outcome') or '')
-        if not text or len(text.encode()) > 1024 * 1024:
+        if not text.strip() or len(text.encode()) > 1024 * 1024:
             raise ValueError('answer text missing or too large')
         # A repeated response text is still a distinct operator event. Bind the
         # publication identity to the event, never merely the ask or its text.
-        row_id = record.get('bus_id') or publication_id(item)
+        row_id = record.get('bus_id')
+        if not row_id:
+            if identified:
+                row_id = publication_id(item)
+            else:
+                row_id = legacy_match(manifest, item, sweep=sweep)
+                if row_id:
+                    subject, owner, re_id, question = legacy_route(manifest, item, sweep.by_id[row_id], sweep)
+                else:
+                    row_id = 'answer-' + ask_id
+                if row_id in sweep.by_id and not delivered(sweep.by_id[row_id], subject, owner, text):
+                    # A revised legacy ruling has no event identity. Keep its
+                    # content and destination distinct while retries converge.
+                    identity = json.dumps([subject, bus.resolve(owner), re_id, text])
+                    row_id += ':legacy:' + hashlib.sha256(identity.encode()).hexdigest()[:16]
         # Reuse an ask-only publication once when its response identity arrives.
         # This also recovers an old loop writer that appended its bus row and
         # crashed before unlinking .answer.json: deliver/shared_answer both
@@ -372,28 +422,40 @@ def process(manifest, path, client, legacy_pending=None):
         # A durable binding prevents a second, genuinely distinct event from
         # being swallowed even if its text is identical.
         from .loop_answers import path as loop_ask_path
-        legacy = read_json(legacy_path(manifest, ask_id), {})
         legacy_id = 'answer-' + ask_id
-        legacy_row = next((r for r in bus.read() if r.get('id') == legacy_id), None)
-        if (not record.get('bus_id') and legacy.get('response_event_id') in (None, response_id)
-                and (legacy.get('phase') == 'legacy-delivered' or loop_ask_path(manifest, ask_id).is_file())
-                and legacy_row
-                and delivered(legacy_row, subject, owner, text)):
-            row_id = legacy_id
-            record_legacy_delivery(manifest, item, owner, row_id, response_id, legacy_pending)
-        row = next((r for r in bus.read() if r.get('id') == row_id), None)
+        if identified and not record.get('bus_id'):
+            for legacy_row in reversed(sweep.by_ask.get(ask_id, [])):
+                candidate = legacy_row['id']
+                if candidate != legacy_id and not candidate.startswith(legacy_id + ':legacy:'):
+                    continue
+                legacy = read_json(legacy_path(manifest, ask_id, candidate), {})
+                candidate_subject, candidate_owner, candidate_re, candidate_question = legacy_route(manifest, item, legacy_row, sweep)
+                if (legacy.get('response_event_id') in (None, response_id)
+                        and (legacy.get('phase') == 'legacy-delivered'
+                             or loop_ask_path(manifest, ask_id).is_file()
+                             or sweep.pending.get((ask_id, text)))
+                        and delivered(legacy_row, candidate_subject, candidate_owner, text)):
+                    subject, owner, re_id, question = candidate_subject, candidate_owner, candidate_re, candidate_question
+                    row_id = candidate
+                    record_legacy_delivery(manifest, dict(item, subject_ref=subject), owner,
+                                           row_id, response_id, legacy_pending, sweep)
+                    break
+        row = sweep.by_id.get(row_id)
         if row is None:
             args = ['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
                     '--subject', subject, '--topic', 'anx-answer', '--id', row_id,
                     '--rollback', 'Revise the answer on its original ANX ask.', '--force', '--no-mirror']
             if re_id:
                 args += ['--re', re_id]
-            with contextlib.redirect_stdout(sys.stderr):
-                bus.main([*args, '--', text], manifest)
-            row = next((r for r in bus.read() if r.get('id') == row_id), None)
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    bus.main([*args, '--', text], manifest)
+            finally:
+                sweep.refresh()
+            row = sweep.by_id.get(row_id)
         if not row or not delivered(row, subject, owner, text):
             raise ValueError('answer delivery missing or conflicts with a prior response')
-        settle_legacy_receipts(manifest, item, row_id, legacy_pending)
+        settle_legacy_receipts(manifest, item, row_id, legacy_pending, sweep)
         if question is not None:
             from .questions import accept_anx_delivery
             # Retire the question's default/escalation ladder before suppression
@@ -405,6 +467,12 @@ def process(manifest, path, client, legacy_pending=None):
         if loop_record is not None:
             loop_record['answer'] = answer
             write_json(provenance, loop_record)
+        if not identified:
+            record_legacy_delivery(manifest, dict(item, subject_ref=subject), owner,
+                                   row_id, pending=legacy_pending, sweep=sweep)
+            record.update(phase='legacy-delivered', bus_id=row_id, source_read=False)
+            write_json(path, record)
+            return True
         record.update(phase='delivered', bus_id=row_id)
         write_json(path, record)
         # Acknowledge the exact response, not the latest reply to this ask.
@@ -439,42 +507,43 @@ def consume(manifest):
         except (ToolError, ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
             status['poll_error'] = getattr(exc, 'category', type(exc).__name__)
             snapshot = []
+        sweep = DeliverySweep(manifest)
         for item in snapshot:
             try:
                 if owns(client, item) and item.get('answer') is not None and item.get('answer_unread') is not False:
-                    stage(manifest, item)
+                    stage(manifest, item, sweep)
             except (ValueError, TypeError, KeyError, AttributeError):
                 reject(manifest, item)
             except (ToolError, OSError) as exc:
                 status['poll_error'] = getattr(exc, 'category', type(exc).__name__)
-        bus.configure(manifest)
-        pending = legacy_pending(manifest)
-        for path in sorted(directory.glob('*.json')):
-            if path.name != 'status.json':
-                process(manifest, path, client, pending)
+        for path in sorted(sweep.paths):
+            if path.name != 'status.json' and sweep.records.get(path, {}).get('phase') not in ('read', 'legacy-delivered', 'invalid'):
+                process(manifest, path, client, sweep=sweep)
         write_json(directory/'status.json', status)
 
 
-def shared_answer(manifest, item, client=None):
+def shared_answer(manifest, item, client=None, sweep=None):
     """Every shared-stream loop relay uses the unread consumer's lock and receipt."""
     manifest.writable()
-    with delivery_lock(manifest) as acquired:
-        if not acquired:
-            return False  # shared-stream callers retain their own durable retry
-        client = client or AnxClient(manifest)
-        try:
-            if not owns(client, item):
-                return False
-            from .loop_answers import path as loop_ask_path
-            loop_record = read_json(loop_ask_path(manifest, reference(item['ask_id'])), {})
-            if not item.get('subject_ref') and not item.get('subject') and loop_record:
-                item = dict(item, subject_ref=loop_record['card'])
-            path = stage(manifest, item)
-        except (ValueError, TypeError, KeyError, AttributeError):
-            reject(manifest, item)
+    if sweep is None:
+        with delivery_lock(manifest) as acquired:
+            if not acquired:
+                return False  # shared-stream callers retain their own durable retry
+            return shared_answer(manifest, item, client, DeliverySweep(manifest))
+    # Supplying a sweep is internal: its caller already owns consume.lock.
+    client = client or AnxClient(manifest)
+    try:
+        if not owns(client, item):
             return False
-        bus.configure(manifest)
-        return process(manifest, path, client)
+        from .loop_answers import path as loop_ask_path
+        loop_record = read_json(loop_ask_path(manifest, reference(item['ask_id'])), {})
+        if not item.get('subject_ref') and not item.get('subject') and loop_record:
+            item = dict(item, subject_ref=loop_record['card'])
+        path = stage(manifest, item, sweep)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        reject(manifest, item)
+        return False
+    return process(manifest, path, client, sweep=sweep)
 
 
 def question_answer(manifest, record, answer):
@@ -485,9 +554,7 @@ def question_answer(manifest, record, answer):
             return False  # owning consumer will settle it; the question remains pending
         item = {'ask_id': reference(record['anx_ask_id']), 'subject_ref': manifest.escalation.card,
                 'answer': answer}
-        path = stage(manifest, item)
-        bus.configure(manifest)
-        return process(manifest, path, AnxClient(manifest))
+        return shared_answer(manifest, item, sweep=DeliverySweep(manifest))
 
 
 def health(manifest):

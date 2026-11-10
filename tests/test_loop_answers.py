@@ -2,6 +2,8 @@
 import contextlib
 import io
 import hashlib
+import os
+import time
 from unittest.mock import patch
 
 from coordkit import answers, bus, loop, loop_answers, questions, reconcile, wait
@@ -145,6 +147,58 @@ class LoopAnswersTests(FakeCase):
         rows = [r for r in self.rows() if r['id'] == 'answer-' + ask_id]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['text'], '--no-mirror')
+
+    def test_empty_loop_answers_are_quarantined_without_placeholder_or_evidence_loss(self):
+        for i, answer in enumerate(({}, {'response_event_id': 'empty'}, None, [], {'text': '   '})):
+            with self.subTest(answer=answer):
+                ask_id = f'event:empty-{i}'
+                loop_answers.remember(self.manifest, ask_id, 'card:loop-audit', 'audit', 'cycle')
+                item = {'ask_id': ask_id, 'answer': answer}
+                self.assertTrue(self.quiet(loop_answers.receive, self.manifest, item))
+                pending = loop_answers.path(self.manifest, ask_id).with_suffix('.answer.json')
+                self.assertTrue(pending.exists())
+                self.assertEqual(read_json(pending)['answer'], answer)
+                self.quiet(loop_answers.drain, self.manifest)
+        self.assertEqual([r for r in self.rows() if r['kind'] == 'decision'], [])
+        quarantine = [read_json(p) for p in answers.home(self.manifest).glob('invalid-*.json')]
+        self.assertEqual(len(quarantine), 5)
+        self.assertTrue(all(r['phase'] == 'invalid' for r in quarantine))
+        self.assertIn('invalid=5', answers.health(self.manifest))
+        self.assertFalse(any('/agent-inbox/answers/read' in c['args'] for c in self.calls()))
+
+    def test_revised_response_less_loop_answer_publishes_once_and_clears_pending(self):
+        ask_id = 'event:legacy-revision'
+        loop_answers.remember(self.manifest, ask_id, 'card:loop-audit', 'audit', 'cycle')
+        for text in ('First ruling', 'Revised ruling', 'Revised ruling'):
+            self.quiet(loop_answers.receive, self.manifest, {'ask_id': ask_id, 'answer': {'text': text}})
+            self.quiet(loop_answers.drain, self.manifest)
+        self.assertFalse(loop_answers.path(self.manifest, ask_id).with_suffix('.answer.json').exists())
+        rows = [r for r in self.rows() if not r.get('copy_of')]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r['text'] for r in rows}, {'First ruling', 'Revised ruling'})
+        self.assertEqual(len({r['id'] for r in rows}), 2)
+
+    def test_doctor_warns_on_loop_pending_older_than_one_reconcile_interval(self):
+        from coordkit import lifecycle
+        ask_id = 'event:stale-loop-answer'
+        loop_answers.remember(self.manifest, ask_id, 'card:loop-audit', 'audit', 'cycle')
+        with patch.object(bus, 'main', side_effect=SystemExit(1)):
+            self.quiet(loop_answers.receive, self.manifest, {'ask_id': ask_id, 'answer': {'text': 'Repair'}})
+        pending = loop_answers.path(self.manifest, ask_id).with_suffix('.answer.json')
+        at = time.time()
+        os.utime(pending, (at, at))
+        self.assertNotIn('WARN', loop_answers.health(self.manifest, at + self.manifest.reconciler.interval_seconds))
+        old = at - self.manifest.reconciler.interval_seconds - 1
+        os.utime(pending, (old, old))
+        with patch.object(bus, 'main', side_effect=SystemExit(1)):
+            self.quiet(loop_answers.receive, self.manifest, {'ask_id': ask_id, 'answer': {'text': 'Repair'}})
+        self.assertEqual(pending.stat().st_mtime, old, 'unchanged retries must not reset pending age')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            lifecycle.doctor(self.manifest)
+        self.assertIn('DOCTOR loop_answers warn WARN loop answer delivery stale=1', output.getvalue())
+        self.quiet(loop_answers.drain, self.manifest)
+        self.assertNotIn('WARN', loop_answers.health(self.manifest))
 
     def test_registration_failure_retries_locally_without_creating_another_ask(self):
         with patch.object(loop_answers, 'remember', side_effect=OSError('local write failed')):
