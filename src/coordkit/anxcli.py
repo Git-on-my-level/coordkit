@@ -29,9 +29,27 @@ class AnxClient:
             # A shared consuming stream needs one receipt boundary for every reader,
             # including lead waiters and future integrations, before returning data.
             from . import loop_answers
+            from . import answers
+            remaining = []
             for item in result.get('answers', []):
+                try:
+                    if not answers.owns(self, item):
+                        continue
+                    ask_id = item.get('ask_id') or item.get('event_ref') or item.get('id')
+                    item = dict(item, ask_id=answers.reference(ask_id))
+                except (ValueError, TypeError, AttributeError):
+                    answers.reject(self.manifest, item)
+                    continue
+                if answers.already_delivered(self.manifest, item):
+                    continue
+                remaining.append(item)
                 loop_answers.defer(self.manifest, item)
-                loop_answers.receive(self.manifest, item)
+                answer = item.get('answer')
+                if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')):
+                    answers.shared_answer(self.manifest, item, self)
+                else:
+                    loop_answers.receive(self.manifest, item)
+            result['answers'] = remaining
         return result
 
     def identities(self):

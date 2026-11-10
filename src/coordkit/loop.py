@@ -126,9 +126,10 @@ def _cycle(manifest, name, settings, handle, state):
             key = f'{manifest.agentctl.request_key_prefix}-{handle}-{cycle}'
             actl = AgentctlClient(manifest)
             # Plan before launch, using exactly the same key, prompt, cwd and selector.
-            plan = actl.delegate(prompt, run_dir, key=key, label=handle, plan=True, timeout="20m")
+            selector = {'selector': settings.selector} if settings.selector else {}
+            plan = actl.delegate(prompt, run_dir, key=key, label=handle, plan=True, timeout="20m", **selector)
             (run_dir/'plan.json').write_text(plan)
-            raw = actl.delegate(prompt, run_dir, key=key, label=handle, timeout="20m")
+            raw = actl.delegate(prompt, run_dir, key=key, label=handle, timeout="20m", **selector)
             (run_dir/'raw.txt').write_text(raw)
             items = auditor.find_items(raw)
             pending = {'cycle': cycle, 'items': items, 'offset': extracted.offset if extracted else None,

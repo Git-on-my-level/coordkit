@@ -146,3 +146,134 @@ supported, server-enforced idempotent note path before replaying those rows;
 do not invent an unsupported `anx note --request-key` flag. Restoring a local
 backup does not undo remote ANX writes. Keep the forward cursor and disposition
 any remote side effects explicitly.
+
+## Unread operator answers
+
+Each live reconciliation first reads the configured ANX actor's own unread
+answers, before unrelated liveness probes. It snapshots at most ten pages and
+2,000 answers before acknowledging anything, so removing unread entries cannot
+skip later pages. Workspace, actor and server scope separate the private
+`reconcile/unread-answers/` receipts.
+
+The full reply is retained before routing. Exact question correlation targets
+its original asker, a uniquely title-matched blocker targets its poster, and card-level answers
+otherwise go to `escalation.internal_to` or `obligations.coordinator`. Replies
+become typed `decision` bus rows with the card and reply edge; they never execute
+commands, grant a skip, pause a loop or change STOP files. Closed questions are
+not reopened. Missing routing information leaves a pending receipt and unread
+answer. `doctor` reports pending deliveries and polling failures as
+`unread_answers` warnings.
+
+A successful, fsynced bus delivery precedes acknowledgement of the exact
+`response_event_id` through ANX's answer-read endpoint. A reply arriving after
+the snapshot stays unread. Failed delivery or acknowledgement retries from its
+private receipt, using stable publication IDs. Separate responses to one ask
+keep separate receipts and decision rows. Shared answer-stream consumers skip
+responses already delivered through this path. Loop relays and shared-stream
+reconciliation use the same `consume.lock`, per-response publication ID and
+exact-response acknowledgement, including replies arriving after the unread
+snapshot. Replies without response event IDs, including normal unread inbox
+replies, use the same lock and deterministic legacy publication. The first uses
+`answer-<ask_id>`. A revised answer or different destination uses
+`answer-<ask_id>:legacy:<hash>` derived from its full text, card, recipient and
+reply edge, so revisions publish separately and retries deduplicate. Successful
+delivery removes the loop's pending file. A `legacy-delivered`
+receipt records local bus delivery with `source_read=false`, settling any earlier
+response-less unread receipt. Doctor reports `legacy_local_deliveries` and
+`source_read_unconfirmed` separately, without claiming an unavailable ANX read
+acknowledgement. If the response ID later arrives, one durable binding reuses the
+matching legacy row and acknowledges that exact response. Each legacy publication
+can bind to one response event. Further distinct event IDs
+still publish separately, including identical answer text. In the reverse order,
+a response-less representation reuses the verified canonical bus row. Both paths
+verify the complete payload, including spill files, before recording delivery.
+Destination mismatches never settle another receipt. Independently routable
+replies deliver to their own destination; missing correlation remains pending
+and doctor-visible.
+An answer with neither text nor outcome is quarantined with its original payload;
+it never publishes a placeholder decision. `doctor` also reports `loop_answers`
+warnings for `.answer.json` files older than one configured reconciler interval.
+Unchanged retry observations preserve that age. Inspect the exact pending file
+privately, repair its delivery or disposition invalid source input and archive
+its quarantine receipt as below; retain loop provenance and bus history. A valid
+retry clears the pending file only after durable delivery (and exact read ack
+when an event ID exists).
+Malformed ask references are quarantined as doctor-visible receipts without blocking later replies; explicit foreign
+requester IDs are ignored. Pending subjectless receipts accept a validated card
+from later loop or exact question correlation without reopening delivered replies.
+Dry runs never consume answers. Keep these receipts
+with their corresponding ask and bus history.
+
+Each answer delivery sweep builds one receipt index and one bus snapshot. Routing,
+legacy publication checks and settlement share them; only a publication attempt
+refreshes the bus snapshot. An unchanged `legacy-delivered` unread item needs
+only its direct receipt lookup on later sweeps. The synthetic performance probe
+and measurements are documented in [ANSWER-DELIVERY-PERF.md](ANSWER-DELIVERY-PERF.md).
+
+### Clearing a quarantined invalid answer
+
+`doctor` includes `invalid=N` and a `details=...` directory for malformed input.
+Inspect the exact `invalid-<hash>.json` receipt privately and correct or explicitly
+disposition its source item through the owning tool. Otherwise the next poll can
+recreate it. Preserve that disposition with the incident evidence.
+
+For an invalid loop reply, the source also includes its retained
+`state/loop-asks/<hash>.answer.json`. After explicitly dispositioning that reply,
+hold the same scoped unread-answer `consume.lock` and move that exact pending
+file into `state/loop-asks/archive/` (refuse an existing destination). Preserve it
+with the quarantine receipt and incident evidence. Keep the sibling `<hash>.json`
+provenance file. This removes the invalid work from the retry glob and clears
+the age warning without inventing a decision or acknowledging an absent event.
+
+Archive only the inspected quarantine receipt under the same consumer lock
+(substitute the directory printed by doctor and the exact inspected filename):
+
+```sh
+python3 - '/path/from/doctor/details' 'invalid-<64-hex>.json' <<'PYTHON'
+import fcntl
+import json
+from pathlib import Path
+import re
+import sys
+
+home, name = Path(sys.argv[1]), sys.argv[2]
+if not re.fullmatch(r'invalid-[0-9a-f]{64}\.json', name):
+    raise SystemExit('expected an exact invalid receipt filename')
+with (home/'consume.lock').open('a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    source = home/name
+    if source.is_symlink() or json.loads(source.read_text()).get('phase') != 'invalid':
+        raise SystemExit('receipt is not a quarantined invalid item')
+    archive = home/'archive'
+    archive.mkdir(mode=0o700, exist_ok=True)
+    target = archive/name
+    if target.exists() or target.is_symlink():
+        raise SystemExit('archive already contains this receipt; preserve both copies')
+    source.rename(target)
+PYTHON
+```
+
+The nonblocking lock fails without moving anything while a consumer is active;
+retry after it finishes. The archive is outside the top-level receipt scan and
+retains the original payload. Rerun `coordkit --manifest /path/to/coordkit.toml doctor`
+to verify the warning cleared. This step neither acknowledges an ANX answer nor
+clears valid pending receipts or `status.json`; any other failures remain visible.
+
+## Per-loop model selection
+
+Loops retain the configured `plan` capacity pool by default. An explicit model
+family ruling can select one loop without changing the shared pool:
+
+```toml
+[loop.loops.audit.selector]
+family = "glm-flash"
+```
+
+Agentctl resolves the family using its current reviewed routing configuration;
+coordkit does not translate it into a native model slug. Optional `harness`,
+`version` and `host` constraints require a family; an exclusive `pool` selector
+is also accepted. Caller-supplied access settings are refused. Plan and launch
+use the identical selector and retain read-only access and permission checks.
+This field requires a build containing selector support; v0.4.1 rejects it.
+Verify a scheduled execution's resolved model and harness through agentctl
+status. Manifest intent alone does not prove the model that ran.

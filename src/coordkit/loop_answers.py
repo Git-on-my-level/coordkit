@@ -1,10 +1,8 @@
 """Correlate direct loop asks across recovery and either shared answer consumer."""
-import contextlib
 import hashlib
 import re
-import sys
+import time
 
-from . import bus
 from .process import ToolError
 from .state import read_json, write_json
 
@@ -48,21 +46,27 @@ def receive(manifest, item):
     ask_id = item.get('ask_id') or item.get('event_ref') or item.get('id')
     if not isinstance(ask_id, str) or not ask_id:
         return False
+    item = dict(item, ask_id=reference(ask_id))
+    from .answers import queued
+    answer = item.get('answer')
+    if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')) and queued(manifest, item):
+        return True  # full reply already retained by the requester-scoped consumer
     target = path(manifest, ask_id)
     record = read_json(target)
     if not record:
         return False
     manifest.writable()
-    record['answer'] = item.get('answer') or item
+    record['answer'] = item['answer'] if 'answer' in item else item
     pending = target.with_suffix('.answer.json')
-    write_json(pending, record)
+    if read_json(pending) != record:
+        write_json(pending, record)  # unchanged retries retain their original age
     write_json(target, record)  # retain earlier rulings after successful bus delivery
     deliver(manifest, pending)
     return True
 
 
 def answer_text(answer):
-    return str(answer.get('text') or answer.get('outcome') or 'ANX answer received') if isinstance(answer, dict) else str(answer)
+    return str(answer.get('text') or answer.get('outcome') or '') if isinstance(answer, dict) else (answer if isinstance(answer, str) else '')
 
 
 def retained_answers(report):
@@ -107,24 +111,41 @@ def answer_context(manifest, ask_id):
     raise ToolError('anx', 6, 'earlier loop answer lookup incomplete; reminder retained for retry', 'protocol_error')
 
 
-def deliver(manifest, pending):
+def deliver(manifest, pending, sweep=None):
     record = read_json(pending)
     if not record:
         return
-    answer = record['answer']
-    text = answer_text(answer)
-    owner = manifest.escalation.internal_to or manifest.obligations.coordinator or 'lead'
-    try:
-        with contextlib.redirect_stdout(sys.stderr):
-            bus.main(['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
-                      '--topic', 'loop-failure-answer', '--subject', record['card'],
-                      '--rollback', 'Follow up on the original ANX ask to revise this answer.',
-                      '--id', 'answer-' + record['ask_id'], '--force', '--no-mirror', text], manifest)
+    from .answers import shared_answer
+    item = {'ask_id': record['ask_id'], 'subject_ref': record['card'], 'answer': record['answer']}
+    # Identified and response-less replies share publication verification,
+    # quarantine, the delivery lock and durable receipts. Never invent text.
+    if shared_answer(manifest, item, sweep=sweep):
         pending.unlink(missing_ok=True)
-    except (SystemExit, ToolError, OSError, ValueError) as exc:
-        print(f'LOOP_ANSWER_PENDING {record["ask_id"]}: {exc}', file=sys.stderr)
 
 
 def drain(manifest):
-    for pending in (manifest.paths.root/'state/loop-asks').glob('*.answer.json'):
-        deliver(manifest, pending)
+    from .answers import delivery_lock, DeliverySweep
+    pending_paths = list((manifest.paths.root/'state/loop-asks').glob('*.answer.json'))
+    if not pending_paths:
+        return  # no work: do not rescan the bus and retained answer receipts
+    with delivery_lock(manifest) as acquired:
+        if not acquired:
+            return
+        sweep = DeliverySweep(manifest)
+        for pending in pending_paths:
+            deliver(manifest, pending, sweep)
+
+
+def health(manifest, at=None):
+    at = time.time() if at is None else at
+    directory = manifest.paths.root/'state/loop-asks'
+    stale = []
+    for pending in directory.glob('*.answer.json'):
+        try:
+            if at - pending.stat().st_mtime > manifest.reconciler.interval_seconds:
+                stale.append(pending)
+        except FileNotFoundError:
+            pass  # a concurrent successful drain is recovery, not a red finding
+    if stale:
+        return f'WARN loop answer delivery stale={len(stale)} details={directory}'
+    return 'no overdue loop answers'

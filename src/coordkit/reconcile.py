@@ -170,6 +170,8 @@ def reconcile(manifest, dry_run=False, at=None):
             recommend=recommend,why='The reconciler cannot safely decide acceptance or ownership on behalf of the lead.'),ask=True)
     bus.configure(manifest)
     if not dry_run:
+        from .answers import consume
+        consume(manifest)
         loop_answers.drain(manifest)
     rows=bus.read()
     active=actl.recent(nonterminal=True)
@@ -392,7 +394,21 @@ def reconcile(manifest, dry_run=False, at=None):
         for received_path, _ in deferred:
             received_path.unlink(missing_ok=True)  # only after answers.json is durable
         for item in list(pending):
-            if any(row.get('id') == 'answer-'+item['ask_id'] for row in bus.read()):
+            from . import answers as answer_delivery
+            try:
+                item['ask_id'] = answer_delivery.reference(item['ask_id'])
+            except (ValueError, KeyError, TypeError):
+                answer_delivery.reject(manifest, item)
+                pending.remove(item)
+                write_json(pending_path, pending)
+                continue
+            answer = item.get('answer')
+            if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')):
+                if answer_delivery.shared_answer(manifest, item, client):
+                    pending.remove(item)
+                    write_json(pending_path, pending)
+                continue
+            if answer_delivery.already_delivered(manifest, item) or any(row.get('id') == 'answer-'+item['ask_id'] for row in bus.read()):
                 pending.remove(item)
                 write_json(pending_path,pending)
                 continue
@@ -544,11 +560,12 @@ def main(argv,manifest):
                 fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
                 path=directory/'answers.json'
                 pending=read_json(path,[])
+                answer_ref = loop_answers.reference(args.answer_id)
                 for item in pending:
-                    if item['ask_id'] == args.answer_id:
+                    if loop_answers.reference(item['ask_id']) == answer_ref:
                         AnxClient(manifest).note(item.get('subject_ref') or manifest.escalation.card,
                             f'Abandoned answer {args.answer_id}: {args.reason}')
-                write_json(path,[item for item in pending if item['ask_id'] != args.answer_id])
+                write_json(path,[item for item in pending if loop_answers.reference(item['ask_id']) != answer_ref])
             return 0
         if args.dry_run:
             return reconcile(manifest,True)
