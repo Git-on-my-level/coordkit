@@ -82,20 +82,27 @@ separate `bus open-rulings --orphaned` / `open-blockers --orphaned` lists. Recon
 groups orphans by retirement redirect, declared agent fallback, or coordinator. Each pass
 sends at most one batched ask per fallback recipient. Each ask lists up to
 `[reconciler].orphan_batch_lines` orphans (default `10`, integer `1..50`), with kind,
-ID, original owner and a one-line subject. The rest appear as a count plus
+ID, original owner, age at the first delivery attempt and the bus `subject` field
+when present. Body text is never copied. The rest appear as a count plus
 `bus open-rulings --orphaned` and `bus open-blockers --orphaned` to inspect all items.
 The full batch content determines a stable post ID; unchanged batches send nothing,
 and changed batches supersede the previous ask under the same recipient key.
 Digest-only targets, including the obligations coordinator, queue one replaceable
 batched lead-digest entry per recipient instead of an ask.
+Each hourly flush renders the oldest 12 queued entries, retains the remainder,
+and reports how many await later flushes. Replacing a snapshot preserves its queue
+position. Queue limits reject new entries without evicting existing findings.
 `[reconciler].orphan_ask_cap` bounds recipient batches attempted per pass (default
 `10`, nonnegative integer; `0` queues only the global backlog summary). Digest-only
 batches also count toward this cap. A durable recipient cursor advances before
 attempting delivery, so failures and aborted passes cannot starve other recipients.
-Only delivered batches earn durable `orphan_notified` receipts for their members;
-retries reuse the stable post ID after an abort. Batch receipts survive action-receipt
-expiry. One replaceable digest summary reports the remaining unnotified backlog and
-clears when it drains. Dry runs write nothing.
+Only delivered batches earn durable `orphan_notified` receipts for their members.
+Digest batches receive these receipts at flush time, after publication, only for
+the entries actually rendered. Closing an unrendered orphan group clears its snapshot.
+Retries reuse the stable post ID after an abort. Batch receipts survive action-receipt
+expiry. A pending batch clock keeps displayed age stable across delayed retries, so
+the text still matches its publication ID. One replaceable digest summary reports
+the remaining unnotified backlog and clears when it drains. Dry runs write nothing.
 The fallback never creates a second owner-bearing ruling or blocker. A latest `RUNNING`
 state from an equally silent lane is reported as `STALE`, without changing the retained row.
 MCP's `ack` and `inbox` tools retain their addressed behavior. The thin CLI wrappers are retired.
