@@ -174,6 +174,33 @@ class EvidenceTests(FakeCase):
         self.assertNotIn('--evidence',args)
         self.assertEqual(args[args.index('note')+2],'handoff (evidence: data/missing/README.md)')
 
+    def test_evidence_forms_match_anx_typed_ref_rule(self):
+        spaced = self.root/'meeting notes.md'
+        spaced.write_text('evidence')
+        repo = 'repo:workspace:handoffs/a--meeting notes.md@' + '0'*40 + '#sha256:' + 'a'*64
+        cases = [('bus:2e1688', 'bus:2e1688'), ('event:x', 'event:x'),
+                 ('https://example.com/pr/1', 'https://example.com/pr/1'),
+                 (repo, repo), (str(spaced), 'path:'+str(spaced)),
+                 ('path:', None), ('path:  ', None), (':x', None), ('word', None)]
+        for given, expected in cases:
+            with self.subTest(given=given):
+                calls = len(self.calls())
+                AnxClient(self.manifest).note('card:x', 'n', evidence=given)
+                args = self.calls()[calls]['args']
+                if expected is None:
+                    self.assertNotIn('--evidence', args)
+                    self.assertEqual(args[args.index('note')+2], f'n (evidence: {given})')
+                else:
+                    self.assertEqual(args[args.index('--evidence')+1], expected)
+
+    def test_empty_evidence_is_omitted(self):
+        for given in (None, ''):
+            calls = len(self.calls())
+            AnxClient(self.manifest).note('card:x', 'n', evidence=given)
+            args = self.calls()[calls]['args']
+            self.assertNotIn('--evidence', args)
+            self.assertEqual(args[args.index('note')+2], 'n')
+
     def test_false_success_not_found_envelope_refuses_card(self):
         self.respond({'tool':'anx','json':{'ok':False,'error':{'code':'not_found'}}})
         with self.assertRaises(CardUnresolved):

@@ -9,6 +9,12 @@ class CardUnresolved(ToolError):
         super().__init__("anx", 9, f"{card}: {detail}", "card_unresolved")
 
 
+def is_typed_ref(ref):
+    """ANX's own rule (validateTypedRef): a nonblank prefix and a nonblank value around the first colon."""
+    prefix, sep, value = ref.strip().partition(":")
+    return bool(sep and prefix.strip() and value.strip())
+
+
 class AnxClient:
     def __init__(self, manifest, actor=None):
         self.manifest = manifest
@@ -89,7 +95,7 @@ class AnxClient:
                 evidence = "path:" + str(self.manifest.path(evidence))
             elif re.fullmatch(r"[0-9a-fA-F]{7,40}", evidence):
                 evidence = "commit:" + evidence.lower()
-            if evidence.startswith("path:") or re.fullmatch(r"[A-Za-z][A-Za-z0-9+._-]*:\S+", evidence):
+            if is_typed_ref(evidence):
                 args += ["--evidence", evidence]
             else:
                 # ANX rejects untyped refs; keep the value in the text so a bus row never blocks projection.
