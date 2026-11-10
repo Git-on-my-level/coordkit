@@ -109,7 +109,7 @@ row('loop_answers.py', '.answer.json|writer:receive|writer:deliver',
     'any consuming ANX answer reader receives a registered loop reply through the shared client',
     'durable decision bus row with deterministic ID, then pending answer removed; answer remains in correlation receipt for reminder context',
     'reconciler retries each sweep; external calls bounded by the bus command',
-    'LOOP_ANSWER_PENDING retains payload; direct answer never becomes ambiguous or applies an automatic repair')
+    'unread_answers doctor warning retains payload until canonical delivery and exact response acknowledgement; never applies an automatic repair')
 row('loop_answers.py', 'reconcile/received-answers|*.json|writer:defer',
     'shared ANX client consumes a reply from the stream, before returning it to any caller',
     'reconciler durably merges into answers.json then unlinks the received file',
@@ -378,11 +378,11 @@ row('mcp_server.py', 'clients.json|clients.json.lock|writer:clients_main',
     'opened-file validation per request; atomic edits; bounded metadata-keyed parsed cache',
     'malformed/insecure file refuses admission; absent file permits legacy fallback')
 
-row('answers.py', 'reconcile/unread-answers|consume.lock|*.json|.json|status.json|refs|.read-body|writer:consume|writer:stage|writer:process',
+row('answers.py', 'reconcile/unread-answers|consume.lock|*.json|.json|status.json|refs|.read-body|invalid-|phase:invalid|writer:delivery_lock|writer:reject|writer:consume|writer:stage|writer:process',
     'reconciler polls only its configured actor unread answers, retaining payloads before delivery',
     'bus fsync then per-answer read acknowledgement; pending receipts retry after failure',
     'snapshot bounded to ten pages and 2000 items; scope includes workspace actor and server; receipts retained',
-    'doctor warns on unread delivery or polling failures; no automatic execution or STOP changes')
+    'doctor warns on unread delivery, quarantined malformed items or polling failures; no automatic execution or STOP changes')
 
 row('questions.py', 'writer:accept_anx_delivery',
     'exact response delivery atomically checks the current question state under the store lock',

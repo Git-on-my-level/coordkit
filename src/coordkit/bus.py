@@ -1059,8 +1059,9 @@ def dispatch(o):
 
 def main(argv=None, manifest=None, *, site_local=False, origin='coordkit'):
     argv = list(argv or [])
-    no_mirror = '--no-mirror' in argv
-    argv = [arg for arg in argv if arg != '--no-mirror']
+    option_end = argv.index('--') if '--' in argv else len(argv)
+    no_mirror = '--no-mirror' in argv[:option_end]
+    argv = [arg for arg in argv[:option_end] if arg != '--no-mirror'] + argv[option_end:]
     configure(manifest, no_mirror)
     command = argv[0] if argv else ''
     tokens = [arg.partition('=')[0] for arg in argv]

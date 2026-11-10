@@ -394,8 +394,21 @@ def reconcile(manifest, dry_run=False, at=None):
         for received_path, _ in deferred:
             received_path.unlink(missing_ok=True)  # only after answers.json is durable
         for item in list(pending):
-            from .answers import already_delivered
-            if already_delivered(manifest, item) or any(row.get('id') == 'answer-'+item['ask_id'] for row in bus.read()):
+            from . import answers as answer_delivery
+            try:
+                item['ask_id'] = answer_delivery.reference(item['ask_id'])
+            except (ValueError, KeyError, TypeError):
+                answer_delivery.reject(manifest, item)
+                pending.remove(item)
+                write_json(pending_path, pending)
+                continue
+            answer = item.get('answer')
+            if isinstance(answer, dict) and (answer.get('response_event_id') or answer.get('response_event_ref')):
+                if answer_delivery.shared_answer(manifest, item, client):
+                    pending.remove(item)
+                    write_json(pending_path, pending)
+                continue
+            if answer_delivery.already_delivered(manifest, item) or any(row.get('id') == 'answer-'+item['ask_id'] for row in bus.read()):
                 pending.remove(item)
                 write_json(pending_path,pending)
                 continue

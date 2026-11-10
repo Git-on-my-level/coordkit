@@ -29,6 +29,34 @@ def reference(value):
     return value if value.startswith('event:') else 'event:' + value
 
 
+@contextlib.contextmanager
+def delivery_lock(manifest):
+    directory = home(manifest)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory/'consume.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+
+
+def owns(client, item):
+    """The listing is requester-scoped; reject explicit foreign provenance too."""
+    requester = item.get('requester_actor_id')
+    if requester is None:
+        return True  # older CLI listings omit the requester
+    return str(requester).removeprefix('actor:') in {str(identity).removeprefix('actor:') for identity in client.identities()}
+
+
+def reject(manifest, item):
+    """Quarantine invalid input independently so later replies remain deliverable."""
+    key = hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
+    write_json(home(manifest)/('invalid-' + key + '.json'),
+               {'item': item, 'phase': 'invalid', 'error': 'invalid answer item'})
+
+
 def unread(client):
     """Snapshot before acknowledging, so deleting unread entries cannot skip a page."""
     items, cursor, seen = [], None, set()
@@ -94,7 +122,10 @@ def receipt_path(manifest, item):
 def already_delivered(manifest, item):
     if not isinstance(item, dict) or not isinstance(item.get('ask_id'), str) or not isinstance(item.get('answer'), dict):
         return False
-    record = read_json(receipt_path(manifest, item), {})
+    try:
+        record = read_json(receipt_path(manifest, item), {})
+    except ValueError:
+        return False
     return record.get('phase') in ('delivered', 'read')
 
 
@@ -123,7 +154,7 @@ def stage(manifest, item):
         item['answer'] = {'text': item['answer']}
     path = receipt_path(manifest, item)
     existing = read_json(path, {})
-    if existing.get('phase') == 'read' or existing.get('item', {}).get('answer') != item['answer']:
+    if existing.get('item', {}).get('answer') != item['answer']:
         write_json(path, {'item': item, 'phase': 'pending'})
     return path
 
@@ -131,13 +162,16 @@ def stage(manifest, item):
 def queued(manifest, item):
     if not isinstance(item, dict) or not isinstance(item.get('ask_id'), str) or not isinstance(item.get('answer'), dict):
         return False
-    return receipt_path(manifest, item).is_file()
+    try:
+        return receipt_path(manifest, item).is_file()
+    except ValueError:
+        return False
 
 
 def process(manifest, path, client):
     record = read_json(path)
-    if record.get('phase') == 'read':
-        return True
+    if record.get('phase') in ('read', 'invalid'):
+        return record['phase'] == 'read'
     item = record['item']
     ask_id = item['ask_id']
     try:
@@ -158,7 +192,7 @@ def process(manifest, path, client):
             if re_id:
                 args += ['--re', re_id]
             with contextlib.redirect_stdout(sys.stderr):
-                bus.main([*args, text], manifest)
+                bus.main([*args, '--', text], manifest)
             row = next((r for r in bus.read() if r.get('id') == row_id), None)
         if not row or not delivered(row, subject, owner, text):
             raise ValueError('answer delivery missing or conflicts with a prior response')
@@ -196,21 +230,25 @@ def consume(manifest):
     manifest.writable()
     if not manifest.anx.workspace:
         return
-    directory = home(manifest)
-    directory.mkdir(parents=True, exist_ok=True)
-    with (directory/'consume.lock').open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+    with delivery_lock(manifest) as acquired:
+        if not acquired:
             return
+        directory = home(manifest)
         client = AnxClient(manifest)
         status = {'at': time.time(), 'poll_error': None}
         try:
-            for item in unread(client):
-                if item.get('answer') is not None and item.get('answer_unread') is not False:
-                    stage(manifest, item)
+            snapshot = unread(client)
         except (ToolError, ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
             status['poll_error'] = getattr(exc, 'category', type(exc).__name__)
+            snapshot = []
+        for item in snapshot:
+            try:
+                if owns(client, item) and item.get('answer') is not None and item.get('answer_unread') is not False:
+                    stage(manifest, item)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                reject(manifest, item)
+            except (ToolError, OSError) as exc:
+                status['poll_error'] = getattr(exc, 'category', type(exc).__name__)
         bus.configure(manifest)
         for path in sorted(directory.glob('*.json')):
             if path.name != 'status.json':
@@ -218,15 +256,33 @@ def consume(manifest):
         write_json(directory/'status.json', status)
 
 
+def shared_answer(manifest, item, client=None):
+    """Every shared-stream loop relay uses the unread consumer's lock and receipt."""
+    manifest.writable()
+    with delivery_lock(manifest) as acquired:
+        if not acquired:
+            return False  # shared-stream callers retain their own durable retry
+        client = client or AnxClient(manifest)
+        try:
+            if not owns(client, item):
+                return False
+            from .loop_answers import path as loop_ask_path
+            loop_record = read_json(loop_ask_path(manifest, reference(item['ask_id'])), {})
+            if not item.get('subject_ref') and not item.get('subject') and loop_record:
+                item = dict(item, subject_ref=loop_record['card'])
+            path = stage(manifest, item)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            reject(manifest, item)
+            return False
+        bus.configure(manifest)
+        return process(manifest, path, client)
+
+
 def question_answer(manifest, record, answer):
     """Share the same publication and lock when the question sweep wins first."""
     manifest.writable()
-    directory = home(manifest)
-    directory.mkdir(parents=True, exist_ok=True)
-    with (directory/'consume.lock').open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+    with delivery_lock(manifest) as acquired:
+        if not acquired:
             return False  # owning consumer will settle it; the question remains pending
         item = {'ask_id': reference(record['anx_ask_id']), 'subject_ref': manifest.escalation.card,
                 'answer': answer}

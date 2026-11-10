@@ -169,8 +169,14 @@ A successful, fsynced bus delivery precedes acknowledgement of the exact
 the snapshot stays unread. Failed delivery or acknowledgement retries from its
 private receipt, using stable publication IDs. Separate responses to one ask
 keep separate receipts and decision rows. Shared answer-stream consumers skip
-responses already delivered through this path. Keep these receipts with their
-corresponding ask and bus history.
+responses already delivered through this path. Loop relays and shared-stream
+reconciliation use the same `consume.lock`, per-response publication ID and
+exact-response acknowledgement, including replies arriving after the unread
+snapshot. Loop replies without response event IDs remain pending rather than being
+published through a second legacy path. Malformed ask references are quarantined
+as doctor-visible receipts without blocking later replies; explicit foreign
+requester IDs are ignored. Dry runs never consume answers. Keep these receipts
+with their corresponding ask and bus history.
 
 ## Per-loop model selection
 

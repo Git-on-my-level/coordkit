@@ -1,10 +1,7 @@
 """Correlate direct loop asks across recovery and either shared answer consumer."""
-import contextlib
 import hashlib
 import re
-import sys
 
-from . import bus
 from .process import ToolError
 from .state import read_json, write_json
 
@@ -115,24 +112,10 @@ def deliver(manifest, pending):
     record = read_json(pending)
     if not record:
         return
-    from .answers import already_delivered, queued
-    if already_delivered(manifest, record):
+    from .answers import shared_answer
+    item = {'ask_id': record['ask_id'], 'subject_ref': record['card'], 'answer': record['answer']}
+    if shared_answer(manifest, item):
         pending.unlink(missing_ok=True)
-        return
-    if queued(manifest, record):
-        return  # requester-scoped receipt owns the retry; do not race its publication
-    answer = record['answer']
-    text = answer_text(answer)
-    owner = manifest.escalation.internal_to or manifest.obligations.coordinator or 'lead'
-    try:
-        with contextlib.redirect_stdout(sys.stderr):
-            bus.main(['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
-                      '--topic', 'loop-failure-answer', '--subject', record['card'],
-                      '--rollback', 'Follow up on the original ANX ask to revise this answer.',
-                      '--id', 'answer-' + record['ask_id'], '--force', '--no-mirror', text], manifest)
-        pending.unlink(missing_ok=True)
-    except (SystemExit, ToolError, OSError, ValueError) as exc:
-        print(f'LOOP_ANSWER_PENDING {record["ask_id"]}: {exc}', file=sys.stderr)
 
 
 def drain(manifest):

@@ -178,6 +178,102 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(AnxClient(self.manifest).call('await', '--answers')['answers'], [])
         self.assertEqual(len(self.rows()), 1)
 
+    def test_reply_between_unread_snapshot_and_shared_stream_is_published_once(self):
+        from coordkit import loop_answers
+        from coordkit.anxcli import AnxClient
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        self.respond(self.listing([]))
+        self.consume()  # reply arrives only after the requester's unread snapshot
+        self.respond(self.listing(), {'tool': 'anx', 'contains': ['await'],
+                     'json': {'ok': True, 'result': {'answers': [self.item]}}})
+        original = answers.bus.main
+        def race(*args):
+            self.consume()  # the other publisher must respect the stream's lock
+            return original(*args)
+        with patch.object(answers.bus, 'main', side_effect=race), contextlib.redirect_stderr(io.StringIO()):
+            AnxClient(self.manifest).call('await', '--answers')
+        self.consume()  # even a stale unread listing cannot republish or re-ack it
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            reconcile.reconcile(self.manifest)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(len(self.reads()), 1)
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, self.item))['phase'], 'read')
+        self.assertFalse(loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json').exists())
+
+    def test_loop_stream_without_exact_response_id_waits_instead_of_legacy_publication(self):
+        from coordkit import loop_answers
+        from coordkit.anxcli import AnxClient
+        loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
+        self.item['answer'] = {'text': 'A legacy reply without an event ID'}
+        self.respond({'tool': 'anx', 'contains': ['await'],
+                      'json': {'ok': True, 'result': {'answers': [self.item]}}})
+        AnxClient(self.manifest).call('await', '--answers')
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.reads(), [])
+        self.assertIn('pending=1', answers.health(self.manifest))
+        self.assertTrue(loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json').exists())
+
+    def test_option_shaped_answer_is_inert_bus_text(self):
+        for index, text in enumerate(('--force', '--no-mirror')):
+            with self.subTest(text=text):
+                self.item['answer'] = {'text': text, 'response_event_id': f'option-{index}'}
+                self.respond(self.listing())
+                self.consume()
+        self.assertEqual({r['text'] for r in self.rows()}, {'--force', '--no-mirror'})
+        self.assertEqual(len(self.reads()), 2)
+
+    def test_malformed_ask_does_not_block_later_unread_or_shared_answers(self):
+        from coordkit import lifecycle
+        from coordkit.anxcli import AnxClient
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                bad = dict(self.item, ask_id='event:bad/ask')
+                self.item['answer'] = {'text': 'Valid answer', 'response_event_id': f'valid-{stream}'}
+                if stream:
+                    self.respond({'tool': 'anx', 'contains': ['await'],
+                                  'json': {'ok': True, 'result': {'answers': [bad, self.item]}}})
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        result = AnxClient(self.manifest).call('await', '--answers')
+                    self.assertEqual(len(result['answers']), 1)
+                else:
+                    self.respond(self.listing([bad, self.item]))
+                    self.consume()
+                self.assertIn('WARN', answers.health(self.manifest))
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(len(self.reads()), 2)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            lifecycle.doctor(self.manifest)
+        self.assertIn('DOCTOR unread_answers warn', out.getvalue())
+
+    def test_foreign_ask_in_returned_listing_and_stream_is_untouched(self):
+        from coordkit import loop_answers
+        from coordkit.anxcli import AnxClient
+        foreign = dict(self.item, ask_id='event:foreign', requester_actor_id='actor:somebody-else')
+        self.respond(self.listing([foreign]), {'tool': 'anx', 'contains': ['await'],
+                     'json': {'ok': True, 'result': {'answers': [foreign]}}})
+        self.consume()
+        self.assertEqual(AnxClient(self.manifest).call('await', '--answers')['answers'], [])
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.reads(), [])
+        self.assertFalse(answers.receipt_path(self.manifest, foreign).exists())
+        self.assertEqual(loop_answers.deferred(self.manifest), [])
+
+    def test_dry_run_neither_polls_consumes_nor_acknowledges_pending_answers(self):
+        self.respond(self.listing())
+        with patch.object(answers.bus, 'main', side_effect=SystemExit(1)):
+            self.consume()
+        before = {p: p.read_bytes() for p in answers.home(self.manifest).glob('*') if p.is_file()}
+        call_count = len(self.calls())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            reconcile.reconcile(self.manifest, dry_run=True)
+        after = {p: p.read_bytes() for p in answers.home(self.manifest).glob('*') if p.is_file()}
+        self.assertEqual(before, after)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.reads(), [])
+        calls = self.calls()[call_count:]
+        self.assertFalse(any(c['tool'] == 'anx' and ('inbox' in c['args'] or 'await' in c['args']) for c in calls))
+
     def test_empty_read_response_is_not_accepted_as_acknowledgement(self):
         self.respond(self.listing(), {'tool': 'anx', 'contains': ['/agent-inbox/answers/read'],
                                      'json': {'ok': True, 'result': {}}})
@@ -251,7 +347,7 @@ class AnswerConsumptionTests(FakeCase):
     def test_pending_legacy_loop_delivery_clears_after_unread_delivery(self):
         from coordkit import loop_answers
         loop_answers.remember(self.manifest, self.item['ask_id'], 'card:loop-audit', 'audit', 'cycle')
-        with patch.object(loop_answers.bus, 'main', side_effect=SystemExit(1)), contextlib.redirect_stderr(io.StringIO()):
+        with patch.object(answers.bus, 'main', side_effect=SystemExit(1)), contextlib.redirect_stderr(io.StringIO()):
             loop_answers.receive(self.manifest, self.item)
         pending = loop_answers.path(self.manifest, self.item['ask_id']).with_suffix('.answer.json')
         self.assertTrue(pending.exists())

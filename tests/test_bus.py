@@ -307,6 +307,11 @@ class BusTests(FakeCase):
         self.assertTrue(any('hold-pr-123-worker' in a for a in args))
         self.assertTrue(any('card:hold-pr-123-worker' in a and 'unhold' in a for a in args))
 
+    def test_no_mirror_after_separator_is_text_and_keeps_mirroring(self):
+        self.post('lesson', '--', text='--no-mirror')
+        self.assertEqual(self.rows()[0]['text'], '--no-mirror')
+        self.assertTrue(any('note' in c['args'] for c in self.calls()))
+
     def test_harvest_and_stats(self):
         self.manifest.bus.mirror = False
         self.post('lesson')
