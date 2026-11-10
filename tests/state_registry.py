@@ -139,6 +139,8 @@ row('reconcile.py', 'state:unresolved_obligations|writer:obligation_card|writer:
 row('stock.py', 'reconcile/state.json', 'read obligations_since (adoption baseline)', 'set once by the first live reconcile; archived by a cutover apply', 'persistent baseline, no latch', 'stock counts only adopted rows; reconcile asks on thresholds')
 row('reconcile.py', 'run.lock|skip.json', 'reconciler invocation', 'kernel unlock; next run replaces skip receipt', 'nonblocking lock; two interval health limit', 'skip receipt and doctor red')
 row('reconcile.py', 'state:fired|writer:action', 'successful action receipt', 'age GC or normal recovery clears alarm key', 'reconciler.state_max_age', 're-ask unresolved obligation after retention window')
+row('reconcile.py', 'state:orphan_cursor', 'orphan fallback attempted', 'next attempt replaces cursor',
+    'one durable ID; pending IDs rotate after it', 'failed routes remain retryable without starving later orphans')
 row('reconcile.py', 'state:orphan_notified', 'orphan routed to its retirement redirect or declared fallback',
     'one permanent receipt per original obligation id; no repeat while history is retained',
     'obligations.inactive_after controls entry, not receipt expiry; stable ask id/key aids crash recovery',
