@@ -91,7 +91,9 @@ class AnxClient:
         args = ["note", card, text]
         if evidence:
             evidence = str(evidence)
-            if evidence.startswith(("/", "./", "../", "~")) or self.manifest.path(evidence).exists():
+            # An explicit path wins; then an explicit typed ref, even if a file of that name exists.
+            if evidence.startswith(("/", "./", "../", "~")) or (
+                    not is_typed_ref(evidence) and self.manifest.path(evidence).exists()):
                 evidence = "path:" + str(self.manifest.path(evidence))
             # A SHA needs a digit and a letter; a numeric run id is not a commit.
             elif re.fullmatch(r"(?=[0-9a-fA-F]*\d)(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{7,40}", evidence):

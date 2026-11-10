@@ -446,7 +446,8 @@ def reconcile(manifest, dry_run=False, at=None):
         if pair not in active_pairs and handle in card_handles:
             action('holds', 'hold-clear:'+row['id']+':'+pr, handle,
                 lambda handle=handle:client.call('cards','resolve','card:'+handle,
-                    '--reason','Released on the authoritative bus',write=True))
+                    '--reason','Released on the authoritative bus',
+                    '--body',f"Hold released on the authoritative bus (last hold {row['id']}).",write=True))
     hold_ids = set()
     for pr, poster, row in active_holds:
         if not since_adoption(row) or at-parse_ts(row['ts']).timestamp() < duration(manifest.merge.max_hold_age):

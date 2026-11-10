@@ -199,6 +199,12 @@ class EvidenceTests(FakeCase):
                 else:
                     self.assertEqual(args[args.index('--evidence')+1], expected)
 
+    def test_typed_ref_wins_over_same_named_file(self):
+        (self.root/'event:receipt').write_text('collision')
+        AnxClient(self.manifest).note('card:x','n',evidence='event:receipt')
+        args=self.calls()[0]['args']
+        self.assertEqual(args[args.index('--evidence')+1],'event:receipt')
+
     def test_empty_evidence_is_omitted(self):
         for given in (None, ''):
             calls = len(self.calls())

@@ -34,19 +34,27 @@ def card_for(manifest, label, subject=None, *, resolve=None):
     return card
 
 
-def move_to_review(client, card, row_id, attempts=3, pause=1.0):
-    """The column is cosmetic; the note is the record. A busy shared board answers a move with a
-    stale-token conflict (anx re-reads the token each call), so retry, then skip loudly rather than stall."""
+def board_write(client, row_id, what, *args, attempts=3, pause=1.0):
+    """Board-column writes (move, resolve, hold create) are projections of bus state, which stays
+    authoritative. A busy shared board answers them with a stale-token or reused-request conflict
+    (409, retryable), so retry, then skip loudly: one conflicting row must never stall projection."""
     for attempt in range(attempts):
         try:
-            client.call('cards', 'move', card, '--column', 'review', write=True)
-            return
+            client.call(*args, write=True)
+            return True
         except ToolError as exc:
             if exc.category != 'conflict':
                 raise
             if attempt + 1 < attempts:
                 time.sleep(pause * (attempt + 1))
-    print(f"MIRROR_MOVE_SKIPPED handoff {row_id}: {card} board kept changing (conflict x{attempts})", file=sys.stderr)
+    print(f"MIRROR_BOARD_SKIPPED {what} {row_id}: board kept conflicting (x{attempts}); the bus row stands", file=sys.stderr)
+    return False
+
+
+def move_to_review(client, card, row_id, attempts=3, pause=1.0):
+    """The column is cosmetic; the note is the record."""
+    return board_write(client, row_id, f'move {card}', 'cards', 'move', card, '--column', 'review',
+                       attempts=attempts, pause=pause)
 
 
 def mirror(manifest, row, rows):
@@ -67,15 +75,17 @@ def mirror(manifest, row, rows):
     if kind in ('hold', 'unhold'):
         for pr in row['prs']:
             if kind == 'hold':
-                client.call('cards', 'create', '--board', manifest.anx.board, '--handle',
-                            f"hold-pr-{pr}-{row['frm']}", '--title', f"Hold PR {pr}: {row['text']}",
+                board_write(client, row.get('id'), f"hold PR {pr}", 'cards', 'create', '--board', manifest.anx.board,
+                            '--handle', f"hold-pr-{pr}-{row['frm']}", '--title', f"Hold PR {pr}: {row['text']}",
                             '--body', row['text'], '--column', 'blocked',
-                            '--request-key', f"ck-{manifest.project.name}-hold-{pr}-{row['frm']}", write=True)
+                            '--request-key', f"ck-{manifest.project.name}-hold-{pr}-{row['frm']}")
             else:
                 posters = {r['frm'] for r in rows if r.get('kind') == 'hold' and pr in r.get('prs', [])
                            and (r['frm'] == row['frm'] or row['frm'] == 'lead')}
                 for poster in sorted(posters):
-                    client.call('cards', 'resolve', f'card:hold-pr-{pr}-{poster}', '--reason', 'unhold', write=True)
+                    # ANX resolve needs evidence (--body or --resolution-ref); --reason only stamps the audit.
+                    board_write(client, row.get('id'), f"unhold PR {pr}", 'cards', 'resolve', f'card:hold-pr-{pr}-{poster}',
+                                '--reason', 'unhold', '--body', f"unhold {row.get('id')} ({row['frm']}): {row.get('text') or 'released'}"[:400])
         return
     if kind == 'ack':
         original = next(r for r in rows if r.get('id') == row['re'])
