@@ -674,7 +674,7 @@ class AnswerConsumptionTests(FakeCase):
         from coordkit import briefs
         blocker = {'id': 'need-worker', 'kind': 'blocker', 'origin': 'coordkit',
                    'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
-                   'text': 'Need a decision', 'ts': '2026-01-01T00:00:00Z'}
+                   'text': 'Need a decision', 'ts': bus.now().isoformat()}
         bus.configure(self.manifest)
         bus.append([blocker], project=False)
         self.item.update(title=briefs.blocker_title(blocker), answer={'text': 'Repair it now'})
@@ -697,7 +697,7 @@ class AnswerConsumptionTests(FakeCase):
         self.manifest.obligations.coordinator = 'worker'
         first = {'id': 'first-blocker', 'kind': 'blocker', 'origin': 'coordkit',
                  'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
-                 'text': 'First issue', 'ts': '2026-01-01T00:00:00Z'}
+                 'text': 'First issue', 'ts': bus.now().isoformat()}
         second = dict(first, id='second-blocker', frm='other-worker', text='Second issue')
         bus.configure(self.manifest)
         bus.append([first, second], project=False)
@@ -720,7 +720,7 @@ class AnswerConsumptionTests(FakeCase):
         from coordkit import briefs
         first = {'id': 'first-blocker', 'kind': 'blocker', 'origin': 'coordkit',
                  'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
-                 'text': 'Need a decision', 'ts': '2026-01-01T00:00:00Z'}
+                 'text': 'Need a decision', 'ts': bus.now().isoformat()}
         second = dict(first, id='second-blocker')
         bus.configure(self.manifest)
         bus.append([first], project=False)
@@ -748,7 +748,7 @@ class AnswerConsumptionTests(FakeCase):
         from coordkit import briefs
         blocker = {'id': 'need-worker', 'kind': 'blocker', 'origin': 'coordkit',
                    'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
-                   'text': 'Need a decision', 'ts': '2026-01-01T00:00:00Z'}
+                   'text': 'Need a decision', 'ts': bus.now().isoformat()}
         bus.configure(self.manifest)
         bus.append([blocker], project=False)
         self.item.update(title=briefs.blocker_title(blocker), answer={'text': 'Repair it now'})
@@ -914,7 +914,7 @@ class AnswerConsumptionTests(FakeCase):
         bus.append([{'id': 'unrelated-blocker', 'kind': 'blocker', 'origin': 'coordkit',
                      'frm': 'worker', 'to': 'lead', 'owner': 'lead', 'subject': 'card:loop-audit',
                      'needs': 'A different decision', 'text': 'A different issue',
-                     'ts': '2026-01-01T00:00:00Z'}], project=False)
+                     'ts': bus.now().isoformat()}], project=False)
         self.respond(self.listing())
         self.consume()
         row = next(r for r in self.rows() if r['kind'] == 'decision')

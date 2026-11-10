@@ -149,8 +149,8 @@ Each peer has `last_row_at` (the newest source row's `ts`),
 `last_row_age_seconds`, and `rows_last_hour` (source timestamps within the last
 3600 seconds, inclusive). Local rows, partial rows and future timestamps do not
 count. This needs no running relay process or additional persisted peer state.
-Doctor warns with `silent_peers` when a peer's last row is more than one hour
-old and at most 24 hours old; older peers remain visible without that warning.
+Doctor warns with `silent_peers` whenever a peer's last row is more than one hour
+old; a long-silent peer does not age out of the warning and back into green.
 Duplicate-acceptance warnings remain visible too, and connection faults remain
 red. Peer silence measures row activity, not connection heartbeats or remote
 reader health: an otherwise healthy quiet site can trigger this warning, and a

@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import io
 import json
 from pathlib import Path
@@ -93,6 +94,19 @@ class LifecycleTests(FakeCase):
             run.return_value.returncode=0
             self.assertEqual(self.quiet(lifecycle.down,self.manifest),0)
         self.assertEqual(json.loads((claude2/'settings.json').read_text()), original)
+
+    def test_shadow_guard_reports_current_mode_and_self_test(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            lifecycle.doctor(self.manifest)
+        self.assertIn('DOCTOR shadow_guard green mode=live; guard self-test: 12 writer routes refuse in shadow',
+                      out.getvalue())
+        shadow = dataclasses.replace(self.manifest, mode='shadow')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            lifecycle.doctor(shadow)
+        self.assertIn('DOCTOR shadow_guard green mode=shadow; guard self-test: 12 writer routes refuse in shadow',
+                      out.getvalue())
 
     def test_doctor_green_red_matrices(self):
         self.assertEqual(self.quiet(lifecycle.doctor,self.manifest),0)

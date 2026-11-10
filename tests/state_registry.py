@@ -75,6 +75,7 @@ row('mcp_server.py', '.ndjson.1', 'the journal passes JOURNAL_MAX', 'the next ro
 row('mcp_server.py', 'state:preauth|state:work|state:timer', 'a connection is accepted (in memory, per connection)', 'released when the handler thread ends', 'HEADER_DEADLINE, then REQUEST_DEADLINE (a timer closes the socket)', 'over-capacity connections are closed at once')
 row('mcp_server.py', 'kill', 'an operator disables the connector', 'operator removes the file', 'until removed (explicit kill switch)', 'every request answers 503 while present')
 row('mcp_server.py', 'cursors|aliases.json', 'observe existing bus CLI state for read receipts and routing', 'CLI replaces cursors/address book; MCP never writes them', 'snapshot per request, no persisted cache', 'missing/malformed cursors give no receipt; aliases fall back to manifest')
+row('roster.py', 'readers.json|state', 'doctor roster check reads the incumbent reader declaration and bus state directory', 'read-only; doctor writes no roster state', 'bounded bus tail per doctor run; no latch', 'doctor roster warning only')
 row('addressed.py', 'lead-digest.ndjson|state:lead_digest_at|writer:flush_lead_digest', 'an escalation or machine finding that would wake the lead (lead_escalations=false)', 'flushed into one fyi to the lead, queue truncated under its writer lock', 'one hour (DIGEST_EVERY)', 'the hourly digest itself')
 row('addressed.py', 'state:dead_owner_ids', 'obligations whose owner is not listening at the hourly digest', 'replaced by each digest; an unchanged set downgrades the digest from ask to fyi', 'one hour (DIGEST_EVERY)', 'the digest RE-HOME line, as an ask to the lead')
 row('bus.py', 'mirror-dead-letters.jsonl', 'a mirrored row whose card definitely does not exist', 'append-only audit; reconcile counts new entries', 'next reconcile interval', 'internal mirror ask (escalation.internal_to)')
@@ -138,6 +139,10 @@ row('reconcile.py', 'state:unresolved_obligations|writer:obligation_card|writer:
 row('stock.py', 'reconcile/state.json', 'read obligations_since (adoption baseline)', 'set once by the first live reconcile; archived by a cutover apply', 'persistent baseline, no latch', 'stock counts only adopted rows; reconcile asks on thresholds')
 row('reconcile.py', 'run.lock|skip.json', 'reconciler invocation', 'kernel unlock; next run replaces skip receipt', 'nonblocking lock; two interval health limit', 'skip receipt and doctor red')
 row('reconcile.py', 'state:fired|writer:action', 'successful action receipt', 'age GC or normal recovery clears alarm key', 'reconciler.state_max_age', 're-ask unresolved obligation after retention window')
+row('reconcile.py', 'state:orphan_notified', 'orphan routed to its retirement redirect or declared fallback',
+    'one permanent receipt per original obligation id; no repeat while history is retained',
+    'obligations.inactive_after controls entry, not receipt expiry; stable ask id/key aids crash recovery',
+    'unreceipted orphan is retried; separate bus orphaned list keeps it visible for re-homing')
 row('reconcile.py', 'state:dead', 'known owner absent', 'release clears key; live owner clears; age GC', 'stale_lease_grace / state_max_age', 'lead lease handoff with note')
 row('deadletters.py', 'dead-owners.json|state|dead-letter-baseline.json|writer:ours', 'definite agentctl owner verdict for a listed post-baseline dead letter', 'pruned when the letter leaves the spool', 'bounded by the capped spool size', 'unknown owner is never cached and counts as ours')
 row('reconcile.py', 'state:loops|STOP', 'past promise', 'receipt or explicit stop clears', 'N times per-loop default_cadence', 'wake once then lead ask')
@@ -150,8 +155,9 @@ row('reconcile.py', 'state/bus.lock|state/mirror.cursor|state:mirror_failures', 
 # Logical states whose storage is dynamic, remote, computed or an append-only row.
 LOGICAL = [
     ('bus.inbox/wait cursors', 'cursor read', 'advance on consumption', 'wait timeout / inbox stock limits', 'caller timeout / stock ask'),
-    ('bus.open ruling', 'ruling post', 'owner ack', 'ruling_ask_after', 'lead ask'),
-    ('bus.open blocker', 'blocker post', 'decision/answer --re with reason', 'blocker_ask_after', 'owner wake then lead ask'),
+    ('bus.open ruling', 'ruling post', 'owner reply/ack or superseding ruling', 'ruling_ask_after; inactivity moves to orphan list', 'lead ask or one fallback route'),
+    ('bus.open blocker', 'blocker post', 'decision/answer --re with reason', 'blocker_ask_after; inactivity moves to orphan list', 'owner wake, lead ask, or one fallback route'),
+    ('bus.orphaned obligation', 'owner retired or silent past obligations.inactive_after', 'owner activity/reply or explicit re-home keeps it out of open stock', 'separate derived list; one persistent fallback receipt per id', 'plain fallback ask with stable id/key'),
     ('bus.hold card', 'structured hold', 'poster unhold or explicit lead release', 'merge.max_hold_age', 'poster wake then lead ask'),
     ('bus.FYI/state latches', 'identical repeat', 'text/state changes', '6h computed window; no marker stored', 'sender deduped receipt'),
     ('bus.open asks', 'ask post', 'ack/answer/decision', 'limits.asks stock threshold', 'lead ask'),
@@ -173,6 +179,9 @@ row('wait.py', 'wait|waiter.pid', 'waiter arms', 'finally removes own pid / proc
 row('stock.py', 'state', 'read bus cursors', 'read-only observation', 'stock thresholds', 'lead stock ask')
 row('bus.py', '%m%d|-|.txt|cursors|refs|state', 'bus post spills text or reader advances cursor', 'consume cursor; append-only refs retained', 'reader timeout / stock thresholds; refs are archive', 'mirror/stock lead ask')
 row('lifecycle.py', '.local/bin|Label|launchd|reconcile/stderr.log|reconcile/stdout.log', 'stage/apply manifest templates', 'down enumerates installed jobs', 'persistent installation until explicit rollback; logs archive', 'doctor/reconciler drift ask')
+row('lifecycle.py', '__init__.py|coordkit', 'doctor reads configured runtime package version',
+    'doctor process exits without writing runtime source', 'read-only evidence per doctor invocation; no latch',
+    'missing version evidence or version skew is doctor red')
 row('loop.py', 'Label|deadline-|err.txt|extract.txt|findings.md|launchd|loops|prior.md|prompt.md|raw.txt|runs|snapshot.txt|stderr.log|stdout.log', 'cycle creates evidence / stages configuration', 'cycle receipt or explicit down; immutable evidence retained', 'loop.max_age for live work; archive has no latch', 'failure threshold asks; doctor drift')
 row('shadow.py', 'shadow', 'isolated shadow sample', 'journaled sample completion', 'max_gap_seconds; report freshness', 'report fails closed')
 row('lane.py', '.md|.out|.watch.log|label|lane-prompts|req', 'launch/adopt records prompt and run evidence', 'terminal plan / compensation', 'lane.max_run_hours for live work; evidence retained', 'plan/cause ask')

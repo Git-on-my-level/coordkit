@@ -1,5 +1,6 @@
 """Plan-first lifecycle and explicit lead identity; no implicit service installation."""
 import argparse
+import ast
 import datetime as dt
 import json
 import hashlib
@@ -13,7 +14,7 @@ import shutil
 import sys
 import time
 
-from . import hooks, loop
+from . import __version__, hooks, loop
 from .deadletters import ours as owned_dead_letters
 from .actl import AgentctlClient
 from .anxcli import AnxClient
@@ -201,6 +202,99 @@ def _legacy_installed_jobs(manifest):
                    if line.split() and line.split()[-1].startswith(prefix)})
 
 
+def _source_version(job):
+    """Read a job's coordkit version without executing its configured code."""
+    environment = job.get('EnvironmentVariables', {})
+    if not isinstance(environment, dict):
+        raise ManifestError('invalid_job_environment')
+    roots = environment.get('PYTHONPATH')
+    if roots is None:
+        return None
+    if not isinstance(roots, str):
+        raise ManifestError('invalid_job_pythonpath')
+    for item in roots.split(os.pathsep):
+        if not item:
+            continue
+        root = Path(item).expanduser()
+        if not root.is_absolute():
+            root = Path(job.get('WorkingDirectory', '.')).expanduser() / root
+        source = root / 'coordkit' / '__init__.py'
+        if not source.is_file():
+            continue
+        try:
+            tree = ast.parse(source.read_text())
+            assignment = next(node for node in tree.body
+                              if isinstance(node, ast.Assign)
+                              and any(isinstance(target, ast.Name) and target.id == '__version__'
+                                      for target in node.targets))
+            version = ast.literal_eval(assignment.value)
+            return version if isinstance(version, str) else None
+        except (OSError, SyntaxError, ValueError, StopIteration):
+            return None
+    return None
+
+
+def _periodic_job_drift(label, job, detail, *, observed=False):
+    if not isinstance(job.get('StartInterval'), int) or job['StartInterval'] <= 0:
+        return [f'observed job is not periodic {label}'] if observed else []
+    drift = []
+    match = re.search(r'^\s*last exit code = (-?\d+)\s*$', detail, re.M)
+    if match:
+        if int(match[1]) != 0:
+            drift.append(f'periodic job failed {label}: last exit code {match[1]}')
+    elif observed:
+        drift.append(f'periodic exit status unavailable {label}')
+    version = _source_version(job)
+    if version is not None and version != __version__:
+        drift.append(f'coordkit version skew {label}: job={version} doctor={__version__}')
+    elif observed and version is None:
+        drift.append(f'coordkit version unavailable {label}: readable PYTHONPATH required')
+    return drift
+
+
+def _observed_job_drift(manifest):
+    labels = manifest.launchd.observed_labels
+    if not labels:
+        return []
+    service = manager(manifest)
+    if service.name != 'launchd':
+        return ['launchd.observed_labels requires the launchd service manager']
+    drift = []
+    for label in labels:
+        detail = service.detail(label)
+        match = re.search(r'^\s*path = (.+)$', detail, re.M)
+        if not match:
+            drift.append(f'observed job plist unavailable {label}')
+            continue
+        try:
+            job = plistlib.loads(Path(match[1].strip()).read_bytes())
+        except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+            drift.append(f'cannot read observed job plist {label}: {exc}')
+            continue
+        argv = job.get('ProgramArguments')
+        if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+            drift.append(f'observed job arguments unavailable {label}')
+            continue
+        if not any(argv[index:index + 2] == ['-m', 'coordkit.cli'] for index in range(len(argv) - 1)):
+            drift.append(f'observed job is not coordkit {label}')
+            continue
+        if '--manifest' not in argv:
+            drift.append(f'observed job manifest unavailable {label}')
+            continue
+        index = argv.index('--manifest')
+        if index + 1 >= len(argv):
+            drift.append(f'observed job manifest unavailable {label}')
+            continue
+        job_file = Path(argv[index + 1]).expanduser()
+        if not job_file.is_absolute():
+            job_file = Path(job.get('WorkingDirectory', '.')).expanduser() / job_file
+        if job_file.resolve() != manifest.file:
+            drift.append(f'observed job manifest drift {label}: {job_file}')
+            continue
+        drift.extend(_periodic_job_drift(label, job, detail, observed=True))
+    return drift
+
+
 def installation_drift(manifest, include_pending_questions=True):
     state = read_json(manifest.paths.root/'lifecycle.json', {})
     recorded = {job['label']:job for job in state.get('jobs', [])}
@@ -228,6 +322,7 @@ def installation_drift(manifest, include_pending_questions=True):
                 drift.append(f'plist drift {label}')
         except (OSError, ValueError, plistlib.InvalidFileException) as exc:
             drift.append(f'cannot read installed plist {label}: {exc}')
+            continue
         job = expected[label]
         if job['EnvironmentVariables']['PATH'] not in raw:
             drift.append(f'loaded PATH drift {label}')
@@ -243,6 +338,7 @@ def installation_drift(manifest, include_pending_questions=True):
         interval = re.search(r'run interval = (\d+)', raw)
         if job.get('StartInterval') and (not interval or int(interval[1]) != job['StartInterval']):
             drift.append(f'loaded interval drift {label}')
+        drift.extend(_periodic_job_drift(label, actual, raw))
     drift.extend(hooks.drift(manifest))
     drift.extend(hooks.question_drift(manifest, include_pending_questions))
     client = AnxClient(manifest)
@@ -268,6 +364,7 @@ def installation_drift(manifest, include_pending_questions=True):
         resolved = bool(card.get('resolution')) or card.get('column_key') in ('done','cancelled')
         if stopped != resolved:
             drift.append(f'loop card stop state drift {ref}')
+    drift.extend(_observed_job_drift(manifest))
     return drift
 
 
@@ -368,15 +465,25 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
             raise ManifestError(f'dead_letters: total={snapshot["count"]} baseline={baseline["count"]} new={len(fresh)} '
                                 f'ours={len(ours)} {" ".join(r.get("execution_id","?") for r in ours[:5])}'.rstrip())
         from .deadletters import dispositions
-        return (f'total={snapshot["count"]} baseline={baseline["count"]} new={len(fresh)} ours=0 '
-                f'foreign={len(fresh)} dispositioned={len(dispositions(manifest))} strict={strict_dead_letters}')
+        handled = dispositions(manifest)
+        foreign = [row for row, fp in zip(snapshot['letters'], snapshot['fingerprints'])
+                   if fp not in set(baseline['fingerprints']) and fp not in handled]
+        detail = (f'total={snapshot["count"]} baseline={baseline["count"]} new={len(fresh)} ours=0 '
+                  f'foreign={len(foreign)} dispositioned={len(handled)} strict={strict_dead_letters}')
+        # Foreign failures are not this project's red finding, but fresh failures
+        # and a full host-wide spool are operational signals, not a green quiet state.
+        if foreign or snapshot['count'] >= 256:
+            return 'WARN host_dead_letters ' + detail
+        return detail
     def guard():
         writes=[('bus',['post']),('bus',['ack']),('bus',['wait','--to','lead']),('lane',['_watch']),
                 ('loop',['run']),('reconcile',[]),('up',['--apply']),('init',[]),('lead',['adopt']),
                 ('review',['record']),('question',['answer']),('doctor',['--disposition-dead-letter','x'])]
         if any(shadow_allowed(c,a) for c,a in writes):
             raise ManifestError('shadow_guard_incomplete')
-        return f'{len(writes)} writer routes disabled in shadow'
+        # This is a policy self-test, not a statement about the current mode: the
+        # same routes must be refused whenever a manifest is in shadow.
+        return f'mode={manifest.mode}; guard self-test: {len(writes)} writer routes refuse in shadow'
     from .escalation import validate
     def alarm_path():
         if not manifest.anx.workspace:
@@ -394,6 +501,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
     from .loop_answers import health as loop_answer_health
     check('loop_answers', lambda: loop_answer_health(manifest))
     check('github',github); check('launchd',jobs); check('dead_letters',deadletters); check('shadow_guard',guard)
+    from .roster import health as roster_health
+    check('roster', lambda: roster_health(manifest))
     from .relay import health as relay_health
     check('relay', lambda: relay_health(manifest))
     from .selfupdate import health

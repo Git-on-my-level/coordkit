@@ -10,7 +10,7 @@ from .wait_policy import DEFAULT_BUS_KINDS
 import sys
 import tomllib
 
-
+from . import __version__
 from .errors import ManifestError
 from .duration import duration
 
@@ -181,6 +181,10 @@ class Obligations:
     # for this long alerts, whatever the waiter state. Handoffs keep alert_after.
     ask_deadline: str = "15m"
     urgent_deadline: str = "5m"
+    # Shared owner-liveness horizon for orphaning rulings/blockers and marking
+    # a latest RUNNING state stale. 72h distinguishes genuinely abandoned lanes
+    # from ordinary daily/weekend gaps; activity is derived from bus posts.
+    inactive_after: str = "72h"
     coordinator: str = ""
     flag_owner: str = ""
     flag_sources: list = field(default_factory=list)
@@ -210,6 +214,10 @@ class Addressed:
     # Policy: false = escalations that would reach a lead/coordinator member go to an hourly digest
     lead_escalations: bool = True
     internal_senders: list[str] = field(default_factory=lambda: ["coordkit", "coordkit-report"])
+    # Doctor roster drift: silence, unenrolled posters, and unanswered mailboxes.
+    roster_silent_after: str = "72h"
+    roster_unenrolled_posts: int = 20
+    roster_sink_received: int = 20
     roles: dict = field(default_factory=dict)       # role -> ordered names or {members, human}
     agents: dict = field(default_factory=dict)      # name -> {role, runtime, adapter, fallback}
 
@@ -309,6 +317,8 @@ class Launchd:
     label_prefix: str = ""
     path: list[str] = field(default_factory=list)
     python: str = sys.executable
+    # Explicitly observed, unowned jobs; doctor never installs or removes these.
+    observed_labels: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -342,10 +352,10 @@ def _table(cls, data, section, required=()):
         if key not in data or data[key] == "":
             raise ManifestError(f"missing_key: {section}.{key}")
     # Dataclass annotations are postponed; these schema field names carry uniform types.
-    lists = {"failure_realert_intervals", "directories", "flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as"}
+    lists = {"failure_realert_intervals", "directories", "flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as", "observed_labels"}
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects", "repos", "selector"}
     booleans = {"required", "stop_requires_waiter", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
-    integers = {"fetch_timeout_seconds", "max_bytes", "auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes"} | {f.name for f in fields(Limits)}
+    integers = {"fetch_timeout_seconds", "max_bytes", "auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes", "roster_unenrolled_posts", "roster_sink_received"} | {f.name for f in fields(Limits)}
     numbers = {"wake_debounce_minutes", "idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
     for key, value in data.items():
         ok = (isinstance(value, list) and all(type(x) is (int if key == "ci" else str) for x in value)) if key in lists else (
@@ -411,6 +421,7 @@ class Manifest:
     relay: Relay | None = None
     adapters: dict = field(default_factory=dict)
     mode: str = "live"
+    minimum_coordkit_version: str = ""
 
     def path(self, value: str) -> Path:
         return (self.file.parent / Path(value).expanduser()).resolve()
@@ -439,13 +450,31 @@ def discover(start: Path | None = None) -> Path:
     raise ManifestError("manifest_not_found: coordkit.toml")
 
 
-def load(path: str | Path | None = None) -> Manifest:
+def _version_tuple(value):
+    match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", value)
+    if not match:
+        raise ManifestError("invalid_value: minimum_coordkit_version must be MAJOR.MINOR.PATCH")
+    return tuple(map(int, match.groups()))
+
+
+def load(path: str | Path | None = None, *, allow_unknown_tables: bool = False) -> Manifest:
+    """Load a manifest, optionally ignoring unrelated future tables for a reader.
+
+    The minimum-version declaration is never optional: it is the explicit escape
+    hatch for a table whose semantics the reader must understand. All other
+    validation, including unknown keys in known tables, remains strict.
+    """
     file = Path(path).expanduser().resolve() if path else discover()
     try:
         with file.open("rb") as stream:
             raw = tomllib.load(stream)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ManifestError(f"manifest_invalid: {file}: {exc}") from exc
+    minimum = raw.pop("minimum_coordkit_version", "")
+    if not isinstance(minimum, str):
+        raise ManifestError("invalid_type: minimum_coordkit_version")
+    if minimum and _version_tuple(minimum) > _version_tuple(__version__):
+        raise ManifestError(f"manifest_requires_newer_coordkit: minimum={minimum} running={__version__}")
     # TOML examples place mode under paths / rc_host; accept those spellings too.
     modes = [raw.pop("mode")] if "mode" in raw else []
     for section in ("paths", "rc_host"):
@@ -458,9 +487,13 @@ def load(path: str | Path | None = None) -> Manifest:
     if not isinstance(responsiveness, dict):
         raise ManifestError('invalid_type: responsiveness must be a table')
     allowed = {f.name for f in fields(Manifest)} - {"file", "mode"}
-    for section in raw:
-        if section not in allowed:
-            raise ManifestError(f"unknown_key: {section}")
+    unknown = [section for section in raw if section not in allowed]
+    if unknown:
+        if allow_unknown_tables and all(isinstance(raw[section], dict) for section in unknown):
+            for section in unknown:
+                raw.pop(section)
+        else:
+            raise ManifestError(f"unknown_key: {unknown[0]}")
     project = _table(Project, raw.get("project", {}), "project", ("name", "git_repo"))
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", project.name):
         raise ManifestError("invalid_value: project.name must be a slug")
@@ -515,13 +548,17 @@ def load(path: str | Path | None = None) -> Manifest:
     actl.request_key_prefix = actl.request_key_prefix or f"ck-{project.name}"
     launchd = config["launchd"]
     launchd.label_prefix = launchd.label_prefix or f"com.coordkit.{project.name}"
+    if (len(set(launchd.observed_labels)) != len(launchd.observed_labels)
+            or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", label)
+                   or label.startswith(launchd.label_prefix + ".") for label in launchd.observed_labels)):
+        raise ManifestError("invalid_value: launchd.observed_labels must be unique unmanaged launchd labels")
     launchd.path = [str(Path(p).expanduser()) for p in launchd.path]
     launchd.python = str(Path(launchd.python).expanduser())
     for section, keys in (("agentctl", ("timeout",)), ("lane", ("lease_ttl", "hung_after")), ("loop", ("default_cadence", "progress_budget", "max_age")),
                           ("reconciler", ("ruling_ask_after", "stale_lease_grace", "blocker_ask_after", "answer_max_age", "state_max_age")),
-                          ("merge", ("max_hold_age",)), ("obligations", ("ack_after", "alert_after", "realert_after", "ask_deadline", "urgent_deadline", "owner_required_after")), ("wait", ("stale_alert_after",)),
+                          ("merge", ("max_hold_age",)), ("obligations", ("ack_after", "alert_after", "realert_after", "ask_deadline", "urgent_deadline", "owner_required_after", "inactive_after")), ("wait", ("stale_alert_after",)),
                           ("addressed", ("lease_ttl", "busy_window", "activity_ttl", "label_ttl", "heartbeat_every", "iteration_deadline", "rearm_grace", "urgent_deadline",
-                                         "normal_deadline", "realert_after", "confirm_timeout", "deaf_backlog")),
+                                         "normal_deadline", "realert_after", "confirm_timeout", "deaf_backlog", "roster_silent_after")),
                           ("questions", ("urgent_deadline", "normal_deadline", "modal_min_age", "notification_idle", "auto_default_after")), ("accounts", ("max_age",))):
         for key in keys:
             value = getattr(config[section], key)
@@ -550,6 +587,8 @@ def load(path: str | Path | None = None) -> Manifest:
         raise ManifestError("invalid_value: questions auto-default limits must be positive")
     if duration(config['obligations'].owner_required_after) <= 0:
         raise ManifestError("invalid_value: obligations.owner_required_after must be positive")
+    if duration(config['obligations'].inactive_after) <= 0:
+        raise ManifestError("invalid_value: obligations.inactive_after must be positive")
     if questions.prose_detector not in ("log", "post"):
         raise ManifestError("invalid_value: questions.prose_detector must be log or post")
     for pattern in questions.guarded_patterns:
@@ -649,4 +688,5 @@ def load(path: str | Path | None = None) -> Manifest:
         anx.lead_actor = actor
     if not isinstance(raw.get('adapters', {}), dict):
         raise ManifestError('invalid_type: adapters must be a table')
-    return Manifest(file, project, anx, paths, adapters=raw.get('adapters', {}), agents=agents, lanes=lanes, mode=modes[0] if modes else "live", **config)
+    return Manifest(file, project, anx, paths, adapters=raw.get('adapters', {}), agents=agents, lanes=lanes,
+                    mode=modes[0] if modes else "live", minimum_coordkit_version=minimum, **config)

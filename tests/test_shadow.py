@@ -12,6 +12,7 @@ from coordkit.state import read_json
 from tests.support import FakeCase
 
 FIXTURES=Path(__file__).parent/'fixtures'
+AT=1_800_000_000
 
 
 class ShadowTests(FakeCase):
@@ -44,11 +45,30 @@ class ShadowTests(FakeCase):
             for pattern,replacement in REDACT:
                 self.assertIsNone(pattern.search(text),name)
             self.assertIsNone(REMINDER.search(text))
-        ours,theirs=shadow.views(self.manifest,self.data,1_800_000_000)
-        self.assertEqual(ours,theirs)
-        self.assertGreater(len(ours['rulings'])+len(ours['blockers']),0)
-        self.assertEqual(self.sample(1_800_000_000),0)
+        ours,theirs=shadow.views(self.manifest,self.data,AT)
+        # Every non-ruling view must still match exactly.
+        for key in ('blockers','holds','lanes','loops'):
+            self.assertEqual(ours[key],theirs[key],key)
+        # The sole intentional ruling delta is sample-061, whose owner is silent past 72h.
+        self.assertEqual(set(theirs['rulings'])-set(ours['rulings']),{'sample-061'})
+        self.assertEqual(set(ours['rulings'])-set(theirs['rulings']),set())
+        self.assertGreater(len(theirs['rulings'])+len(theirs['blockers']),0)
+        diffs=shadow.differences(self.data,ours,theirs,AT,self.manifest)
+        self.assertEqual([(d['code'],d['whitelist']) for d in diffs],[('OPEN_RULINGS','DERIVED_CLOSURE')])
+        self.assertEqual(self.sample(AT),0)
         self.assertEqual(self.calls(),[])
+
+    def test_synthetic_rows_derived_closure_whitelist(self):
+        rows={r['id']:r for r in json.loads((FIXTURES/'ruling_closure_rows.json').read_text())}
+        self.data['bus']=[rows['r-003'],rows['r-004'],rows['r-009']]
+        ours,theirs=shadow.views(self.manifest,self.data,AT)
+        self.assertEqual(ours['rulings'],[])
+        self.assertEqual(set(theirs['rulings']),{'r-003','r-004'})
+        self.assertEqual(ours['blockers'],[])
+        self.assertEqual(theirs['blockers'],['r-009'])
+        diffs=shadow.differences(self.data,ours,theirs,AT,self.manifest)
+        self.assertEqual({(d['code'],d['whitelist']) for d in diffs},
+                         {('OPEN_RULINGS','DERIVED_CLOSURE'),('OPEN_BLOCKERS','DERIVED_CLOSURE')})
 
     def test_obligation_and_phase_owner_diffs(self):
         self.data['events']=[{'kind':'launched','label':'worker','execution_id':'exec-1','card':'card:task'}]

@@ -170,8 +170,8 @@ def row_id(row):
 
 def views(manifest, snapshot, at):
     rows = snapshot['bus']
-    ours = {'rulings':sorted(row_id(r) for r in bus.open_rulings(rows)),
-            'blockers':sorted(row_id(r) for r in bus.open_blockers(rows)), 'holds':{},'lanes':{},'loops':{}}
+    ours = {'rulings':sorted(row_id(r) for r in bus.open_rulings(rows, at)),
+            'blockers':sorted(row_id(r) for r in bus.open_blockers(rows, at)), 'holds':{},'lanes':{},'loops':{}}
     theirs = {'rulings':sorted(row_id(r) for r in incumbent.open_rulings(rows)),
               'blockers':sorted(row_id(r) for r in incumbent.open_blockers(rows)), 'holds':{},'lanes':{},'loops':{}}
     numbers = {str(p['number']) for p in snapshot['prs']}
@@ -275,6 +275,18 @@ def differences(snapshot, ours, theirs, at, manifest=None):
                      if ours[key].get(ref) != theirs[key].get(ref)]
         for ref,left,right in items:
             whitelist = None
+            if key in ('rulings', 'blockers'):
+                # A protocol-derived closure/orphan difference is intentional only
+                # when coordkit's complete view independently recomputes to exactly
+                # the claimed open set. Other drift still blocks cutover.
+                derived = bus.closure_view(snapshot['bus'], at)
+                expected = sorted(row_id(row) for row in derived['open'] if row.get('kind') == key[:-1])
+                if left == expected:
+                    explained = {row_id(row) for group in ('closed', 'orphaned') for row in derived[group]
+                                 if row.get('kind') == key[:-1]}
+                    incumbent_only = set(right or []) - set(left or [])
+                    if incumbent_only <= explained or not incumbent_only:
+                        whitelist = 'DERIVED_CLOSURE'
             if key == 'holds':
                 delta = set(left or []) ^ set(right or [])
                 changed = [r for r in snapshot['bus'] if r.get('id') in delta]

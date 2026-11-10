@@ -75,7 +75,7 @@ def main(argv=None):
                 if not repo:
                     raise ManifestError("init_requires_git_repo: pass --git-repo owner/name")
             return initialize(init_options.project, target, init_options.workspace, init_options.board, repo, profile=init_options.profile)
-        manifest = load(options.manifest)
+        manifest = load(options.manifest, allow_unknown_tables=options.command == 'wake-scan')
         if options.command in ('accounts', 'lane-move'):
             module = __import__('coordkit.' + COMMANDS[options.command], fromlist=['main'])
             return module.main(rest, manifest)
@@ -86,6 +86,8 @@ def main(argv=None):
             from .wake import change
             return change(manifest, lane_options.lane, getattr(lane_options, 'to', None), undo=options.command == 'unretire')
         if options.command == 'wake-scan':
+            # Unknown future tables are tolerated by this reader's load above;
+            # writers and doctor remain strict, and minimum versions still win.
             from .ops import parser_for
             from .wake import scan
             return scan(manifest, dry_run=parser_for('wake-scan').parse_args(rest).dry_run)

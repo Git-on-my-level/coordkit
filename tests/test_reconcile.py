@@ -143,11 +143,14 @@ class ReconcileTests(FakeCase):
         (self.manifest.paths.root/'state/mirror.cursor').write_text('1')
         self.respond({'tool':'anx','contains':['await'],'json':{'ok':True,'result':{'answers':[
             {'ask_id':'a1','subject_ref':'card:task','answer':{'text':'proceed'}}]}}})
-        self.assertEqual(self.run_reconcile(),5)
-        bus.configure(self.manifest)
-        self.assertEqual(bus.open_blockers(bus.read()),[])
-        self.run_reconcile()
-        self.assertEqual(len([r for r in bus.read() if r['kind']=='decision' and not r.get('copy_of')]),1)
+        # Keep the historical replay's wall clock equal to reconcile(at=10000),
+        # including answer routing's read-only open-blocker lookup.
+        with patch('coordkit.closure.time.time',return_value=10000):
+            self.assertEqual(self.run_reconcile(),5)
+            bus.configure(self.manifest)
+            self.assertEqual(bus.open_blockers(bus.read()),[])
+            self.run_reconcile()
+            self.assertEqual(len([r for r in bus.read() if r['kind']=='decision' and not r.get('copy_of')]),1)
 
     def test_lead_principal_id_lease_is_the_lead(self):
         self.respond(self.cards({'handle':'loop-audit','column_key':'in_progress'}),
