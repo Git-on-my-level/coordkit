@@ -330,7 +330,6 @@ def stage(manifest, item, sweep=None):
     if not text.strip() or len(text.encode()) > 1024 * 1024:
         raise ValueError('answer text missing or too large')
     sweep = sweep if sweep is not None else DeliverySweep(manifest)
-    sweep.paths.add(path)
     # This path identifies one immutable response event. Different CLI shapes
     # of that event must not replace its saved payload or reopen its receipt.
     if not existing:
@@ -365,6 +364,9 @@ def stage(manifest, item, sweep=None):
                 changed = True
         if changed:
             write_json(path, existing)
+    # A failed new write must not schedule a nonexistent receipt and prevent
+    # later items from being delivered. Existing paths remain in the snapshot.
+    sweep.paths.add(path)
     return path
 
 

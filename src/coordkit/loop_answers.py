@@ -125,11 +125,14 @@ def deliver(manifest, pending, sweep=None):
 
 def drain(manifest):
     from .answers import delivery_lock, DeliverySweep
+    pending_paths = list((manifest.paths.root/'state/loop-asks').glob('*.answer.json'))
+    if not pending_paths:
+        return  # no work: do not rescan the bus and retained answer receipts
     with delivery_lock(manifest) as acquired:
         if not acquired:
             return
         sweep = DeliverySweep(manifest)
-        for pending in (manifest.paths.root/'state/loop-asks').glob('*.answer.json'):
+        for pending in pending_paths:
             deliver(manifest, pending, sweep)
 
 

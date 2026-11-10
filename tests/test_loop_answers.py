@@ -200,6 +200,10 @@ class LoopAnswersTests(FakeCase):
         self.quiet(loop_answers.drain, self.manifest)
         self.assertNotIn('WARN', loop_answers.health(self.manifest))
 
+    def test_empty_loop_drain_does_not_scan_bus_or_retained_receipts(self):
+        with patch.object(answers, 'DeliverySweep', side_effect=AssertionError('empty drain must not scan')):
+            loop_answers.drain(self.manifest)
+
     def test_registration_failure_retries_locally_without_creating_another_ask(self):
         with patch.object(loop_answers, 'remember', side_effect=OSError('local write failed')):
             report = self.record_failure()

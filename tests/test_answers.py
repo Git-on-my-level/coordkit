@@ -413,6 +413,28 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual([r['item'] for r in invalid], [empty])
         self.assertIn('invalid=1', answers.health(self.manifest))
 
+    def test_failed_new_receipt_write_does_not_abort_other_answers_and_retries_next_sweep(self):
+        failed = dict(self.item, ask_id='event:write-failed',
+                      answer={'text': 'Retain this too', 'response_event_id': 'write-response'})
+        self.respond(self.listing([failed, self.item]))
+        original = answers.write_json
+        def write(path, record):
+            if path == answers.receipt_path(self.manifest, failed):
+                raise OSError('transient receipt write failure')
+            return original(path, record)
+        with patch.object(answers, 'write_json', side_effect=write):
+            self.consume()
+        self.assertFalse(answers.receipt_path(self.manifest, failed).exists())
+        self.assertEqual([r['text'] for r in self.rows()], ['Repair it now'])
+        self.assertEqual(len(self.reads()), 1)
+        self.assertIn('poll_error=OSError', answers.health(self.manifest))
+        self.respond(self.listing([failed, self.item]))
+        self.consume()
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(len(self.reads()), 2)
+        self.assertEqual(read_json(answers.receipt_path(self.manifest, failed))['phase'], 'read')
+        self.assertNotIn('WARN', answers.health(self.manifest))
+
     def test_revised_response_less_unread_reply_has_distinct_retry_stable_id(self):
         self.item['answer'] = {'text': 'First ruling'}
         self.respond(self.listing())
