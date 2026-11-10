@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from coordkit import cli, incumbent, shadow
+from coordkit import bus, cli, incumbent, shadow
 from coordkit.extract import REDACT, REMINDER
 from coordkit.manifest import load, ManifestError
 from coordkit.state import read_json
@@ -69,6 +69,19 @@ class ShadowTests(FakeCase):
         diffs=shadow.differences(self.data,ours,theirs,AT,self.manifest)
         self.assertEqual({(d['code'],d['whitelist']) for d in diffs},
                          {('OPEN_RULINGS','DERIVED_CLOSURE'),('OPEN_BLOCKERS','DERIVED_CLOSURE')})
+
+    def test_coordkit_extra_open_obligation_is_not_whitelisted(self):
+        blocker = {'id': 'b1', 'kind': 'blocker', 'frm': 'worker', 'to': 'lead', 'owner': 'lead',
+                   'subject': 'card:task', 'text': 'blocked', 'ts': '2027-01-14T00:00:00Z'}
+        answer = {'id': 'a1', 'kind': 'answer', 'frm': 'lead', 'to': 'worker', 're': 'b1',
+                  'auto_received': True, 'ts': '2027-01-14T01:00:00Z'}
+        self.data['bus'] = [blocker, answer]
+        with patch.object(bus, 'CONFIG', None):
+            ours, theirs = shadow.views(self.manifest, self.data, AT)
+            self.assertEqual(ours['blockers'], ['b1'])
+            self.assertEqual(theirs['blockers'], [])
+            diffs = shadow.differences(self.data, ours, theirs, AT, self.manifest)
+        self.assertEqual([(d['code'], d['whitelist']) for d in diffs], [('OPEN_BLOCKERS', None)])
 
     def test_obligation_and_phase_owner_diffs(self):
         self.data['events']=[{'kind':'launched','label':'worker','execution_id':'exec-1','card':'card:task'}]

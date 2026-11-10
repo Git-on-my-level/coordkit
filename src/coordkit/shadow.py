@@ -285,7 +285,10 @@ def differences(snapshot, ours, theirs, at, manifest=None):
                     explained = {row_id(row) for group in ('closed', 'orphaned') for row in derived[group]
                                  if row.get('kind') == key[:-1]}
                     incumbent_only = set(right or []) - set(left or [])
-                    if incumbent_only <= explained or not incumbent_only:
+                    coordkit_only = set(left or []) - set(right or [])
+                    # Only an incumbent row that coordkit derives as closed/orphaned
+                    # is explained. An extra coordkit obligation is unexplained drift.
+                    if not coordkit_only and incumbent_only <= explained:
                         whitelist = 'DERIVED_CLOSURE'
             if key == 'holds':
                 delta = set(left or []) ^ set(right or [])
