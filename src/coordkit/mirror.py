@@ -3,6 +3,7 @@ from .actl import AgentctlClient
 from .anxcli import AnxClient, CardUnresolved
 from .process import ToolError
 import sys
+import time
 
 
 def card_for(manifest, label, subject=None, *, resolve=None):
@@ -31,6 +32,21 @@ def card_for(manifest, label, subject=None, *, resolve=None):
     card = f'card:{next(iter(matches)) if matches else subject or label}'
     resolve(card)
     return card
+
+
+def move_to_review(client, card, row_id, attempts=3, pause=1.0):
+    """The column is cosmetic; the note is the record. A busy shared board answers a move with a
+    stale-token conflict (anx re-reads the token each call), so retry, then skip loudly rather than stall."""
+    for attempt in range(attempts):
+        try:
+            client.call('cards', 'move', card, '--column', 'review', write=True)
+            return
+        except ToolError as exc:
+            if exc.category != 'conflict':
+                raise
+            if attempt + 1 < attempts:
+                time.sleep(pause * (attempt + 1))
+    print(f"MIRROR_MOVE_SKIPPED handoff {row_id}: {card} board kept changing (conflict x{attempts})", file=sys.stderr)
 
 
 def mirror(manifest, row, rows):
@@ -84,5 +100,5 @@ def mirror(manifest, row, rows):
                                  else row['to'] if kind == 'ask' else row['frm'])
     card = card_for(manifest, label, subject)
     if kind == 'handoff' and not card.removeprefix('card:').startswith(manifest.loop.receipt_prefix):
-        client.call('cards', 'move', card, '--column', 'review', write=True)
+        move_to_review(client, card, row['id'])
     client.note(card, f"{kind} {row['id']}: {row.get('needs') or row['text']}", evidence=row.get('evidence'))
