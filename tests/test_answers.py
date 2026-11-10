@@ -238,6 +238,38 @@ class AnswerConsumptionTests(FakeCase):
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(len(self.reads()), 1)
 
+    def test_incomplete_pending_response_accepts_full_reply_before_publication(self):
+        self.item['answer'] = {'response_event_id': 'response'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.reads(), [])
+        self.item['answer'] = {'response_event_ref': 'event:response', 'text': 'Repair it now'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['text'], 'Repair it now')
+        self.assertEqual(len(self.reads()), 1)
+        self.assertNotIn('WARN', answers.health(self.manifest))
+
+    def test_partial_pending_receipt_cannot_replace_an_existing_publication(self):
+        from coordkit.state import write_json
+        self.respond(self.listing())
+        self.consume()
+        path = answers.receipt_path(self.manifest, self.item)
+        # A damaged/old receipt must not change the payload of an existing row.
+        record = read_json(path)
+        record['phase'] = 'pending'
+        record['item']['answer'] = {'response_event_id': 'response'}
+        write_json(path, record)
+        self.item['answer'] = {'response_event_id': 'response', 'text': 'A replacement'}
+        self.respond(self.listing())
+        self.consume()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['text'], 'Repair it now')
+        self.assertEqual(len(self.reads()), 1)
+        self.assertIn('pending=1', answers.health(self.manifest))
+
     def test_question_sweep_metadata_variants_do_not_reopen_read_response(self):
         from coordkit import questions
         record = self.question()

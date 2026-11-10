@@ -119,6 +119,10 @@ def answer_id(item):
     return reference(value).removeprefix('event:')
 
 
+def publication_id(item):
+    return 'answer-' + reference(item['ask_id']) + '-' + hashlib.sha256(answer_id(item).encode()).hexdigest()[:16]
+
+
 def receipt_path(manifest, item):
     # Distinct responses to one ask keep distinct receipts, including a newer
     # reply arriving while delivery of the previous response is still pending.
@@ -170,6 +174,20 @@ def stage(manifest, item):
     if not existing:
         write_json(path, {'item': item, 'phase': 'pending'})
     elif existing.get('phase') not in ('delivered', 'read'):
+        changed = False
+        saved, incoming = existing['item']['answer'], item['answer']
+        if not (saved.get('text') or saved.get('outcome')) and (incoming.get('text') or incoming.get('outcome')):
+            # Empty payloads fail validation before append. Confirm that no bus
+            # publication exists before filling one from a later observation.
+            try:
+                row_id = publication_id(item)
+            except ValueError:
+                pass
+            else:
+                bus.configure(manifest)
+                if not any(row.get('id') == row_id for row in bus.read()):
+                    existing['item']['answer'] = incoming
+                    changed = True
         # Correlation may be registered after the consuming stream retained the
         # response. Enrich missing routing without reopening a delivered receipt.
         try:
@@ -181,7 +199,9 @@ def stage(manifest, item):
                 pass
             else:
                 existing['item']['subject_ref'] = subject
-                write_json(path, existing)
+                changed = True
+        if changed:
+            write_json(path, existing)
     return path
 
 
@@ -209,7 +229,7 @@ def process(manifest, path, client):
             raise ValueError('answer text missing or too large')
         # A repeated response text is still a distinct operator event. Bind the
         # publication identity to the event, never merely the ask or its text.
-        row_id = 'answer-' + ask_id + '-' + hashlib.sha256(response_id.encode()).hexdigest()[:16]
+        row_id = publication_id(item)
         row = next((r for r in bus.read() if r.get('id') == row_id), None)
         if row is None:
             args = ['post', '--from', 'coordkit', '--to', owner, '--kind', 'decision',
