@@ -30,7 +30,7 @@ LIVE_JOBS=(com.example.project.loop.audit com.example.project.reconcile)
 KICK_JOBS=(com.example.project.reconcile)  # loop.audit delegates a paid agent run: not kicked
 # This example manages three explicitly scoped harness config directories.
 SETTINGS=(/path/to/claude-primary/settings.json /path/to/claude-secondary/settings.json /path/to/claude-tertiary/settings.json)
-CHECKS="escalation_limits manifest binaries anx agentctl reconciler_age github launchd dead_letters shadow_guard"
+CHECKS="escalation_limits manifest binaries anx agentctl reconciler_age github launchd dead_letters shadow_guard roster"
 
 # One apply or rollback at a time, host-wide (atomic mkdir; the holder's pid is inside). Released on every exit.
 LOCK=$ROOT/cutover/.apply.lock
@@ -82,7 +82,9 @@ for line in open(path):
         continue
     _, check, rest = line.rstrip('\n').split(' ', 2)
     seen[check] = seen.get(check, 0) + 1
-    if rest.startswith('green'):
+    # Advisory checks may warn without failing the gate: roster drift, and foreign or full
+    # host-wide dead letters. A warn from any other check still fails.
+    if rest.startswith('green') or (rest.startswith('warn') and check in ('roster', 'dead_letters')):
         continue
     if allow and check == 'launchd' and rest.startswith('red ') and {x.strip() for x in rest[4:].split(';') if x.strip()} <= expected:
         continue
@@ -93,7 +95,7 @@ for line in open(path):
     bad.append(line.strip())
     continue
 missing = [n for n in names if seen.get(n) != 1]
-reds = sum(1 for l in open(path) if l.startswith('DOCTOR ') and not l.split(' ', 2)[2].startswith('green'))
+reds = sum(1 for l in open(path) if l.startswith('DOCTOR ') and l.split(' ', 2)[2].startswith('red'))
 rc_ok = rc == 0 if reds == 0 else (allow and rc == 1)  # doctor exits 1 iff some check is red
 if missing or bad or not rc_ok:
     print('missing or repeated checks:', missing, 'rc:', rc, '\nred:', '\n'.join(bad)); sys.exit(1)

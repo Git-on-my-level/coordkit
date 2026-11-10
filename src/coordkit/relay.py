@@ -284,9 +284,9 @@ def health(manifest):
     warnings = []
     if value.get('suppressed_rows', 0):
         warnings.append('suppressed_rows: possible reused site name or acceptance retry')
-    silent = [site for site, peer in value['peers'].items() if 3600 < peer['last_row_age_seconds'] <= 86400]
+    silent = [site for site, peer in value['peers'].items() if peer['last_row_age_seconds'] > 3600]
     if silent:
-        warnings.append('silent_peers: no rows for more than 1h (seen within 24h): ' + ', '.join(silent))
+        warnings.append('silent_peers: no rows for more than 1h: ' + ', '.join(silent))
     if warnings:
         return 'WARN ' + '; '.join(warnings) + '; ' + detail
     return detail

@@ -5,7 +5,7 @@ import stat
 import tempfile
 from .state import name_key, read_json
 import argparse, datetime as dt, fcntl, json, os, pathlib, re, secrets, subprocess, sys, collections, time
-from .manifest import ManifestError
+from .manifest import ManifestError, duration
 from .bus_protocol import KINDS, STATES, BLOCKER_CLOSERS, WAKE_KINDS, TEXT_CAP
 from .process import ToolError, parse_ts
 
@@ -377,17 +377,43 @@ def launched_at(to):
     times = [parse_ts(e['created_at']) for e in agentctl_recent()
              if any(label_matches(l, to) for l in e.get('labels') or []) and e.get('created_at')]
     return max(times, default=None)
-def open_rulings(rows):
-    """Rulings that name an owner and have no ack from that owner yet."""
-    return [r for i, r in enumerate(rows) if r.get('kind') == 'ruling' and r.get('owner')
-            and not any(reply.get('re') == r.get('id') and
-                        (reply.get('kind') == 'ack' or (reply.get('kind') == 'answer' and reply.get('frm') == r['owner']))
-                        for reply in rows[i + 1:])]
-def open_blockers(rows):
-    """Blockers with no later decision/answer that names them with --re."""
-    closed = {r.get('re') for r in rows if r.get('kind') in BLOCKER_CLOSERS and r.get('re')
-              and not r.get('auto_received')}
-    return [r for r in rows if r.get('kind') == 'blocker' and r.get('id') not in closed]
+def closure_view(rows, at=None):
+    """Derived obligations using manifest policy and local retirement metadata."""
+    from . import closure
+    inactive_after = closure.DEFAULT_INACTIVE_AFTER
+    fallbacks = {}
+    default_fallback = 'lead'
+    retired = {}
+    if CONFIG is not None:
+        inactive_after = duration(CONFIG.obligations.inactive_after)
+        default_fallback = CONFIG.obligations.coordinator or 'lead'
+        from .addressed import registry
+        fallbacks = {name: spec.get('fallback') for name, spec in registry(CONFIG).items()
+                     if spec.get('fallback')}
+        from .wake import state_path
+        retired = read_json(state_path(CONFIG), {}) or {}
+    return closure.derive(rows, at, inactive_after=inactive_after, fallbacks=fallbacks,
+                          retired=retired, default_fallback=default_fallback)
+
+
+def open_rulings(rows, at=None, *, orphaned=False):
+    """Open owned rulings; ``orphaned=True`` selects the separate fallback list."""
+    group = 'orphaned' if orphaned else 'open'
+    return [r for r in closure_view(rows, at)[group] if r.get('kind') == 'ruling']
+
+
+def open_blockers(rows, at=None, *, orphaned=False):
+    """Open owned blockers; dead/silent owners appear only in the orphan list."""
+    group = 'orphaned' if orphaned else 'open'
+    return [r for r in closure_view(rows, at)[group] if r.get('kind') == 'blocker']
+
+
+def unresolved_blockers(rows, at=None):
+    """Open and orphaned blockers: both still need an answer to close them."""
+    view = closure_view(rows, at)
+    return [r for group in ('open', 'orphaned') for r in view[group] if r.get('kind') == 'blocker']
+
+
 def latest_states(rows):
     """{(lane, subject): newest state row}."""
     out = {}
@@ -875,7 +901,7 @@ def dispatch(o):
         if target:
             project_pending()
         print('posted', rec['ts'], 'id=' + rec['id'] + (f' (recipient {o.to} idle; lead copied)' if len(recs) > 1 else '')
-              + (f' — {o.owner} must run: bus ack {rec["id"]} --from {o.owner}' if o.kind == 'ruling' and o.owner else '')
+              + (f' — {o.owner} must ack or reply --re {rec["id"]}' if o.kind == 'ruling' and o.owner else '')
               + (f' — open until a decision/answer with --re {rec["id"]}' if o.kind == 'blocker' else ''))
     elif o.cmd == 'ack':
         rows = read()
@@ -910,7 +936,8 @@ def dispatch(o):
         register_activity(CONFIG, o.frm, 'ack')
         print(f'acked {o.id} ({age_minutes(ruling)} min after the ruling)')
     elif o.cmd == 'open-rulings':
-        rows = [r for r in open_rulings(read()) if age_minutes(r) >= o.min_age]
+        derived_at = now().timestamp()
+        rows = [r for r in open_rulings(read(), derived_at, orphaned=o.orphaned) if age_minutes(r) >= o.min_age]
         if o.new_only:
             seen_path = pathlib.Path(o.new_only)
             seen = set(seen_path.read_text().split()) if seen_path.exists() else set()
@@ -922,27 +949,38 @@ def dispatch(o):
             print(json.dumps([dict(r, age_minutes=age_minutes(r)) for r in rows]))
         else:
             for r in rows:
-                print(line(r, full=True) if o.full else f"{r['id']} age={age_minutes(r)}m owner={r['owner']} from={r['frm']} [{r['topic']}] {' '.join(r['text'].split())[:200]}")
-            if not rows and not o.new_only: print('no open rulings')
+                orphan = (f" orphan={r['orphan_reason']} fallback={r['fallback']}" if o.orphaned else '')
+                print(line(r, full=True) if o.full else f"{r['id']} age={age_minutes(r)}m owner={r['owner']} from={r['frm']}{orphan} [{r['topic']}] {' '.join(r['text'].split())[:200]}")
+            if not rows and not o.new_only: print('no orphaned rulings' if o.orphaned else 'no open rulings')
     elif o.cmd == 'state':
-        rows = [r for (lane, subject), r in sorted(latest_states(read()).items(), key=lambda kv: kv[1]['ts'])
+        from .closure import latest_states as observed_states
+        observed = observed_states(read(), now().timestamp(), inactive_after=duration(CONFIG.obligations.inactive_after))
+        rows = [r for (lane, subject), r in sorted(observed.items(), key=lambda kv: kv[1]['ts'])
                 if (not o.lane or lane == o.lane) and (not o.subject or subject == o.subject)]
         if o.json:
             print(json.dumps([dict(r, age_minutes=age_minutes(r)) for r in rows]))
         else:
             for r in rows:
-                print(line(r, full=True) if o.full else f"{r.get('id', '-')} {r['frm']} {r['subject']} {r['state']} age={age_minutes(r)}m "
-                      f"{' '.join((r.get('text') or '').split())[:160]}")
+                state = 'STALE (recorded RUNNING)' if r['stale'] else r['state']
+                if o.full:
+                    text = line(r, full=True)
+                    if r.get('effective_state') != r.get('state'):
+                        text += f" [effective_state={r['effective_state']}]"
+                    print(text)
+                else:
+                    print(f"{r.get('id', '-')} {r['frm']} {r['subject']} {state} age={age_minutes(r)}m "
+                          f"{' '.join((r.get('text') or '').split())[:160]}")
             if not rows: print('no state rows')
     elif o.cmd == 'open-blockers':
-        rows = [r for r in open_blockers(read()) if not o.owner or r.get('owner') == o.owner]
+        rows = [r for r in open_blockers(read(), orphaned=o.orphaned) if not o.owner or r.get('owner') == o.owner]
         if o.json:
             print(json.dumps([dict(r, age_minutes=age_minutes(r)) for r in rows]))
         else:
             for r in rows:
-                print(line(r, full=True) if o.full else f"{r['id']} age={age_minutes(r)}m owner={r['owner']} from={r['frm']} needs={' '.join(r.get('needs', '').split())[:80]} "
+                orphan = (f" orphan={r['orphan_reason']} fallback={r['fallback']}" if o.orphaned else '')
+                print(line(r, full=True) if o.full else f"{r['id']} age={age_minutes(r)}m owner={r['owner']} from={r['frm']} needs={' '.join(r.get('needs', '').split())[:80]}{orphan} "
                       f"[{r['topic']}] {' '.join(r['text'].split())[:200]}")
-            if not rows: print('no open blockers')
+            if not rows: print('no orphaned blockers' if o.orphaned else 'no open blockers')
     elif o.cmd == 'wait' and o.subject:
         # Stateless, like --signal, but judged on the LATEST state per (lane, subject): a DONE that a later RUNNING
         # superseded never satisfies the wait. Match the structured state, never a quoted estimate in prose.

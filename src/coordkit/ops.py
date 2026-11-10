@@ -74,6 +74,7 @@ BUS_OPS = (
     ), 'ops:bus_call'),
     Operation('bus.open-rulings', 'read', (
         Arg('--min-age', type=int, default=0, help='minutes'),
+        Arg('--orphaned', action='store_true', help='list retired/silent-owner rulings awaiting one-time fallback routing'),
         Arg('--full', action='store_true', help='complete message bodies'),
         Arg('--new-only', metavar='SEEN_FILE', help='print only ids not in SEEN_FILE, then record them there'),
         Arg('--json', action='store_true'),
@@ -108,6 +109,7 @@ BUS_OPS = (
     ), 'ops:bus_call'),
     Operation('bus.open-blockers', 'read', (
         Arg('--full', action='store_true', help='complete message bodies'),
+        Arg('--orphaned', action='store_true', help='list retired/silent-owner blockers awaiting one-time fallback routing'),
         Arg('--owner'),
         Arg('--json', action='store_true'),
     ), 'ops:bus_call'),

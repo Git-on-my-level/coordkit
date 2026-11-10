@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import unittest
 
 from coordkit import deadletters, lifecycle
 from tests.support import FakeCase
@@ -62,6 +63,23 @@ class DispositionTests(FakeCase):
         self.assertIn('DEAD_LETTER_DISPOSITIONED exec-ours entries=1', out)
         self.assertIn('dead_letters green', out)
         self.assertIn('dispositioned=1', out)
+
+    def test_foreign_dead_letters_warn_without_becoming_this_projects_red_finding(self):
+        self.spool(OTHER)
+        rc, out = self.doctor()
+        self.assertNotIn('DOCTOR dead_letters red', out)
+        self.assertIn('DOCTOR dead_letters warn WARN host_dead_letters', out)
+        self.assertIn('new=1 ours=0 foreign=1', out)
+
+    def test_full_spool_warns_even_when_baselined_snapshot_has_no_new_rows(self):
+        from coordkit.state import write_json
+        baseline = {'count': 256, 'letters': [], 'fingerprints': []}
+        write_json(self.manifest.paths.root/'dead-letter-baseline.json', baseline)
+        with unittest.mock.patch.object(lifecycle, 'dead_letter_snapshot', return_value=baseline):
+            rc, out = self.doctor()
+        self.assertNotIn('DOCTOR dead_letters red', out)
+        self.assertIn('DOCTOR dead_letters warn WARN host_dead_letters', out)
+        self.assertIn('total=256 baseline=256 new=0 ours=0 foreign=0', out)
 
     def test_shadow_refuses_disposition(self):
         self.assertFalse(lifecycle.shadow_allowed('doctor', ['--disposition-dead-letter', 'x', '--reason', 'y']))

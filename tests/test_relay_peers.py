@@ -65,8 +65,8 @@ class RelayPeerTests(FakeCase):
         self.assertEqual(relay.status(self.manifest), {'enabled': False})
         self.assertEqual(relay.health(self.manifest), 'off')
 
-    def test_warning_window_excludes_recent_and_old_peers_and_observes_exact_boundaries(self):
-        for age, warns in ((3599, False), (3600, False), (3600.01, True), (86400, True), (86400.01, False)):
+    def test_warning_window_excludes_only_recent_peers_and_observes_exact_boundaries(self):
+        for age, warns in ((3599, False), (3600, False), (3600.01, True), (86400, True), (86400.01, True), (294312, True)):
             with self.subTest(age=age):
                 self.manifest.paths.bus_log.unlink(missing_ok=True)
                 self.add('quiet-peer', age)

@@ -71,8 +71,18 @@ Shadow findings write only local dedupe state and relay output. Exit 5 means fin
 exit 0 means none. Dry runs do not write state or deliver questions.
 
 Acknowledgments from an assignee stop receipt escalation; automatic copies and bystander
-replies do not. Use `bus ack` for a ruling, or reply on the bus with `--re ID`. MCP's `ack`
-and `inbox` tools retain their addressed behavior. The thin CLI wrappers are retired.
+non-ack replies do not. Use `bus ack` for a ruling, or reply on the bus with `--re ID`; an
+acknowledgement closes a ruling, including a forced ack from a non-owner, and a later direct
+reply of any kind from the ruling owner also closes it. A later same-sender, same-owner
+ruling sharing a PR supersedes the earlier one.
+
+Rulings and blockers do not remain actionable forever when their owner cannot answer.
+`[obligations].inactive_after` (default `72h`) derives retired or silent owners into the
+separate `bus open-rulings --orphaned` / `open-blockers --orphaned` lists. Reconciliation
+posts one ordinary ask to the retirement redirect, declared agent fallback, or coordinator.
+The fallback never creates a second owner-bearing ruling or blocker. A latest `RUNNING`
+state from an equally silent lane is reported as `STALE`, without changing the retained row.
+MCP's `ack` and `inbox` tools retain their addressed behavior. The thin CLI wrappers are retired.
 
 Questions retain a synchronous tmux answer adapter for agents declaring `adapter = "tmux"`
 and `target`. It refuses nonempty input and requires an agent reply or transcript growth to
@@ -87,3 +97,12 @@ The roster displays `[[lanes]]` before their first post without adding them to r
 State-derived labels expire after `[addressed].label_ttl` (default `24h`); the last state
 and timestamp remain visible, and manifest labels never expire. A new state replaces
 the label. Both TTL settings use the standard duration syntax.
+
+`doctor` also reports roster drift from a bounded bus tail. It warns when an enrolled
+`[addressed.agents]` name has not posted for longer than `roster_silent_after`
+(default `72h`) and has no listening evidence; when a name that is not enrolled, not an
+alias, and not otherwise declared by the manifest or the bus directory's `readers.json`
+has posted more than `roster_unenrolled_posts` rows (default `20`) in 24 hours; or when an enrolled agent has
+received more than `roster_sink_received` addressed rows (default `20`) in 24 hours and
+sent none. The line stays one line: counts plus at most five sample names per category.
+These are warnings, never red findings, and a truncated tail is marked `truncated=true`.

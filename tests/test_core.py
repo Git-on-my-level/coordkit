@@ -1,5 +1,6 @@
 from pathlib import Path
 from unittest.mock import patch
+from coordkit import __version__, cli
 from coordkit.manifest import ManifestError, discover, duration, load
 from coordkit.anxcli import AnxClient, CardUnresolved
 from coordkit.actl import AgentctlClient
@@ -57,6 +58,48 @@ class ManifestTests(FakeCase):
         manifest = load(self.file)
         self.assertEqual(manifest.project, self.manifest.project)
         self.assertFalse(hasattr(manifest, 'responsiveness'))
+
+    def test_minimum_version_wins_over_forward_compatible_table_tolerance(self):
+        future = BASE + '\n[future_delivery]\nenabled = true\n'
+        self.file.write_text('minimum_coordkit_version = "999.0.0"\n' + future)
+        expected = f'manifest_requires_newer_coordkit: minimum=999.0.0 running={__version__}'
+        with self.assertRaisesRegex(ManifestError, expected):
+            load(self.file, allow_unknown_tables=True)
+        self.file.write_text(f'minimum_coordkit_version = "{__version__}"\n' + future)
+        with self.assertRaisesRegex(ManifestError, 'unknown_key: future_delivery'):
+            load(self.file)
+        self.assertEqual(load(self.file, allow_unknown_tables=True).minimum_coordkit_version, __version__)
+
+    def test_wake_scan_alone_tolerates_unknown_top_level_tables(self):
+        self.file.write_text(BASE + '\n[future_delivery]\nenabled = true\n')
+        with patch('coordkit.wake.scan', return_value=0) as scan:
+            self.assertEqual(cli.main(['--manifest', str(self.file), 'wake-scan', '--dry-run']), 0)
+        scan.assert_called_once()
+        self.assertTrue(scan.call_args.kwargs['dry_run'])
+        with self.assertRaisesRegex(ManifestError, 'unknown_key: future_delivery'):
+            load(self.file)
+
+    def test_wake_scan_tolerates_unknown_arrays_of_tables(self):
+        self.file.write_text(BASE + '\n[[future_delivery]]\nname = "worker"\n')
+        with patch('coordkit.wake.scan', return_value=0) as scan:
+            self.assertEqual(cli.main(['--manifest', str(self.file), 'wake-scan', '--dry-run']), 0)
+        scan.assert_called_once()
+        self.assertEqual(load(self.file, allow_unknown_tables=True).project.name, 'sample')
+        with self.assertRaisesRegex(ManifestError, 'unknown_key: future_delivery'):
+            load(self.file)
+        # An unknown array holding a scalar is not a table array.
+        self.file.write_text('future_delivery = ["worker"]\n' + BASE)
+        with self.assertRaisesRegex(ManifestError, 'unknown_key: future_delivery'):
+            load(self.file, allow_unknown_tables=True)
+
+    def test_table_tolerance_does_not_hide_scalars_or_known_schema_errors(self):
+        for suffix in ('\nmisspelt = 1\n', '\n[bus]\nmispelt = 1\n'):
+            self.file.write_text(BASE + suffix)
+            with self.subTest(suffix=suffix), self.assertRaises(ManifestError):
+                load(self.file, allow_unknown_tables=True)
+        self.file.write_text('minimum_coordkit_version = 1\n' + BASE)
+        with self.assertRaisesRegex(ManifestError, 'invalid_type: minimum_coordkit_version'):
+            load(self.file, allow_unknown_tables=True)
 
     def test_launchd_required_at_install(self):
         with self.assertRaisesRegex(ManifestError, "missing_key: launchd.path"):

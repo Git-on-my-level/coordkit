@@ -1,0 +1,169 @@
+[
+  {
+    "frm": "lead",
+    "id": "r-001",
+    "kind": "ruling",
+    "owner": "worker-a",
+    "text": "Approve the retry change for #4103.",
+    "to": "worker-a",
+    "topic": "ci",
+    "ts": "2026-10-20T04:00:00+00:00"
+  },
+  {
+    "frm": "worker-a",
+    "id": "r-002",
+    "kind": "handoff",
+    "text": "Handoff: the retry change is merged.",
+    "to": "lead",
+    "topic": "ci",
+    "ts": "2026-10-20T10:00:00+00:00"
+  },
+  {
+    "frm": "lead",
+    "id": "r-003",
+    "kind": "ruling",
+    "owner": "worker-b",
+    "text": "Hold merge of #4101 until review completes.",
+    "to": "worker-b",
+    "topic": "app",
+    "ts": "2026-10-20T13:00:00+00:00"
+  },
+  {
+    "frm": "lead",
+    "id": "r-004",
+    "kind": "ruling",
+    "owner": "worker-b",
+    "text": "Go on #4101: review approved; merge when checks pass.",
+    "to": "worker-b",
+    "topic": "app",
+    "ts": "2026-10-20T13:05:00+00:00"
+  },
+  {
+    "frm": "lead",
+    "id": "r-005",
+    "kind": "ruling",
+    "owner": "worker-c",
+    "text": "Record the ledger correction for the batch run.",
+    "to": "worker-c",
+    "topic": "general",
+    "ts": "2026-10-23T18:00:00+00:00"
+  },
+  {
+    "frm": "lead",
+    "id": "r-006",
+    "kind": "ruling",
+    "owner": "worker-d",
+    "text": "Merge #4102 after the release window opens.",
+    "to": "worker-d",
+    "topic": "general",
+    "ts": "2026-10-26T03:00:00+00:00"
+  },
+  {
+    "frm": "lead",
+    "id": "r-007",
+    "kind": "ruling",
+    "owner": "worker-d",
+    "text": "Approve the bounded retry for #4102.",
+    "to": "worker-d",
+    "topic": "general",
+    "ts": "2026-10-26T03:10:00+00:00"
+  },
+  {
+    "frm": "lead",
+    "id": "r-008",
+    "kind": "ruling",
+    "owner": "worker-e",
+    "text": "Note the cache change rides the next bundled train.",
+    "to": "worker-e",
+    "topic": "general",
+    "ts": "2026-10-26T04:00:00+00:00"
+  },
+  {
+    "frm": "worker-g",
+    "id": "r-009",
+    "kind": "blocker",
+    "needs": "dispatcher fix",
+    "owner": "lead",
+    "text": "CI flake on #4105: rerun the failing shard.",
+    "to": "lead",
+    "topic": "general",
+    "ts": "2026-10-29T07:00:00+00:00"
+  },
+  {
+    "frm": "worker-h",
+    "id": "r-010",
+    "kind": "state",
+    "state": "RUNNING",
+    "subject": "job-alpha",
+    "text": "wave-05 stopped at its drift gate; rescanning now.",
+    "to": "worker-h",
+    "topic": "general",
+    "ts": "2026-11-02T03:00:00+00:00"
+  },
+  {
+    "frm": "worker-i",
+    "id": "r-011",
+    "kind": "state",
+    "state": "RUNNING",
+    "subject": "job-beta",
+    "text": "starting: triage repeated cancellations on the job; find first bad commit.",
+    "to": "lead",
+    "topic": "general",
+    "ts": "2026-11-02T19:00:00+00:00"
+  },
+  {
+    "frm": "worker-j",
+    "id": "r-012",
+    "kind": "blocker",
+    "needs": "investigation lane; then a roll",
+    "owner": "lead-b",
+    "ref": "canary/SUMMARY.md",
+    "text": "Retry failed the same way; evidence captured in the canary summary.",
+    "to": "lead-b",
+    "topic": "deploy",
+    "ts": "2026-11-04T00:00:00+00:00"
+  },
+  {
+    "frm": "lead-b",
+    "id": "r-013",
+    "kind": "ruling",
+    "owner": "worker-j",
+    "subject": "worker-count",
+    "text": "Go now: set the worker count to 8 on the staging service.",
+    "to": "worker-j",
+    "topic": "general",
+    "ts": "2026-11-04T11:00:00+00:00"
+  },
+  {
+    "frm": "worker-j",
+    "id": "r-014",
+    "kind": "fyi",
+    "re": "r-013",
+    "text": "Finished: the service rolled with the new worker count.",
+    "to": "lead-b",
+    "topic": "general",
+    "ts": "2026-11-04T11:05:00+00:00"
+  },
+  {
+    "frm": "lead",
+    "id": "r-015",
+    "kind": "fyi",
+    "origin": "coordkit",
+    "re": "r-099",
+    "role": "coordinator",
+    "text": "Unpicked urgent ask r-099 from coordkit owner=lead-b age=18h",
+    "to": "coordinator",
+    "topic": "general",
+    "ts": "2026-11-05T05:00:00+00:00"
+  },
+  {
+    "frm": "worker-e",
+    "id": "r-016",
+    "kind": "msg",
+    "re": "r-098",
+    "text": "Cache revert served; ledger updated.",
+    "to": "lead-b",
+    "topic": "cost",
+    "ts": "2026-11-09T00:00:00+00:00"
+  }
+]

@@ -245,7 +245,7 @@ class LoopAnswersTests(FakeCase):
     def test_question_reader_preserves_another_producers_blocker_answer(self):
         bus.configure(self.manifest)
         bus.append([dict(kind='blocker', id='blocker-one', origin='coordkit', frm='worker', owner='lead',
-                         to='lead', subject='card:task', text='Need a decision', ts='2026-01-01T00:00:00Z')], project=False)
+                         to='lead', subject='card:task', text='Need a decision', ts=bus.now().isoformat())], project=False)
         (self.manifest.paths.root/'state').mkdir(exist_ok=True)
         (self.manifest.paths.root/'state/mirror.cursor').write_text('1')
         response = self.answers('event:blocker-ask')

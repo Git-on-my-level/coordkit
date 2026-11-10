@@ -161,13 +161,14 @@ ck doctor --strict-dead-letters >"$RUN/doctor-post.txt" 2>&1; drc=$?
 "$PY" - "$RUN/doctor-post.txt" "$drc" <<'PY' >>"$LOG" 2>&1 || rollback "doctor incomplete or red after the hook change (see doctor-post.txt)"
 # Every check exactly once; green, except strict dead_letters (not caused by hooks); rc agrees.
 import sys
-names = 'escalation_limits manifest binaries anx agentctl reconciler_age github launchd dead_letters shadow_guard'.split()
+names = 'escalation_limits manifest binaries anx agentctl reconciler_age github launchd dead_letters shadow_guard roster'.split()
 seen, red = {}, []
 for line in open(sys.argv[1]):
     if line.startswith('DOCTOR '):
         _, check, rest = line.rstrip('\n').split(' ', 2)
         seen[check] = seen.get(check, 0) + 1
-        if not rest.startswith('green'): red.append(check)
+        # roster and dead_letters are advisory and may warn; any other non-green state counts as red.
+        if not (rest.startswith('green') or (rest.startswith('warn') and check in ('roster', 'dead_letters'))): red.append(check)
 rc = int(sys.argv[2])
 ok = all(seen.get(n) == 1 for n in names) and set(red) <= {'dead_letters'} and (rc == 0) == (not red)
 print('doctor-post seen', seen, 'red', red, 'rc', rc); sys.exit(0 if ok else 1)

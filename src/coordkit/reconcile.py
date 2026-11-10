@@ -11,7 +11,7 @@ from . import bus, deadletters, lane, loop, loop_answers, escalation
 from .stock import held, report
 from .actl import AgentctlClient
 from .anxcli import AnxClient, CardUnresolved, past_promises
-from .manifest import duration
+from .manifest import ManifestError, duration
 from .merge import gh
 from .mirror import card_for
 from .process import ToolError, parse_ts, run
@@ -63,6 +63,8 @@ def reconcile(manifest, dry_run=False, at=None):
     state['started_at'] = at
     state.setdefault('blockers', {})
     state.setdefault('holds', {})
+    # One durable receipt per orphan, independent of fired's rolling retention.
+    orphan_notified = state.setdefault('orphan_notified', {})
     missing = state.setdefault('missing_cards', {})
     cache_scope = card_cache_scope(manifest)
     prune_missing_cards(missing, cache_scope, at)
@@ -79,10 +81,11 @@ def reconcile(manifest, dry_run=False, at=None):
         if not dry_run:
             try:
                 perform()
-            except ToolError as exc:
+            except (ToolError, ManifestError) as exc:
                 if not ask:
                     raise
-                # An undeliverable escalation (the bus itself failing, no relay) is retried next run, never lost.
+                # An undeliverable escalation (the bus itself failing, no relay, or
+                # an unroutable retired target) is retried next run, never lost.
                 print(f'RECONCILE {check} escalation_failed {detail}: {exc}')
                 findings=True
                 return
@@ -285,8 +288,32 @@ def reconcile(manifest, dry_run=False, at=None):
     adopted = state.setdefault('obligations_since', at)
     # coordkit's own rows always count; other writers' rows (an incumbent still posting) only after adoption.
     since_adoption = lambda row: bus.adopted_row(row, adopted)
-    rulings, blockers = bus.open_rulings(rows), bus.open_blockers(rows)
+    derived = bus.closure_view(rows, at)
+    rulings = [row for row in derived['open'] if row.get('kind') == 'ruling']
+    blockers = [row for row in derived['open'] if row.get('kind') == 'blocker']
     open_obligations = {row['id'] for row in rulings + blockers}
+    # Orphans are not repeatedly chased as if their dead owner were live. Route a
+    # single plain ask to the retirement redirect, declared fallback, or coordinator.
+    eligible_orphans = [row for row in derived['orphaned'] if since_adoption(row)]
+    for row in eligible_orphans:
+        if row['id'] in orphan_notified:
+            continue
+        key = 'orphan:' + row['kind'] + ':' + row['id']
+        fallback = row['fallback']
+        text = (f'Orphaned {row["kind"]} {row["id"]}: owner {row["owner"]} is {row["orphan_reason"]}; '
+                f'from {row["frm"]}: {(row.get("text") or "")[:120]}. Reassign, answer or close it.')
+        action('orphans', key, fallback, lambda notify_row=row, notify_text=text, target=fallback: notify(
+            ['post', '--from', 'coordkit', '--to', target, '--kind', 'ask', '--topic', 'coordkit-orphan',
+             '--id', 'orphan-' + hashlib.sha256(key.encode()).hexdigest()[:24],
+             '--key', key, '--no-auto-default', '--no-mirror', '--force', notify_text], manifest), ask=True)
+        if key in fired and row['id'] not in orphan_notified:
+            orphan_notified[row['id']] = {'kind': row['kind'], 'fallback': fallback, 'at': at}
+            if not dry_run:
+                write_json(state_path, state)
+    awaiting_orphans = [row for row in eligible_orphans if row['id'] not in orphan_notified]
+    if eligible_orphans and not dry_run:
+        # Once-only receipt retention deliberately survives closed rows and fired GC.
+        print(f'RECONCILE orphans count={len(eligible_orphans)} awaiting_fallback={len(awaiting_orphans)}')
     closed = False
     for key in list(unresolved):
         if key not in open_obligations:
@@ -427,7 +454,7 @@ def reconcile(manifest, dry_run=False, at=None):
                     pending.remove(item)
                     write_json(pending_path,pending)
                 continue
-            candidates=[r for r in bus.open_blockers(bus.read()) if r.get('subject') == subject and r.get('owner') == 'lead']
+            candidates=[r for r in bus.unresolved_blockers(bus.read()) if r.get('subject') == subject and r.get('owner') == 'lead']
             if len(candidates) > 1 and item.get('title'):
                 candidates=[r for r in candidates if item['title'] in (briefs.blocker_title(r), ('Coordkit: '+r['text'])[:99].rstrip('.?')+'?')]
             if len(candidates) != 1:
