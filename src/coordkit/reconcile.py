@@ -299,6 +299,10 @@ def reconcile(manifest, dry_run=False, at=None):
     pending_orphans.sort(key=lambda row: (row['id'] <= state.get('orphan_cursor', ''), row['id']))
     for row in pending_orphans[:manifest.reconciler.orphan_ask_cap]:
         state['orphan_cursor'] = row['id']
+        # Keep retry rotation across aborted passes; delivery receipts still wait
+        # for a successful send, retried with the same stable post ID.
+        if not dry_run:
+            write_json(state_path, state)
         key = 'orphan:' + row['kind'] + ':' + row['id']
         fallback = row['fallback']
         text = (f'Orphaned {row["kind"]} {row["id"]}: owner {row["owner"]} is {row["orphan_reason"]}; '

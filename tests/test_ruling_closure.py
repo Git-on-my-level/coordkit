@@ -399,6 +399,70 @@ class DerivedClosureTests(FakeCase):
         state = json.loads((self.manifest.paths.root / 'reconcile/state.json').read_text())
         self.assertEqual(set(state['orphan_notified']), {'2', '3'})
 
+    def test_orphan_cursor_survives_repeated_aborts_after_failed_attempts(self):
+        from coordkit.process import ToolError
+        self.manifest.reconciler.orphan_ask_cap = 2
+        self.manifest.addressed.agents = {'worker': {'fallback': 'backup'}, 'backup': {}}
+        self.write_bus([row(str(i), '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
+                            to='worker', kind='ruling', owner='worker') for i in range(5)])
+        state_path = self.manifest.paths.root / 'reconcile/state.json'
+        attempted, post_ids = [], {}
+
+        def fail(argv, manifest):
+            rid = argv[argv.index('--key') + 1].removeprefix('orphan:ruling:')
+            post_id = argv[argv.index('--id') + 1]
+            self.assertEqual(post_ids.setdefault(rid, post_id), post_id)
+            attempted.append(rid)
+            if len(attempted) % 2 == 0:
+                raise RuntimeError('pass aborted during delivery')
+            raise ToolError('bus', 6, 'failed', 'transport')
+
+        with patch('coordkit.bus.main', side_effect=fail):
+            for expected in (['0', '1'], ['2', '3'], ['4', '0']):
+                with self.assertRaisesRegex(RuntimeError, 'pass aborted during delivery'):
+                    self.reconcile_once()
+                self.assertEqual(attempted[-2:], expected)
+                state = json.loads(state_path.read_text())
+                self.assertEqual(state['orphan_cursor'], expected[-1])
+                self.assertEqual(state['orphan_notified'], {})
+                self.assertFalse(any(key.startswith('orphan:') for key in state['fired']))
+        self.assertEqual(set(attempted), set(map(str, range(5))))
+        self.assertEqual(self.orphan_notices(), [])
+        # Failures remain eligible, and only a successful send earns a receipt.
+        self.reconcile_once()
+        state = json.loads(state_path.read_text())
+        self.assertEqual(set(state['orphan_notified']), {'1', '2'})
+        self.assertEqual({r['id'] for r in self.orphan_notices()}, {post_ids['1'], post_ids['2']})
+
+    def test_orphan_cursor_survives_abort_after_failed_delivery_batch(self):
+        from coordkit.process import ToolError
+        self.manifest.reconciler.orphan_ask_cap = 2
+        self.manifest.addressed.agents = {'worker': {'fallback': 'backup'}, 'backup': {}}
+        self.write_bus([row(str(i), '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
+                            to='worker', kind='ruling', owner='worker') for i in range(5)])
+        attempted = []
+
+        def fail(argv, manifest):
+            attempted.append(argv[argv.index('--key') + 1].removeprefix('orphan:ruling:'))
+            raise ToolError('bus', 6, 'failed', 'transport')
+
+        original_digest = addressed.to_lead_digest
+        def abort_digest(manifest, source, text, **kwargs):
+            if source == 'orphan-backlog':
+                raise RuntimeError('digest aborted')
+            return original_digest(manifest, source, text, **kwargs)
+
+        with patch('coordkit.bus.main', side_effect=fail), \
+                patch('coordkit.addressed.to_lead_digest', side_effect=abort_digest):
+            for expected in (['0', '1'], ['2', '3'], ['4', '0']):
+                with self.assertRaisesRegex(RuntimeError, 'digest aborted'):
+                    self.reconcile_once()
+                self.assertEqual(attempted[-2:], expected)
+                state = json.loads((self.manifest.paths.root / 'reconcile/state.json').read_text())
+                self.assertEqual(state['orphan_cursor'], expected[-1])
+                self.assertEqual(state['orphan_notified'], {})
+        self.assertEqual(set(attempted), set(map(str, range(5))))
+
     def test_zero_orphan_cap_preserves_backlog_and_only_queues_summary(self):
         self.manifest.reconciler.orphan_ask_cap = 0
         self.write_bus([row('r', '2026-10-31T00:00:00Z', origin='coordkit', frm='lead',
