@@ -79,7 +79,11 @@ ruling sharing a PR supersedes the earlier one.
 Rulings and blockers do not remain actionable forever when their owner cannot answer.
 `[obligations].inactive_after` (default `72h`) derives retired or silent owners into the
 separate `bus open-rulings --orphaned` / `open-blockers --orphaned` lists. Reconciliation
-posts one ordinary ask to the retirement redirect, declared agent fallback, or coordinator.
+routes each orphan once to the retirement redirect, declared agent fallback, or coordinator.
+Digest-only targets, including the obligations coordinator, queue a lead-digest finding.
+`[reconciler].orphan_ask_cap` limits attempts per pass (default `10`, `0` for summary
+only). Deferred and failed items retain no delivery receipt and retry next pass;
+one deduplicated digest summary reports the remaining backlog. Dry runs write nothing.
 The fallback never creates a second owner-bearing ruling or blocker. A latest `RUNNING`
 state from an equally silent lane is reported as `STALE`, without changing the retained row.
 MCP's `ack` and `inbox` tools retain their addressed behavior. The thin CLI wrappers are retired.

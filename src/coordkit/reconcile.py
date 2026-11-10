@@ -295,9 +295,8 @@ def reconcile(manifest, dry_run=False, at=None):
     # Orphans are not repeatedly chased as if their dead owner were live. Route a
     # single plain ask to the retirement redirect, declared fallback, or coordinator.
     eligible_orphans = [row for row in derived['orphaned'] if since_adoption(row)]
-    for row in eligible_orphans:
-        if row['id'] in orphan_notified:
-            continue
+    pending_orphans = [row for row in eligible_orphans if row['id'] not in orphan_notified]
+    for row in pending_orphans[:manifest.reconciler.orphan_ask_cap]:
         key = 'orphan:' + row['kind'] + ':' + row['id']
         fallback = row['fallback']
         text = (f'Orphaned {row["kind"]} {row["id"]}: owner {row["owner"]} is {row["orphan_reason"]}; '
@@ -311,6 +310,16 @@ def reconcile(manifest, dry_run=False, at=None):
             if not dry_run:
                 write_json(state_path, state)
     awaiting_orphans = [row for row in eligible_orphans if row['id'] not in orphan_notified]
+    if awaiting_orphans:
+        findings = True
+        summary = (f'Orphan backlog: {len(awaiting_orphans)} awaiting fallback; '
+                   f'per-pass attempt cap={manifest.reconciler.orphan_ask_cap}; '
+                   'sample IDs: ' + ', '.join(row['id'] for row in awaiting_orphans[:6]) +
+                   '. Inspect bus open-rulings --orphaned and open-blockers --orphaned.')
+        print('RECONCILE orphans ' + summary)
+        if not dry_run:
+            from .addressed import to_lead_digest
+            to_lead_digest(manifest, 'orphan-backlog', summary, at=at)
     if eligible_orphans and not dry_run:
         # Once-only receipt retention deliberately survives closed rows and fired GC.
         print(f'RECONCILE orphans count={len(eligible_orphans)} awaiting_fallback={len(awaiting_orphans)}')
