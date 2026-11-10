@@ -79,6 +79,19 @@ class ManifestTests(FakeCase):
         with self.assertRaisesRegex(ManifestError, 'unknown_key: future_delivery'):
             load(self.file)
 
+    def test_wake_scan_tolerates_unknown_arrays_of_tables(self):
+        self.file.write_text(BASE + '\n[[future_delivery]]\nname = "worker"\n')
+        with patch('coordkit.wake.scan', return_value=0) as scan:
+            self.assertEqual(cli.main(['--manifest', str(self.file), 'wake-scan', '--dry-run']), 0)
+        scan.assert_called_once()
+        self.assertEqual(load(self.file, allow_unknown_tables=True).project.name, 'sample')
+        with self.assertRaisesRegex(ManifestError, 'unknown_key: future_delivery'):
+            load(self.file)
+        # An unknown array holding a scalar is not a table array.
+        self.file.write_text('future_delivery = ["worker"]\n' + BASE)
+        with self.assertRaisesRegex(ManifestError, 'unknown_key: future_delivery'):
+            load(self.file, allow_unknown_tables=True)
+
     def test_table_tolerance_does_not_hide_scalars_or_known_schema_errors(self):
         for suffix in ('\nmisspelt = 1\n', '\n[bus]\nmispelt = 1\n'):
             self.file.write_text(BASE + suffix)

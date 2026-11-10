@@ -489,7 +489,10 @@ def load(path: str | Path | None = None, *, allow_unknown_tables: bool = False) 
     allowed = {f.name for f in fields(Manifest)} - {"file", "mode"}
     unknown = [section for section in raw if section not in allowed]
     if unknown:
-        if allow_unknown_tables and all(isinstance(raw[section], dict) for section in unknown):
+        def is_table_or_table_array(value):
+            return isinstance(value, dict) or (
+                isinstance(value, list) and all(isinstance(item, dict) for item in value))
+        if allow_unknown_tables and all(is_table_or_table_array(raw[section]) for section in unknown):
             for section in unknown:
                 raw.pop(section)
         else:
