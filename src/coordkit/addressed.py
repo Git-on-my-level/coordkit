@@ -318,7 +318,8 @@ def to_lead_digest(manifest, event, text, row=None, at=None):
         if any(all(old.get(k) == item[k] for k in ('event', 'text', 'id')) for old in items):
             return
         stream.seek(0); stream.truncate()
-        stream.write(b''.join((json.dumps(i) + '\n').encode() for i in [*items[-999:], item]))
+        tail = [*items[-999:], item] if text or event != 'orphan-backlog' else items[-999:]
+        stream.write(b''.join((json.dumps(i) + '\n').encode() for i in tail))
         stream.flush(); os.fsync(stream.fileno())
         fcntl.flock(stream, fcntl.LOCK_UN)
 

@@ -321,7 +321,7 @@ def reconcile(manifest, dry_run=False, at=None):
         print('RECONCILE orphans ' + summary)
         if not dry_run:
             from .addressed import to_lead_digest
-            to_lead_digest(manifest, 'orphan-backlog', summary, at=at)
+            to_lead_digest(manifest, 'orphan-backlog', summary if awaiting_orphans else '', at=at)
     if eligible_orphans and not dry_run:
         # Once-only receipt retention deliberately survives closed rows and fired GC.
         print(f'RECONCILE orphans count={len(eligible_orphans)} awaiting_fallback={len(awaiting_orphans)}')

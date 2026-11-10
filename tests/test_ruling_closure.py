@@ -352,8 +352,7 @@ class DerivedClosureTests(FakeCase):
         for expected in (4, 5, 5):
             self.reconcile_once()
             self.assertEqual(len(self.orphan_notices()), expected)
-        self.assertEqual(len(digest_path.read_text().splitlines()), 1)
-        self.assertIn('0 awaiting fallback', digest_path.read_text())
+        self.assertEqual(digest_path.read_text(), '')
 
     def test_failed_orphan_attempts_are_capped_and_remain_retryable(self):
         from coordkit.process import ToolError
