@@ -47,6 +47,18 @@ class RosterDoctorTests(AddressedCase):
         self.assertIn('unenrolled=0', line)
         self.assertNotIn('unenrolled_sample=coordkit', line)
 
+    def test_truncated_tail_does_not_use_an_out_of_order_old_timestamp_as_coverage(self):
+        for index in range(20):
+            self.incumbent_row(f'recent-{index}', 'lead-a', 'all', ago=60)
+        # A relay replay appends an old timestamp after newer rows. The tail's
+        # first row is recent, so the byte boundary proves nothing about the
+        # window even though the minimum timestamp is old.
+        self.incumbent_row('relayed-old', 'worker-ui', 'all', ago=100 * 3600)
+        with patch.object(roster, 'TAIL_BYTES', 400):
+            line = self.doctor_line()
+        self.assertIn('truncated=true', line)
+        self.assertIn('silent=0', line)
+
     def test_enrolled_sink_warns_when_it_receives_and_sends_nothing(self):
         for index in range(21):
             self.incumbent_row(f'mail-{index}', 'lead-a', 'worker-ui', ago=60)

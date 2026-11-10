@@ -69,12 +69,14 @@ def health(manifest, at=None):
     try:
         rows, truncated = _rows(manifest)
         stamped = [(row, stamp) for row in rows if (stamp := _stamp(row)) is not None]
-        oldest = min((stamp for _, stamp in stamped), default=None)
+        # The first row is the append-order byte boundary of a truncated tail.
+        # A later out-of-order (relayed) timestamp says nothing about rows before it.
+        boundary = _stamp(rows[0]) if rows else None
 
         def covered(window):
-            # A full read covers all history. A tail covers a window only when its
-            # oldest complete row is at or before the window boundary.
-            return not truncated or (oldest is not None and oldest <= at - window)
+            # A full read covers all history. A truncated tail proves a window only
+            # when its boundary row is at or before the window start.
+            return not truncated or (boundary is not None and boundary <= at - window)
 
         agents = set(manifest.addressed.agents)
         aliases = bus.aliases(manifest)
