@@ -186,6 +186,57 @@ class AddressedTests(AddressedCase):
         self.assertEqual(len(digests), 2)
         self.assertTrue(all(r['frm'] == 'coordkit' and r['kind'] == 'fyi' for r in digests))
 
+    def test_non_orphan_digest_findings_are_retained_until_rendered(self):
+        for i in range(20):
+            addressed.to_lead_digest(self.manifest, f'finding-{i:02}', f'finding detail {i}', at=self.now)
+        sent, state = [], {}
+        with patch('coordkit.bus.main', side_effect=lambda argv, m, **kw: sent.append(argv[-1])):
+            addressed.flush_lead_digest(self.manifest, state, self.now, out=lambda _: None, rows=[])
+            path = addressed.home(self.manifest) / 'lead-digest.ndjson'
+            remaining = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual([i['event'] for i in remaining], [f'finding-{i:02}' for i in range(12, 20)])
+            self.assertIn('+8 more queued findings', sent[0])
+            self.assertIn('coordkit obligations report', sent[0])
+            for i in range(12):
+                self.assertIn(f'- finding-{i:02}: finding detail {i}', sent[0])
+            addressed.flush_lead_digest(self.manifest, state, self.now + 3600, out=lambda _: None, rows=[])
+        for i in range(12, 20):
+            self.assertIn(f'- finding-{i:02}: finding detail {i}', sent[1])
+        self.assertEqual(path.read_text(), '')
+
+    def test_digest_capacity_rejects_enqueue_without_evicting_old_findings(self):
+        from coordkit.manifest import ManifestError
+        path = addressed.home(self.manifest) / 'lead-digest.ndjson'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entries = [{'event': f'finding-{i}', 'text': 'x' * 400} for i in range(1000)]
+        path.write_text(''.join(json.dumps(i) + '\n' for i in entries))
+        original = path.read_bytes()
+        with self.assertRaisesRegex(ManifestError, 'queue full'):
+            addressed.to_lead_digest(self.manifest, 'new-finding', 'keep the older ones')
+        self.assertEqual(path.read_bytes(), original)
+        with patch('coordkit.bus.main') as post:
+            addressed.flush_lead_digest(self.manifest, {}, self.now, out=lambda _: None, rows=[])
+        self.assertIn('- finding-0:', post.call_args.args[0][-1])
+        self.assertEqual(len(path.read_text().splitlines()), 988)
+
+    def test_digest_defers_while_reconcile_owns_receipt_state(self):
+        import fcntl
+        addressed.to_lead_digest(self.manifest, 'finding', 'still pending')
+        path = addressed.home(self.manifest) / 'lead-digest.ndjson'
+        original = path.read_bytes()
+        lock = self.manifest.paths.root / 'reconcile/run.lock'
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        state = {}
+        with lock.open('a') as stream, patch('coordkit.bus.main') as post:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            addressed.flush_lead_digest(self.manifest, state, self.now, rows=[])
+            post.assert_not_called()
+        self.assertEqual(state, {})
+        self.assertEqual(path.read_bytes(), original)
+        with patch('coordkit.bus.main') as post:
+            addressed.flush_lead_digest(self.manifest, state, self.now, out=lambda _: None, rows=[])
+            post.assert_called_once()
+
 
     def test_machine_finding_for_the_lead_goes_to_the_digest(self):
         from coordkit import escalation

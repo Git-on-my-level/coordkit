@@ -305,26 +305,50 @@ def lead_names(manifest):
     return out
 
 
-def to_lead_digest(manifest, event, text, row=None, at=None):
+def to_lead_digest(manifest, event, text, row=None, at=None, receipt=None):
     path = home(manifest)/'lead-digest.ndjson'
+    snapshot = event == 'orphan-backlog' or event.startswith('orphan-batch:')
+    # Empty text removes a replaceable orphan snapshot. A missing queue stays missing.
+    if snapshot and not text and not path.is_file():
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         items = digest_items(stream)
-        item = {'at': time.time() if at is None else at, 'event': event, 'text': text[:400],
+        item = {'at': time.time() if at is None else at, 'event': event, 'text': text if event.startswith('orphan-batch:') else text[:400],
                 'id': (row or {}).get('id')}
+        if receipt is not None:
+            item['receipt'] = receipt
         if any(all(old.get(k) == item[k] for k in ('event', 'text', 'id')) for old in items):
             return
+        # Replace snapshots in place so repeated reconciliation cannot move an
+        # unrendered batch behind newer findings and starve its next flush.
+        queued = list(items)
+        index = next((n for n, old in enumerate(items) if old.get('event') == event), None) if snapshot else None
+        if index is not None:
+            if text:
+                queued[index] = item
+            else:
+                queued.pop(index)
+        elif text or not snapshot:
+            queued.append(item)
+        else:
+            return
+        data = b''.join((json.dumps(i) + '\n').encode() for i in queued)
+        if len(queued) > 1000 or len(data) > 8 * 1024 * 1024:
+            raise ManifestError('lead digest queue full; flush pending findings before retrying')
         stream.seek(0); stream.truncate()
-        stream.write(b''.join((json.dumps(i) + '\n').encode() for i in [*items[-999:], item]))
+        stream.write(data)
         stream.flush(); os.fsync(stream.fileno())
         fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 def digest_items(stream):
-    """Bounded queue tail; one malformed finding never blocks the hourly batch."""
-    from .tail import read_tail
-    _, data = read_tail(stream, 262144)
+    """Read the complete queue; capacity errors must never silently discard findings."""
+    stream.seek(0)
+    data = stream.read(8 * 1024 * 1024 + 1)
+    if len(data) > 8 * 1024 * 1024:
+        raise ManifestError('lead digest queue exceeds 8 MiB; preserve it for recovery')
     items = []
     for line in data.splitlines():
         try:
@@ -333,10 +357,35 @@ def digest_items(stream):
                 items.append(item)
         except (ValueError, RecursionError):
             continue
-    return items[-1000:]
+    return items
+
+
+def prune_orphan_digests(manifest, targets):
+    """Remove snapshots for groups that closed or moved, including unreceipted ones."""
+    path = home(manifest)/'lead-digest.ndjson'
+    if not path.is_file():
+        return
+    with path.open('a+b') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        items = digest_items(stream)
+        kept = [i for i in items if not i.get('event', '').startswith('orphan-batch:')
+                or i['event'].removeprefix('orphan-batch:') in targets]
+        if len(kept) != len(items):
+            stream.seek(0); stream.truncate()
+            stream.write(b''.join((json.dumps(i) + '\n').encode() for i in kept))
+            stream.flush(); os.fsync(stream.fileno())
 
 
 def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), dead=(), rows=None):
+    # Match the reconciler's lock order: receipt state first, then the digest queue.
+    # This prevents a concurrent reconcile from overwriting flush-time receipts.
+    with locked(manifest.paths.root/'reconcile'/'run.lock', blocking=False) as lock:
+        if lock is None:
+            return  # Leave queue and cadence untouched; the next sweep retries.
+        return _flush_lead_digest(manifest, state, at, out, backlog, pending, dead, rows)
+
+
+def _flush_lead_digest(manifest, state, at, out, backlog, pending, dead, rows):
     """One hourly FYI; consume the shared queue under the same lock writers take."""
     if at - state.get('lead_digest_at', 0) < DIGEST_EVERY:
         return
@@ -353,9 +402,15 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
     with path.open('a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         items = digest_items(stream)
+        rendered, remaining = items[:12], items[12:]
         if not items and not backlog and not pending and not dead and not opened and not missing and not machine_lines:
             return
-        lines = [f"- {i.get('event')}: {i.get('text', '')[:200]}" for i in items[-12:]]
+        lines = [f"- {i.get('event')}: " + (i.get('text', '') if i.get('event', '').startswith('orphan-batch:')
+                                                 else i.get('text', '')[:200]) for i in rendered]
+        if remaining:
+            lines.append(f'- +{len(remaining)} more queued findings; next hourly digest; '
+                         'coordkit obligations report for the full backlog; '
+                         'bus open-rulings --orphaned and bus open-blockers --orphaned for orphans.')
         lines.extend(machine_lines)
         lines += ['- ' + i['text'] for i in missing[:12]]
         lines += [f"- {r['qid']}: unanswered, no default ({r.get('reasks', 0)} re-asks)" for r in unanswered[:12]]
@@ -388,16 +443,34 @@ def flush_lead_digest(manifest, state, at, out=print, backlog=(), pending=(), de
                       '--topic', 'coordkit-digest', '--no-mirror', '--force', text], manifest, site_local=True)
         else:
             to_relay_file(manifest, text, at)
+        receipts = [i for i in rendered if i.get('receipt')]
+        if receipts and manifest.mode == 'live':
+            state_path = manifest.paths.root/'reconcile'/'state.json'
+            reconciled = read_json(state_path, {'fired': {}, 'dead': {}, 'loops': {}})
+            for item in receipts:
+                receipt = item['receipt']
+                target = receipt['target']
+                reconciled.setdefault('orphan_batches', {})[target] = {
+                    'digest': receipt['digest'], 'id': item['id'], 'at': at}
+                for member in receipt['members']:
+                    reconciled.setdefault('orphan_notified', {})[member['id']] = {
+                        'kind': member['kind'], 'fallback': target, 'at': at}
+                pending_batch = reconciled.get('orphan_pending', {}).get(target, {})
+                if pending_batch.get('digest') == receipt['digest']:
+                    reconciled['orphan_pending'].pop(target)
+            write_json(state_path, reconciled)
         for record in unanswered[:12]:
             questions.mark(manifest, record['qid'], no_default_digested=at)
         for record in deferred:
             questions.mark(manifest, record['qid'], default_deferred_digested=at)
         # A failed publish leaves the queue intact. Keep its inode so concurrent writers cannot
         # append to an unlinked file; there are no sent archives to rotate.
-        stream.seek(0); stream.truncate(); stream.flush(); os.fsync(stream.fileno())
+        stream.seek(0); stream.truncate()
+        stream.write(b''.join((json.dumps(i) + '\n').encode() for i in remaining))
+        stream.flush(); os.fsync(stream.fileno())
     state['lead_digest_at'] = at
     state['dead_owner_ids'] = sorted(i['id'] for i in dead)
-    out(f'LEAD_DIGEST posted {len(items)} finding(s), {len(pending)} obligation(s)')
+    out(f'LEAD_DIGEST posted {len(rendered)} finding(s), {len(pending)} obligation(s); {len(remaining)} queued')
 
 
 def escalate(manifest, event, text, row=None, deaf=(), fallback='', urgent=False, at=None, probe=None,
