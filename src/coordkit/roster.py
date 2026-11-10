@@ -7,7 +7,7 @@ is an operational signal, not a reason to fail `up --apply`.
 """
 import time
 
-from . import addressed, bus
+from . import addressed, bus, routing
 from .manifest import duration
 from .process import parse_ts
 from .state import read_json
@@ -116,6 +116,7 @@ def health(manifest, at=None):
         unenrolled = sorted(
             name for name, count in sent.items()
             if name not in agents and name not in alias_names and name not in declared
+            and not routing.internal_name(manifest, name)
             and count > manifest.addressed.roster_unenrolled_posts)
 
         sinks = []

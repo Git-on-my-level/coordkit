@@ -39,6 +39,14 @@ class RosterDoctorTests(AddressedCase):
         self.assertNotIn('alias-name', line)
         self.assertNotIn('declared-reader', line)
 
+    def test_internal_sender_is_not_an_unenrolled_agent(self):
+        for index in range(21):
+            self.incumbent_row(f'ck-{index}', 'coordkit', 'all', ago=60)
+            self.incumbent_row(f'ck-report-{index}', 'coordkit-report', 'all', ago=60)
+        line = self.doctor_line()
+        self.assertIn('unenrolled=0', line)
+        self.assertNotIn('unenrolled_sample=coordkit', line)
+
     def test_enrolled_sink_warns_when_it_receives_and_sends_nothing(self):
         for index in range(21):
             self.incumbent_row(f'mail-{index}', 'lead-a', 'worker-ui', ago=60)
