@@ -87,7 +87,13 @@ class AnxClient:
             evidence = str(evidence)
             if evidence.startswith(("/", "./", "../", "~")) or self.manifest.path(evidence).exists():
                 evidence = "path:" + str(self.manifest.path(evidence))
-            args += ["--evidence", evidence]
+            elif re.fullmatch(r"[0-9a-fA-F]{7,40}", evidence):
+                evidence = "commit:" + evidence.lower()
+            if evidence.startswith("path:") or re.fullmatch(r"[A-Za-z][A-Za-z0-9+._-]*:\S+", evidence):
+                args += ["--evidence", evidence]
+            else:
+                # ANX rejects untyped refs; keep the value in the text so a bus row never blocks projection.
+                args[2] = f"{text} (evidence: {evidence})"
         if met:
             args += ["--met"]
         if next_in:

@@ -163,6 +163,17 @@ class EvidenceTests(FakeCase):
         AnxClient(self.manifest).note('card:x','receipt',evidence='event:receipt',met=True)
         self.assertIn('event:receipt',self.calls()[0]['args'])
 
+    def test_bare_commit_sha_gets_typed_commit_ref(self):
+        AnxClient(self.manifest).note('card:x','handoff',evidence='ABCDEF0123456789ABCDEF0123456789ABCDEF01')
+        args=self.calls()[0]['args']
+        self.assertEqual(args[args.index('--evidence')+1],'commit:abcdef0123456789abcdef0123456789abcdef01')
+
+    def test_untyped_evidence_moves_into_text(self):
+        AnxClient(self.manifest).note('card:x','handoff',evidence='data/missing/README.md')
+        args=self.calls()[0]['args']
+        self.assertNotIn('--evidence',args)
+        self.assertEqual(args[args.index('note')+2],'handoff (evidence: data/missing/README.md)')
+
     def test_false_success_not_found_envelope_refuses_card(self):
         self.respond({'tool':'anx','json':{'ok':False,'error':{'code':'not_found'}}})
         with self.assertRaises(CardUnresolved):
