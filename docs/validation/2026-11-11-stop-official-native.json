@@ -1,5 +1,5 @@
 {
-  "measured_at": "2026-11-11T17:07:52.005938+00:00",
+  "measured_at": "2026-11-11T17:34:24.900516+00:00",
   "binary_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
   "hook_python_version": "3.11.15",
   "cases": [
@@ -23,9 +23,9 @@
         "authoritative_child_found": true,
         "isolated_query_bytes_unchanged": true,
         "stop_seconds": [
-          0.0684316250262782,
-          0.04740016593132168,
-          0.07892154192086309
+          0.18631945794913918,
+          0.15382416697684675,
+          0.12196741695515811
         ],
         "budget_counts": [
           1,
@@ -45,15 +45,15 @@
         "first_two_block": true,
         "third_allows": true,
         "error_fails_open": true,
-        "error_seconds": 0.04943329200614244,
+        "error_seconds": 0.1437453750986606,
         "error_help_observed": true,
         "error_actual_query_observed": true,
         "timeout_fails_open": true,
-        "timeout_seconds": 0.7902172920294106,
+        "timeout_seconds": 0.8585469590034336,
         "timeout_help_observed": true,
         "timeout_actual_query_observed": true,
         "old_fails_open": true,
-        "old_seconds": 0.04371462494600564,
+        "old_seconds": 0.11955599999055266,
         "old_help_observed": true,
         "old_query_skipped": true,
         "unsupported_cached": true,
@@ -62,7 +62,7 @@
         "pending_after_controls_blocks": true,
         "descendant_declarations_stripped": true,
         "collected_fresh_budget_allows": true,
-        "execution_id_collected": "exec-congress-custom-labor-sister-access-mistake",
+        "execution_collected": true,
         "native_lifecycle_active_after_collection": true
       }
     },
@@ -86,9 +86,9 @@
         "authoritative_child_found": true,
         "isolated_query_bytes_unchanged": true,
         "stop_seconds": [
-          0.07494512503035367,
-          0.062043124926276505,
-          0.06419050006661564
+          0.15280350006651133,
+          0.1026082499884069,
+          0.1154345409013331
         ],
         "budget_counts": [
           1,
@@ -108,15 +108,15 @@
         "first_two_block": true,
         "third_allows": true,
         "error_fails_open": true,
-        "error_seconds": 0.05562741600442678,
+        "error_seconds": 0.11539079109206796,
         "error_help_observed": true,
         "error_actual_query_observed": true,
         "timeout_fails_open": true,
-        "timeout_seconds": 0.7903289999812841,
+        "timeout_seconds": 0.8494384170044214,
         "timeout_help_observed": true,
         "timeout_actual_query_observed": true,
         "old_fails_open": true,
-        "old_seconds": 0.043115542037412524,
+        "old_seconds": 0.12145479104947299,
         "old_help_observed": true,
         "old_query_skipped": true,
         "unsupported_cached": true,
@@ -125,7 +125,7 @@
         "pending_after_controls_blocks": true,
         "descendant_declarations_stripped": true,
         "collected_fresh_budget_allows": true,
-        "execution_id_collected": "exec-wine-drill-always-prison-swamp-move",
+        "execution_collected": true,
         "native_lifecycle_active_after_collection": true
       }
     }

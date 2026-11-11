@@ -124,7 +124,7 @@ def main():
                 assert collected.returncode == 0 and collected.stdout == 'synthetic child collected'
                 acknowledged = True
                 assert stop() is None, 'collection did not clear Stop guard'
-                report['blocking_case'] = dict(execution_id=child, state=admission['state'],
+                report['blocking_case'] = dict(execution_collected=True, state=admission['state'],
                                                attribution='launch-time caller_identity from explicit unmanaged Claude declaration; no labels',
                                                before_collection='block', after_collection='allow',
                                                collection_output=collected.stdout,

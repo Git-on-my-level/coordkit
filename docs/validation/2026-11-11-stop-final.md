@@ -111,6 +111,15 @@ ambiguity remain silent/fail-open. Legacy unattributed admissions are not
 backfilled. Retained actionable children have no local age/future-time waiver;
 agentctl alone owns membership and waiter eligibility.
 
+The native acceptance probe was rerun at 2026-11-11 17:34 UTC after public-report
+minimization. Both default and `claude-code` cases passed all collection, budget,
+error, timeout and binding controls. Public reports contain collection booleans,
+not fixture execution IDs. Exact admission/collection receipts remain in a
+unique 0600 ledger under the explicitly private `--scratch-dir`, independently
+of `--output`; keep that scratch directory outside the checkout. Reserved ledger
+filenames are ignored by Git. The earlier child-validation JSON has only its
+identifier field redacted; its original measurement and outcome remain intact.
+
 ```sh
 PYTHONPATH=src python3.11 scripts/probe-session-start.py \
   --claude /path/to/installed/claude --agentctl /path/to/official/agentctl \

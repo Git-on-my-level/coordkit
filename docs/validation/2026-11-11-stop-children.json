@@ -179,13 +179,13 @@
     }
   ],
   "blocking_case": {
-    "execution_id": "exec-effort-owner-album-elegant-dry-never",
     "state": "completed",
     "attribution": "launch-time caller_identity from explicit unmanaged Claude declaration; no labels",
     "before_collection": "block",
     "after_collection": "allow",
     "collection_output": "synthetic child collected",
-    "hook": "real CLI subprocess against default journal"
+    "hook": "real CLI subprocess against default journal",
+    "execution_collected": true
   },
   "legacy_compatibility": {
     "measured_at": "2026-11-11T05:04:19.785892+00:00",

@@ -3,7 +3,8 @@
 
 Invoked during native SessionStart after manually sourcing that hook's env file.
 All agentctl writes use a disposable profile/journal; no provider request occurs.
-Only sanitized booleans, timings and the collected throwaway execution ID escape.
+Only sanitized booleans and timings enter the public report. Exact execution IDs
+remain in the separate private admission/collection ledger.
 """
 import hashlib
 import json
@@ -181,9 +182,9 @@ def main():
         report['descendant_declarations_stripped'] = all(descendant.values())
         value, _ = stop(fresh=True)
         report['collected_fresh_budget_allows'] = value is None
-        report['execution_id_collected'] = child
+        report['execution_collected'] = True
         report['native_lifecycle_active_after_collection'] = native_active()
-        # All pass/fail booleans must succeed; timing/ID are descriptive only.
+        # All pass/fail booleans must succeed; timings/sequences are descriptive.
         assert all(v for v in report.values() if type(v) is bool), 'collection_boolean_failed'
         output.write_text(json.dumps(report, indent=2) + '\n')
         output.chmod(0o600)

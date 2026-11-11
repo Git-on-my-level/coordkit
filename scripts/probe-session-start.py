@@ -5,6 +5,8 @@ Run with PYTHONPATH=src, --claude PATH --scratch-dir PATH --output PATH.
 Never reads existing native sessions or credentials. All temporary native handles
 stay private and are deleted. Results contain version/hash and booleans only.
 Manual Bash sourcing is not a model-driven tool turn or a live deployment gate.
+Real-child admission/collection IDs stay in a unique 0600 ledger under the
+explicit private scratch directory, independent of the public report location.
 """
 import argparse
 import datetime as dt
@@ -113,6 +115,11 @@ def main():
     report = {'measured_at': dt.datetime.now(dt.timezone.utc).isoformat(),
               'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
               'hook_python_version': sys.version.split()[0], 'cases': []}
+    ledger = None
+    if args.agentctl:
+        descriptor, ledger = tempfile.mkstemp(prefix='coordkit-collection-', suffix='.jsonl',
+                                              dir=args.scratch_dir)
+        os.close(descriptor)  # mkstemp creates a 0600 receipt in the caller's scratch directory.
     with tempfile.TemporaryDirectory(prefix='coordkit-sessionstart-', dir=args.scratch_dir) as temporary:
         root = Path(temporary).resolve()
         profile = root/'deny.sb'
@@ -192,7 +199,7 @@ def main():
                             str(receipt), str(file), str(Path(args.agentctl).resolve()), str(stop_report)]))
                         worker_args.chmod(0o600)
                         env['PROBE_STOP_WORKER'] = str(worker_args)
-                        env['PROBE_EXECUTION_LEDGER'] = str(Path(args.output).resolve().with_suffix('.executions.jsonl'))
+                        env['PROBE_EXECUTION_LEDGER'] = ledger
                         env['PYTHONPATH'] = str(Path(deliver.__file__).resolve().parents[1])
                         bridge['timeout'] = 30
                     bridge['command'] = shlex.join([str(python), str(capture), str(receipt),
