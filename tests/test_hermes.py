@@ -44,6 +44,8 @@ with log.open('a') as stream:
                                  leaked=os.environ.get('SENDER_SECRET'), accept=os.environ.get('HERMES_ACCEPT_HOOKS'),
                                  home=os.environ.get('HERMES_HOME'))) + '\\n')
 resumed = argv[argv.index('--resume') + 1] if '--resume' in argv else ''
+if resumed and resumed == cfg.get('GONE') and not cfg.get('GONE_NO_REPORT'):
+    Path(argv[argv.index('--usage-file') + 1]).write_text(json.dumps(dict(api_calls=None, model=None)))
 if resumed and resumed == cfg.get('GONE'):
     message = 'Session not found: ' + ('some-other-session' if cfg.get('GONE_OTHER') else resumed)
     if cfg.get('GONE_STDERR'):
@@ -194,7 +196,8 @@ class TurnTests(HermesCase):
         self.assertTrue(receipt['ok'])
         self.assertEqual((receipt['rows'], receipt['session_id'], receipt['model']), (1, 'sess-1', 'vendor-model'))
         self.assertEqual(receipt['usage'], {'input_tokens': 100, 'output_tokens': 7, 'cache_read_input_tokens': 30,
-                                            'cache_creation_input_tokens': 5, 'reasoning_tokens': 2, 'api_calls': 3})
+                                            'cache_creation_input_tokens': 5, 'reasoning_tokens': 2, 'api_calls': 3,
+                                            'reported': True})
         # Rows handed over in the prompt are delivered: an in-turn hook must not repeat them.
         self.assertEqual(read_json(deliver.cursor_path(self.manifest, 'ops'))['offset'],
                          self.manifest.paths.bus_log.stat().st_size)
@@ -397,10 +400,34 @@ class TurnTests(HermesCase):
 
     def test_only_the_resumed_sessions_own_missing_report_is_retried(self):
         hermes.remember_session(self.lane, 'live-2')
-        self.steer(GONE='live-2', GONE_OTHER='1')  # the error names some other session
-        self.assertEqual(self.turn(), 1)
-        self.assertEqual(len(self.invocations()), 1)
-        self.assertEqual(hermes.session_id(self.lane), 'live-2')
+        for behavior in (dict(GONE_OTHER='1'),        # the error names some other session
+                         dict(GONE_NO_REPORT='1')):   # no usage report: unknown, may have done work
+            self.calls.unlink(missing_ok=True)
+            self.post(row('g-' + next(iter(behavior)).lower()))
+            self.steer(GONE='live-2', **behavior)
+            self.assertEqual(self.turn(), 1, behavior)
+            self.assertEqual(len(self.invocations()), 1, behavior)
+            self.assertEqual(hermes.session_id(self.lane), 'live-2')
+
+    def test_a_request_left_during_an_empty_wake_is_served_before_the_runner_leaves(self):
+        """Contract: the nothing-unread exit goes through the same request check as every other."""
+        self.attach()
+        self.post(row('e1'))
+        self.assertEqual(self.turn(), 0)
+        real = hermes_turn.pending
+        calls = []
+        def pending(manifest, name):
+            result = real(manifest, name)
+            calls.append(len(result[2]))
+            if len(calls) == 1:  # the scan saw the end of the log; a sender posts and asks now
+                self.post(row('e2'))
+                hermes.request_turn(self.lane)
+            return result
+        with patch.object(hermes_turn, 'pending', side_effect=pending):
+            self.assertEqual(self.turn(), 0)
+        invocations = self.invocations()
+        self.assertEqual(len(invocations), 2)
+        self.assertIn('--re e2', invocations[1]['argv'][-1])
 
     def test_a_binary_missing_from_the_turn_path_is_refused_and_a_failed_launch_is_receipted(self):
         with patch.object(hermes, 'turn_path', return_value=str(self.root/'empty')), \
