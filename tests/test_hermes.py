@@ -45,7 +45,7 @@ with log.open('a') as stream:
                                  home=os.environ.get('HERMES_HOME'))) + '\\n')
 resumed = argv[argv.index('--resume') + 1] if '--resume' in argv else ''
 if resumed and resumed == cfg.get('GONE'):
-    message = 'Session not found: ' + resumed
+    message = 'Session not found: ' + ('some-other-session' if cfg.get('GONE_OTHER') else resumed)
     if cfg.get('GONE_STDERR'):
         print(message, file=sys.stderr)  # pruned resume: no result row
     else:
@@ -352,10 +352,55 @@ class TurnTests(HermesCase):
         self.post(*[filler] * (2 * deliver.MAX_READ // len(filler) + 50))
         self.post(row('far1', kind='msg', to='operator'))
         self.assertGreater(self.manifest.paths.bus_log.stat().st_size, 2 * deliver.MAX_READ)
-        _, offset, lines = hermes_turn.pending(self.manifest, 'ops')
+        _, offset, lines, complete = hermes_turn.pending(self.manifest, 'ops')
+        self.assertTrue(complete)
         self.assertEqual(len(lines), 1)
         self.assertIn('BUS msg far1', lines[0])
         self.assertEqual(offset, self.manifest.paths.bus_log.stat().st_size)
+
+    def test_a_scan_that_hits_its_batch_cap_is_not_an_empty_inbox(self):
+        """Contract: only the end of the log proves there is nothing unread."""
+        self.attach()
+        filler = json.dumps(dict(json.loads(row('x', to='someone-else')), text='y' * 900))
+        self.post(*[filler] * (3 * deliver.MAX_READ // len(filler) + 50))
+        self.post(row('deep1'))
+        with patch.object(hermes_turn, 'MAX_BATCHES', 1):
+            self.assertEqual(hermes_turn.pending(self.manifest, 'ops')[2:], ([], False))
+            self.attach()
+            self.assertEqual(self.turn(), 0)
+        calls = self.invocations()
+        self.assertEqual(len(calls), 1)
+        self.assertIn('--re deep1', calls[0]['argv'][-1])
+        self.assertNotIn('skipped', hermes.last_receipt(self.lane))
+
+    def test_a_row_posted_during_a_turn_that_fails_gets_one_delayed_turn(self):
+        """Contract: a failed turn does not strand the row whose sender saw the lock held."""
+        self.attach()
+        self.post(row('f1'))
+        self.file.write_text(self.file.read_text().replace('live_check = false', 'live_check = false\nwake_debounce_minutes = 0'))
+        real = hermes_turn.run_turn
+        attempts = []
+        def run_turn(manifest, lane, text, timeout, session=''):
+            attempts.append(text)
+            if len(attempts) == 1:
+                self.steer(FAIL='1')
+                self.post(row('during1'))
+                hermes.request_turn(self.lane)  # what the sender leaves when it sees the lock held
+            else:
+                self.steer()
+            return real(manifest, lane, text, timeout, session)
+        with patch.object(hermes_turn, 'run_turn', side_effect=run_turn):
+            self.assertEqual(self.turn(), 0)
+        self.assertEqual(len(attempts), 2)
+        self.assertIn('--re during1', attempts[1])
+        self.assertEqual([r['ok'] for r in hermes.receipts(self.lane)[0]], [False, True])
+
+    def test_only_the_resumed_sessions_own_missing_report_is_retried(self):
+        hermes.remember_session(self.lane, 'live-2')
+        self.steer(GONE='live-2', GONE_OTHER='1')  # the error names some other session
+        self.assertEqual(self.turn(), 1)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertEqual(hermes.session_id(self.lane), 'live-2')
 
     def test_a_binary_missing_from_the_turn_path_is_refused_and_a_failed_launch_is_receipted(self):
         with patch.object(hermes, 'turn_path', return_value=str(self.root/'empty')), \
@@ -453,6 +498,10 @@ class WakeTests(HermesCase):
             wake.notify(self.manifest, [dict(json.loads(row('o2', to='all', kind='ruling')), owner='ops')])
             self.assertEqual(woken, ['ops', 'ops', 'ops'])  # a broadcast it owns
             wake.wake_path(self.manifest, 'ops').unlink()
+            referenced = dict(json.loads(row('o3', to='x', kind='answer')), owner='ops', re='o1')
+            wake.notify(self.manifest, [referenced])  # the scan ignores it, so the wake must too
+            self.assertEqual(woken, ['ops', 'ops', 'ops'])
+            self.assertFalse(wake.wake_path(self.manifest, 'ops').exists())
             wake.notify(self.manifest, [json.loads(row('self1', to='operators', frm='ops'))])
         self.assertEqual(woken, ['ops', 'ops', 'ops'])  # its own post to its role wakes nobody
 

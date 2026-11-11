@@ -53,7 +53,7 @@ row posted just as a turn ends is not missed. The runner:
    is released. The first turn starts a new
    session, which the runner titles with the lane name; later turns resume the
    session id the last turn reported. A session Hermes reports as not found,
-   before any provider call, is replaced once. No other failure is retried: the
+   by its own id and with no provider call on record, is replaced once. No other failure is retried: the
    turn may already have done work.
 4. Appends a receipt (result, session, model, token counts).
 5. Looks at the cursor again. If addressed rows arrived during the turn it runs
@@ -61,6 +61,9 @@ row posted just as a turn ends is not missed. The runner:
    Hermes turn cannot be held open the way a Claude Stop hook holds one.
 
 A failed or timed-out turn ends the wake. The row stays in the lane's bus inbox.
+If another row arrived while the failed turn ran, the runner comes back once
+after the wake debounce and tries again, so that row is not left waiting for
+unrelated traffic.
 A wake that finds nothing unread (the same row delivered twice) starts no turn
 and writes a receipt saying so.
 

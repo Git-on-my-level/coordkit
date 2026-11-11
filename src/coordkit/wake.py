@@ -168,6 +168,7 @@ def notify(manifest, rows):
     # An owned row can be addressed to anyone, `all` included; its on-demand owner still needs a turn.
     owners = [row['owner'] for row in rows if row.get('owner') and row.get('kind') != 'fyi'
               and not row.get('digest_only') and row.get('frm') != row['owner']
+              and not (row.get('kind') in ('reply', 'answer', 'ack') and row.get('re'))
               and on_demand(manifest, row['owner']) is not None]
     for name in dict.fromkeys([*(name for row in actionable for name in recipients(row)), *owners]):
         if name in names and not retired(manifest, name) and on_demand(manifest, name) is not None:

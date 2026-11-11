@@ -23,7 +23,7 @@ MAX_ROUNDS = 3
 ENV_ALLOW = ('HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR',
              'XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME')
 MAX_LINES = 20
-MAX_BATCHES = 64  # of deliver.MAX_READ each: the most unread log one scan walks
+MAX_BATCHES = 64  # of deliver.MAX_READ each, per scan call; a scan that stops short says so
 MAX_RECORD = 1024 * 1024
 KILL_GRACE = 10
 
@@ -63,12 +63,15 @@ def pending(manifest, name):
     """Rows for the lane after the shared delivery cursor, and the offset that consumes them.
 
     One read covers a bounded batch. A full batch with nothing for the lane says nothing
-    about what follows it, so the scan moves the cursor past it and reads on to the end.
+    about what follows it, so the scan moves the cursor past it and reads on. The last
+    value is False when the scan stopped at its batch cap before the end of the log:
+    "no lines" then means "not found yet", never "nothing unread".
     """
     from .. import deliver
     from ..bus import aliases
     targets = deliver.targets_for(manifest, name)
     book = aliases(manifest)
+    complete = False
     for _ in range(MAX_BATCHES):
         identity, start, data = deliver.unread_batch(manifest, name)
         lines, offset = [], start
@@ -79,9 +82,11 @@ def pending(manifest, name):
                 lines.append(deliver.row_line(row, name))
             offset += size
         if lines or len(data) < deliver.MAX_READ or offset == start:
+            # Reaching the end, or a single row larger than a batch, ends the scan for good.
+            complete = bool(lines) or len(data) < deliver.MAX_READ or offset == start
             break
         advance(manifest, name, identity, offset)
-    return identity, offset, lines
+    return identity, offset, lines, complete
 
 
 def advance(manifest, name, identity, offset):
@@ -268,14 +273,18 @@ def main(argv=None):
     from .. import deliver
     from ..state import read_json
     attached = read_json(deliver.cursor_path(manifest, lane.name)) is not None
-    rounds = 0
+    rounds, failure, retried = 0, 0, False
     while True:
+        failure = 0
         with hermes.turn_lock(lane) as held:
             if held is None:
                 return 0  # another runner owns this lane's turns and will see the new rows
             while rounds < MAX_ROUNDS:
                 hermes.take_request(lane)
-                identity, offset, lines = pending(manifest, lane.name)
+                identity, offset, lines, complete = pending(manifest, lane.name)
+                if not lines and not complete:
+                    advance(manifest, lane.name, identity, offset)
+                    continue  # the cursor moved; keep scanning toward the end of the log
                 if rounds and not lines:
                     break
                 if not lines and attached:
@@ -295,9 +304,11 @@ def main(argv=None):
                 known = hermes.session_id(lane)
                 code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout, known)
                 if (known and code and not timed_out and not usage['api_calls']
-                        and 'session not found' in str(record.get('error', '')).lower()):
-                    # Hermes says the session is gone and made no provider call, so nothing
-                    # ran. Any other failure may have done work and is never repeated here.
+                        and 'session not found' in str(record.get('error', '')).lower()
+                        and known in str(record.get('error', ''))):
+                    # Hermes names the very session this run tried to resume as gone, and no
+                    # provider call is on record: the resume never started. Any other failure
+                    # may have done work and is never repeated here.
                     print(f'HERMES_TURN lane={lane.name} session {known} did not resume (exit {code}); starting a new one',
                           file=sys.stderr, flush=True)
                     hermes.remember_session(lane, '')
@@ -318,11 +329,22 @@ def main(argv=None):
                 print(f'HERMES_TURN lane={lane.name} round={round_number} rows={len(lines)} '
                       f'ok={ok} exit={code} {error}'.rstrip(), file=sys.stderr, flush=True)
                 if not ok:
-                    return 1 if round_number else (code or 1)
+                    failure = 1 if round_number else (code or 1)
+                    break
         # A sender that saw the lock held just before it was released has left a request
         # and started nothing. It is checked only after the release, so none is missed.
         if rounds >= MAX_ROUNDS or not hermes.turn_requested(lane):
-            return 0
+            return failure
+        if failure:
+            # A row arrived during the turn that failed. Its sender started nothing, and the
+            # failure debounce keeps later senders from waking the lane, so this runner comes
+            # back once after that window instead of leaving the row to chance.
+            if retried:
+                return failure
+            retried = True
+            time.sleep(manifest.bus.wake_debounce_minutes * 60)
+            if not hermes.turn_requested(lane):
+                return failure  # another runner has taken it since
 
 
 if __name__ == '__main__':
