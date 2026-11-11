@@ -20,7 +20,8 @@ SINKS = []  # In-process extension seam.
 
 def available(manifest):
     from .builtin import Agentctl, Anx, ClaudeCode, ReportOnly
-    found = [ClaudeCode(), ReportOnly('codex', '.codex/config.toml'), ReportOnly('hermes-acp', '.hermes'),
+    from .hermes import Hermes
+    found = [ClaudeCode(), Hermes(manifest), ReportOnly('codex', '.codex/config.toml'),
              ReportOnly('opencode', '.local/share/opencode')]
     if shutil.which(os.environ.get('AGENTCTL', 'agentctl')):
         found.append(Agentctl())

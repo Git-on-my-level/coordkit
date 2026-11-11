@@ -725,7 +725,9 @@ def agent_rows(manifest, rows, args, at):
         from . import routing, usage
         identity = routing.roster_identity(manifest, name)
         lane = next((lane for lane in manifest.lanes if lane.name == name), None)
-        if lane and usage.lane_harness(lane) == 'opencode':
+        if lane and usage.lane_harness(lane) == 'hermes':
+            model, model_at = usage.hermes_observed_model(lane)
+        elif lane and usage.lane_harness(lane) == 'opencode':
             # A roster transcript path is Claude-shaped; the lane harness decides
             # which store to read. Unpinned OpenCode lanes share their store and
             # cwd, so apply the same ambiguity rule as Claude.
@@ -749,7 +751,7 @@ def agent_rows(manifest, rows, args, at):
                                pid=routing.identity_pid(identity), identity_refreshed_at=identity.get('refreshed_at'),
                                model=clip(model, 200) or None, model_observed_at=utc(model_at) if model_at else None,
                                model_launch=clip(lane.model, 200) if lane else None,
-                               model_drift=not usage.model_matches(lane.model, model) if lane and model else None)
+                               model_drift=(not usage.follows_profile(lane) and not usage.model_matches(lane.model, model)) if lane and model else None)
         identity_fields['account_windows'] = account_windows(capacity, identity_fields['account'])
         state_text, cut = body_view(last_state.get('text') if last_state else '')
         sites = sources.get(name, set()) | ({manifest.relay.site} if manifest.relay and name not in remote else set())
