@@ -239,6 +239,12 @@ class TurnTests(HermesCase):
         self.assertEqual(hermes.session_id(self.lane), 'sess-1')
         self.assertEqual(len(hermes.receipts(self.lane)[0]), 1)
 
+    def test_the_phrase_alone_in_a_crashed_turns_output_is_not_a_missing_session(self):
+        self.assertEqual(hermes_turn.missing_session_line(b'tool said: session not found: other-9\n', 'live-1'), '')
+        self.assertEqual(hermes_turn.missing_session_line(b'x\nSession not found: live-1\n', 'live-1'),
+                         'Session not found: live-1')
+        self.assertEqual(hermes_turn.missing_session_line(b'Session not found: live-1\n', ''), '')
+
     def test_a_resumed_turn_that_dies_is_never_repeated(self):
         """Contract: only a session Hermes reports missing is replaced; a crash may have done work."""
         hermes.remember_session(self.lane, 'live-1')

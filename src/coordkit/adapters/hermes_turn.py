@@ -165,19 +165,26 @@ def turn_env(manifest, lane):
     return env
 
 
-def missing_session_line(text):
-    """`Session not found: <id>` from a pruned resume, or ''."""
+def missing_session_line(text, session):
+    """`Session not found: <id>` for the session this run tried to resume, or ''.
+
+    The id must be on the line: a crashed turn whose output merely contains the
+    phrase did work and must not be mistaken for a resume that never started.
+    """
+    if not session:
+        return ''
     if isinstance(text, bytes):
-        text = text[:MAX_RECORD].decode(errors='replace')
+        text = text[-MAX_RECORD:].decode(errors='replace')
     for line in str(text or '').splitlines():
         cleaned = line.strip()
-        if 'session not found' in cleaned.lower():
-            return cleaned
+        if 'session not found' in cleaned.lower() and session in cleaned:
+            return cleaned[:300]
     return ''
 
 
 def run_turn(manifest, lane, text, timeout, session=''):
     """(exit code, terminal record, usage report fields). The child gets its own group so a timeout can end it."""
+    resumed = session
     with tempfile.TemporaryDirectory(prefix='coordkit-hermes-') as scratch:
         usage_file = Path(scratch)/'usage.json'
         env = turn_env(manifest, lane)
@@ -216,7 +223,9 @@ def run_turn(manifest, lane, text, timeout, session=''):
             stream.seek(max(0, os.fstat(stream.fileno()).st_size - MAX_RECORD))
             out = stream.read()
         try:
-            err = err_file.read_bytes()
+            with err_file.open('rb') as stream:
+                stream.seek(max(0, os.fstat(stream.fileno()).st_size - MAX_RECORD))
+                err = stream.read()
         except OSError:
             err = b''
         if err:
@@ -234,7 +243,7 @@ def run_turn(manifest, lane, text, timeout, session=''):
         usage, model, provider, session = read_usage(usage_file, record)
         if not record:
             # A pruned resume exits before any result row and prints this on stderr.
-            note = missing_session_line(err) or missing_session_line(out)
+            note = missing_session_line(err, resumed) or missing_session_line(out, resumed)
             if note:
                 record = {'type': 'result', 'status': 'failed', 'error': note}
     return proc.returncode, timed_out, record, usage, model, provider, session
