@@ -131,21 +131,52 @@ class StopGuardTests(DeliveryCase):
         self.assertIsNone(self.decision())
         self.assertEqual(read_json(self.counter())['blocks'], 2)
 
-    def test_agentctl_scope_and_age_never_use_ambient_parent_or_labels(self):
+    def test_agentctl_scope_never_uses_ambient_parent_or_labels(self):
         self.work(self.execution())
         with patch.dict(os.environ, AGENTCTL_EXECUTION_ID='inherited-parent', CODEX_THREAD_ID='other-session'):
             self.assertIsNotNone(self.decision())
         argv = self.inventory.call_args.args[0]
         self.assertEqual(argv[-4:], ['--provider', 'claude', '--native-session-id', 's1'])
         self.assertNotIn('--label', argv)
-        self.counter().unlink()
-        item = self.execution()
-        item['created_at'] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
-        self.work(item)
-        self.assertIsNone(self.decision())
         self.inventory.reset_mock()
         self.assertIsNone(stop_agentctl.block_reason(None))
         self.inventory.assert_not_called()
+
+    def test_retained_old_terminal_and_nonterminal_children_stay_blocking(self):
+        # A complete authoritative query retains actionable current-session
+        # work across days; local age must never waive collection or waiting.
+        for state in sorted(stop_agentctl.TERMINAL | stop_agentctl.NONTERMINAL):
+            with self.subTest(state=state):
+                self.counter().unlink(missing_ok=True)
+                item = self.execution(state)
+                item['created_at'] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
+                self.work(item)
+                verb = 'result' if state in stop_agentctl.TERMINAL else 'await'
+                decision = self.decision()
+                self.assertIsNotNone(decision)
+                self.assertIn(f'agentctl {verb} {item["id"]} --content', decision['reason'])
+
+    def test_future_and_recent_children_use_authoritative_membership(self):
+        # Clock skew cannot hide a returned child. A recent timestamp is the
+        # control for the same terminal/nonterminal query records.
+        for minutes in (-1, 60):
+            for state in ('completed', 'running'):
+                with self.subTest(minutes=minutes, state=state):
+                    self.counter().unlink(missing_ok=True)
+                    item = self.execution(state)
+                    item['created_at'] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=minutes)).isoformat()
+                    self.work(item)
+                    decision = self.decision()
+                    self.assertIsNotNone(decision)
+                    self.assertIn(item['id'], decision['reason'])
+
+    def test_malformed_child_records_fail_open_without_partial_enforcement(self):
+        for item in (None, {}, dict(self.execution(), created_at='not-a-timestamp'),
+                     dict(self.execution(), created_at=None), dict(self.execution(), created_at=42),
+                     {key: value for key, value in self.execution().items() if key != 'created_at'}):
+            with self.subTest(item=item):
+                self.work(self.execution(), item)
+                self.assertIsNone(self.decision())
 
     def test_incomplete_wrong_scope_schema_and_summary_fail_open(self):
         self.work(self.execution())

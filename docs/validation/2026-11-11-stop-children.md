@@ -1,10 +1,11 @@
 # Historical prerelease Stop children query validation
 
 This record predates the source preparation that removed the speculative PS
-fallback. It is not acceptance evidence for the current prepared source against
-an official installed agentctl. The parent must repeat the 20 read-only runs and
-fresh full-hook probes after that dependency is installed; those gates remain
-outstanding. The original measurements below are retained as dated evidence.
+fallback and local creation-time cutoff. It is not acceptance evidence for the
+current prepared source against an official installed agentctl. The parent must
+repeat the 20 read-only runs and fresh full-hook probes after that dependency is
+installed; those gates remain outstanding. The original measurements below are
+retained as dated evidence.
 
 Measured at 2026-11-11T05:00:01.996606+00:00 using agentctl PR #147 commit
 `85c10f686667ad70ecd83c8ea0f498ebd871e935`, built in its own detached worktree

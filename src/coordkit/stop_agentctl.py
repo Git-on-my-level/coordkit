@@ -1,5 +1,4 @@
 """Read-only, best-effort collection guard for caller-attributed child work."""
-import datetime as dt
 import json
 import os
 from pathlib import Path
@@ -83,8 +82,6 @@ def block_reason(session, cache_path=None):
             raise process.ToolError('agentctl', 6, 'collection guard deadline', 'tool_timeout')
         return budget
     try:
-        now = dt.datetime.now(dt.timezone.utc)
-        since = now - dt.timedelta(hours=24)
         executable = os.environ.get('AGENTCTL', 'agentctl')
         command = shlex.quote(executable)
         if not children_supported(executable, cache_path, remaining()):
@@ -100,9 +97,11 @@ def block_reason(session, cache_path=None):
             raise ValueError('incomplete or incompatible children response')
         items = {}
         for item in page['executions']:
-            if (not EXECUTION.fullmatch(item['id'])
-                    or not since <= process.parse_ts(item['created_at']) <= now):
+            if not EXECUTION.fullmatch(item['id']):
                 continue
+            # Validate the record, but leave retention and membership to children.
+            # Local age or clock skew cannot waive returned actionable work.
+            process.parse_ts(item['created_at'])
             state, reason = item['state'], item['reason']
             if ((state in TERMINAL and reason == 'terminal_uncollected')
                     or (state in NONTERMINAL and reason == 'running_without_known_waiter')):

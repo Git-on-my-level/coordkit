@@ -32,7 +32,8 @@ Managed launch attribution is automatic. Unmanaged Claude callers must provide
 their actual session via invocation-scoped `AGENTCTL_CALLER_PROVIDER=claude` and
 `AGENTCTL_CALLER_NATIVE_SESSION_ID`. Raw declarations are stripped before child
 launch. Hashing is owned by agentctl's identity contract. The label-hash fallback
-has been removed entirely; old/unattributed launches remain outside coverage.
+has been removed entirely; launches without caller attribution remain outside
+coverage.
 
 A successful v1 query has `complete: true`, scope, count and at most 200
 executions. Rows identify `terminal_uncollected` or
@@ -45,8 +46,11 @@ the five-second Stop deadline and the existing shared block budget.
 
 ## Remaining limits
 
-- Legacy rows are not backfilled. Attribution is correlation evidence, not
-  authentication. A managed caller with conflicting inherited markers can stay
+- Missing legacy attribution is not backfilled. Retained attributable children
+  returned by the query remain actionable regardless of creation age or local
+  clock skew; coordkit validates timestamps without imposing a time window.
+  Attribution is correlation evidence, not authentication. A managed caller with
+  conflicting inherited markers can stay
   unknown; an unmanaged caller must make the correct per-invocation assertion.
 - Agentctl alone proves journal-scoped exact waiters and supported durable
   terminal subscriptions. Coordkit does not second-guess that decision with
@@ -55,11 +59,12 @@ the five-second Stop deadline and the existing shared block budget.
   Waiter coverage does not itself prove eventual result consumption.
 - Remote forwarding rows can remain stale until observed or collected, and a
   lost receipt needs identical-key recovery before a local row becomes visible.
-- Only the last 24 hours by execution creation time are considered by coordkit.
-  An oversized/incomplete query or journal contention fails open. Wrapper target
+- An oversized/incomplete query or journal contention fails open. Wrapper target
   changes without metadata changes can retain a capability answer until expiry.
 
 The dated [prerelease validation record](docs/validation/2026-11-11-stop-children.md)
 is historical evidence only. The parent will use the
 [measurement script](scripts/measure-stop-children.py) and final full-hook probes
 after the official dependency is installed; those gates are still outstanding.
+The [retained-children source validation](docs/validation/2026-11-11-stop-retained-children.md)
+records the local age-cutoff correction and stubbed regression coverage.

@@ -59,12 +59,14 @@ An existing `[[lanes]]` entry can set `stop_requires_waiter = false` to opt out
 for that lane only. An absent lane value inherits `[deliver] stop_requires_waiter`.
 These settings affect only the bus waiter requirement; unread work still blocks.
 
-Stop also checks agentctl child executions created in the last 24 hours using
+Stop also checks retained actionable agentctl child executions using
 `agentctl children --provider claude --native-session-id SESSION`. The session
 comes from the Stop payload, so an inherited managed parent or another harness
 cannot select this lane's child set. Agentctl owns the immutable launch-time
 `caller_identity` and indexed query; no labels, cwd inference, journal scans or
-result reads are used by the hook.
+result reads are used by the hook. All children returned by a complete query
+remain eligible regardless of creation age or local clock skew; coordkit validates
+timestamps without imposing its own time window.
 
 Terminal `terminal_uncollected` work blocks until collected with
 `agentctl result <id> --content`. Returned nonterminal
@@ -87,8 +89,8 @@ version. See [the release gate and coverage limits](../AGENTCTL_GAP.md).
 Managed launches record their caller automatically. Unmanaged Claude launches
 must declare the actual current session on each launch using agentctl's
 `AGENTCTL_CALLER_PROVIDER=claude` and `AGENTCTL_CALLER_NATIVE_SESSION_ID` contract.
-These declarations are stripped before child launch. Old or unattributed rows
-are not backfilled or guessed.
+These declarations are stripped before child launch. Missing legacy attribution
+is not backfilled or guessed; retained attributable children have no local age cutoff.
 
 A journal-free `agentctl help children` probe takes at most 150 ms. Its supported
 or unsupported answer is cached at `state/hooks/agentctl-children.json` under the
