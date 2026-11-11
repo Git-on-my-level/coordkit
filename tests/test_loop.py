@@ -211,6 +211,17 @@ class LoopTests(FakeCase):
         self.assertIn('CYCLE_RECEIPT_FAILED audit',err)
         self.assertEqual((self.state/'fails').read_text().strip(),'0')
 
+    def test_deadline_after_finalization_is_still_cycle_ok(self):
+        def late_deadline(*args, **kwargs):
+            raise loop.CycleDeadline('loop max_age exceeded')
+        # Raised outside the receipt guard (e.g. SIGALRM just after finalization): still a completed cycle.
+        with patch.object(loop, '_receipt', side_effect=late_deadline):
+            code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        self.assertIn('deadline after finalization',out)
+        self.assertEqual((self.state/'fails').read_text().strip(),'0')
+        self.assertFalse((self.state/'pending.json').exists())
+
     def test_lock_held_skip_records_no_receipt(self):
         import fcntl
         self.state.mkdir(parents=True)
