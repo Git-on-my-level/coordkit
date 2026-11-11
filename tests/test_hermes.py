@@ -380,8 +380,11 @@ class WakeTests(HermesCase):
             wake.notify(self.manifest, [owned])
             self.assertEqual(woken, ['ops', 'ops'])
             wake.wake_path(self.manifest, 'ops').unlink()
+            wake.notify(self.manifest, [dict(json.loads(row('o2', to='all', kind='ruling')), owner='ops')])
+            self.assertEqual(woken, ['ops', 'ops', 'ops'])  # a broadcast it owns
+            wake.wake_path(self.manifest, 'ops').unlink()
             wake.notify(self.manifest, [json.loads(row('self1', to='operators', frm='ops'))])
-        self.assertEqual(woken, ['ops', 'ops'])  # its own post to its role wakes nobody
+        self.assertEqual(woken, ['ops', 'ops', 'ops'])  # its own post to its role wakes nobody
 
     def test_a_runner_that_vanished_without_a_receipt_reads_as_unreachable(self):
         record = {'at': time.time() - 5, 'lane': 'ops', 'key': 'k', 'status': 'woken', 'attempts': []}
@@ -415,6 +418,11 @@ class UsageAndDeliveryTests(HermesCase):
         self.assertEqual((result.turns, result.input_tokens, result.output_tokens, result.cache_read_input_tokens),
                          (4, 20, 4, 8))
         self.assertEqual((result.models, result.invalid_rows), (['vendor-model'], 1))
+        self.assertEqual(result.missing_usage, 0)
+        hermes.append_receipt(self.lane, {'at': now - 9, 'ended_at': now - 8, 'ok': True,  # Hermes wrote no report
+                                          'usage': {'api_calls': None}})
+        unknown = usage.read_lane(self.lane, at - dt.timedelta(hours=1), at)
+        self.assertEqual((unknown.turns, unknown.missing_usage), (5, 1))
         self.assertEqual(usage.hermes_observed_model(self.lane)[0], 'vendor-model')
         self.assertEqual(usage.doctor_warnings(self.manifest), [])
         hermes.append_receipt(self.lane, {'at': now - 5, 'ended_at': now - 1, 'ok': True, 'model': 'surprise', 'usage': {}})

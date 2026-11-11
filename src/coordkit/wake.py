@@ -165,7 +165,11 @@ def notify(manifest, rows):
             extra.append(row['owner'])
         return [row['to'], *[m for m in extra if m != row.get('frm')]]
 
-    for name in dict.fromkeys(name for row in actionable for name in recipients(row)):
+    # An owned row can be addressed to anyone, `all` included; its on-demand owner still needs a turn.
+    owners = [row['owner'] for row in rows if row.get('owner') and row.get('kind') != 'fyi'
+              and not row.get('digest_only') and row.get('frm') != row['owner']
+              and on_demand(manifest, row['owner']) is not None]
+    for name in dict.fromkeys([*(name for row in actionable for name in recipients(row)), *owners]):
         if name in names and not retired(manifest, name) and on_demand(manifest, name) is not None:
             # Ask before looking: a runner about to release its lock still finds the request.
             on_demand(manifest, name).request_turn(on_demand(manifest, name).lane_for(manifest, name))

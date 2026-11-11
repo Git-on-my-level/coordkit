@@ -33,11 +33,13 @@ def binary():
 def turn_path(manifest):
     """The PATH a turn runs with. Discovery uses it too, so a wake never accepts a binary the turn cannot find."""
     parts = getattr(getattr(manifest, 'launchd', None), 'path', None)
-    return os.pathsep.join(str(Path(part).expanduser()) for part in parts) if parts else os.environ.get('PATH', '')
+    return os.pathsep.join(str(Path(part).expanduser()) for part in parts) if parts else os.environ.get('PATH', os.defpath)
 
 
 def binary_path(manifest):
-    return shutil.which(binary(), path=turn_path(manifest))
+    """Absolute, because the turn starts in the lane's directory, not the sender's."""
+    found = shutil.which(binary(), path=turn_path(manifest))
+    return os.path.abspath(found) if found else None
 
 
 def lane_for(manifest, name):

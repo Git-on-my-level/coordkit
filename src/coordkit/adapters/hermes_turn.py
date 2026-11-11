@@ -139,7 +139,9 @@ def read_usage(usage_file, record):
     usage = {'input_tokens': count('input_tokens'), 'output_tokens': count('output_tokens'),
              'cache_read_input_tokens': count('cache_read_tokens'),
              'cache_creation_input_tokens': count('cache_write_tokens'),
-             'reasoning_tokens': count('reasoning_tokens'), 'api_calls': count('api_calls')}
+             'reasoning_tokens': count('reasoning_tokens'),
+             # None when Hermes reported no count: unknown is not the same as no call made.
+             'api_calls': count('api_calls') if type(report.get('api_calls')) is int else None}
     def text(key):
         value = report.get(key) or record.get(key)
         return value if isinstance(value, str) else ''
