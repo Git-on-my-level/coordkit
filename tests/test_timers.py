@@ -63,8 +63,35 @@ class TimerTests(AddressedCase):
             timers.fire(self.manifest, now=now + 61 + timers.CLAIM_STALE)
         self.assertTrue((timers.directory(self.manifest)/f'{ident}.failed').exists())
         self.assertEqual(timers.fire(self.manifest, now=now + 61 + 3 * timers.CLAIM_STALE), [])
-        self.assertTrue(timers.cancel(self.manifest, ident))
-        self.assertFalse(timers.cancel(self.manifest, ident))
+        self.assertEqual(timers.cancel(self.manifest, ident), 'cancelled')
+        self.assertEqual(timers.cancel(self.manifest, ident), 'absent')
+
+    def test_an_unreadable_claim_is_set_aside_without_touching_other_timers(self):
+        now = time.time()
+        good, _ = timers.schedule(self.manifest, 'lead-a', 'fine', after='1m', now=now)
+        broken = timers.directory(self.manifest)/'0123456789ab.firing'
+        broken.write_text('{not json')
+        import os
+        os.utime(broken, (now - 2 * timers.CLAIM_STALE,) * 2)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(timers.fire(self.manifest, now=now + 61), [good])
+        self.assertEqual(broken.with_suffix('.failed').read_text(), '{not json')
+        self.assertEqual([r['id'] for r in self.rows()], ['wake-at-' + good])
+
+    def test_cancel_refuses_a_timer_whose_row_is_being_posted(self):
+        """Contract: cancel never reports success for a row that may still post."""
+        now = time.time()
+        ident, _ = timers.schedule(self.manifest, 'lead-a', 'in flight', after='1m', now=now)
+        outcomes = []
+        real = bus.append
+        def append(recs, **kwargs):
+            outcomes.append(timers.cancel(self.manifest, ident))
+            return real(recs, **kwargs)
+        with patch.object(bus, 'append', side_effect=append):
+            self.assertEqual(timers.fire(self.manifest), [])  # not due yet
+            self.assertEqual(timers.fire(self.manifest, now=time.time() + 61), [ident])
+        self.assertEqual(outcomes, ['firing'])
+        self.assertEqual([r['id'] for r in self.rows()], ['wake-at-' + ident])
 
     def test_a_shadow_reader_claims_nothing(self):
         now = time.time()

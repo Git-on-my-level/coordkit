@@ -95,13 +95,19 @@ def cancel(manifest, ident):
     if not re.fullmatch(r'[0-9a-f]{12}', ident or ''):
         raise ManifestError('invalid_timer_id')
     with _locked(manifest):
+        claim = directory(manifest)/f'{ident}.firing'
+        try:
+            if time.time() - claim.stat().st_mtime < CLAIM_STALE:
+                return 'firing'  # a scan is appending its row right now; too late to promise it will not post
+        except OSError:
+            pass
         found = False
         for suffix in ('.json', '.firing', '.failed'):  # a stuck or failed claim can be cancelled too
             path = directory(manifest)/f'{ident}{suffix}'
             if path.exists():
                 path.unlink()
                 found = True
-    return found
+    return 'cancelled' if found else 'absent'
 
 
 def stamp(value):
@@ -143,10 +149,14 @@ def fire(manifest, now=None):
     bus.configure(manifest)
     fired = []
     for path in claimed:
+        row = None  # never the previous timer's: a claim that cannot be read is set aside as it is
         try:
             row = read_json(path, None)
             if not isinstance(row, dict) or not isinstance(row.get('lane'), str) or not isinstance(row.get('id'), str):
+                row = None
                 raise ValueError('unreadable timer')
+            if not path.exists():
+                continue  # cancelled since it was claimed
             if not retired(manifest, row['lane']):
                 bus.append([dict(ts=dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(timespec='seconds'),
                                  id='wake-at-' + row['id'], origin='coordkit', frm='coordkit', to=row['lane'],
@@ -157,7 +167,7 @@ def fire(manifest, now=None):
             path.unlink(missing_ok=True)
         except Exception as exc:
             import sys
-            attempts = (row.get('attempts', 0) if isinstance(row, dict) else MAX_ATTEMPTS) + 1
+            attempts = MAX_ATTEMPTS if row is None else row.get('attempts', 0) + 1
             print(f'WAKE_TIMER_FAILED {path.stem} attempt={attempts} {type(exc).__name__}: {exc}', file=sys.stderr)
             try:
                 if attempts >= MAX_ATTEMPTS:
@@ -181,8 +191,10 @@ def main(argv, manifest):
     parser.add_argument('--cancel')
     opts = parser.parse_args(argv)
     if opts.cancel:
-        print('TIMER_CANCELLED ' + opts.cancel if cancel(manifest, opts.cancel) else 'TIMER_ABSENT ' + opts.cancel)
-        return 0
+        outcome = cancel(manifest, opts.cancel)
+        print({'cancelled': 'TIMER_CANCELLED ', 'absent': 'TIMER_ABSENT ', 'firing': 'TIMER_FIRING '}[outcome] + opts.cancel
+              + (' (its row is being posted now; not cancelled)' if outcome == 'firing' else ''))
+        return 1 if outcome == 'firing' else 0
     if opts.list:
         for _, row in sorted(pending(manifest), key=lambda item: item[1]['due']):
             if not opts.lane or row['lane'] == opts.lane:
