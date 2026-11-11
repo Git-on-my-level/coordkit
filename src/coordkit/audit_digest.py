@@ -26,6 +26,9 @@ SECRET_PATTERNS = (
 
 def scrub(text):
     """Remove overlapping matches once, before any truncation can split a secret."""
+    # An unpaired surrogate (legal in escaped JSON) cannot be encoded; replace it here, the one
+    # place every piece of transcript, state and auditor text passes through.
+    text = text.encode('utf-8', 'replace').decode('utf-8')
     spans = sorted(match.span() for pattern in SECRET_PATTERNS for match in re.finditer(pattern, text))
     merged = []
     for start, end in spans:
@@ -118,7 +121,7 @@ def sqlite_rows(path, session, prior):
             (MAX_READ, MAX_READ, session, start, MAX_MESSAGES + 1))
         rows, size, truncated = [], 0, False
         for index, (ident, role, content, tools, stamp, content_size, tool_size) in enumerate(records):
-            size += len((content or '').encode()) + len((tools or '').encode())
+            size += len((content or '').encode('utf-8', 'replace')) + len((tools or '').encode('utf-8', 'replace'))
             if index >= MAX_MESSAGES or size > MAX_READ or max(content_size or 0, tool_size or 0) > MAX_READ:
                 if not rows:
                     raise ManifestError('audit_transcript_record_too_large: newest message exceeds read bound')

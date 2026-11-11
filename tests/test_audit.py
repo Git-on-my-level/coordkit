@@ -372,6 +372,12 @@ class DigestTests(AuditCase):
         self.assertNotIn('newest item', digest)
         self.assertEqual(final['offset'], self.transcript.stat().st_size)
 
+    def test_an_unpaired_surrogate_in_the_transcript_does_not_break_the_digest(self):
+        self.messages('before \ud800 after')
+        digest, _, _ = audit_digest.build(self.lane, transcript=self.transcript)
+        self.assertIn('before ? after', digest)
+        digest.encode()
+
     def test_prior_gaps_survive_when_new_transcript_fills_the_digest(self):
         self.messages('old item', *('x' * 2000 for _ in range(60)), 'newest item')
         with patch.object(audit_digest, 'MAX_DIGEST', 64 * 1024):
