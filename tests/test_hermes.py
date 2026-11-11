@@ -114,6 +114,9 @@ class HermesCase(FakeCase):
         probe = patch.object(addressed, 'PROBE', lambda: set())
         probe.start(); self.addCleanup(probe.stop)
         self.waits = []  # a failed runner waits out the debounce; tests record the wait instead
+        idle_wait = patch.object(hermes_turn, 'IDLE_RETRY_WAIT', 0)
+        idle_wait.start()
+        self.addCleanup(idle_wait.stop)
         wait = patch.object(hermes_turn, 'failure_wait', side_effect=lambda manifest: self.waits.append(1) or 0)
         wait.start(); self.addCleanup(wait.stop)
 
@@ -408,15 +411,19 @@ class TurnTests(HermesCase):
 
     def test_only_the_resumed_sessions_own_missing_report_is_retried(self):
         hermes.remember_session(self.lane, 'live-2')
-        for behavior in (dict(GONE_OTHER='1'),        # the error names some other session
-                         dict(GONE_TOKENS=40),        # the report shows tokens: a turn did run
-                         dict(GONE_REASONING=9),      # reasoning tokens are activity too
-                         dict(GONE_NO_REPORT='1')):   # no usage report: unknown, may have done work
+        # A report showing no call and no token means nothing ran, so those rows get one more
+        # try on the same session; any sign of activity, or no report at all, is never repeated.
+        for behavior, runs in ((dict(GONE_OTHER='1'), 2),       # idle, error names some other session
+                               (dict(GONE_TOKENS=40), 1),       # the report shows tokens: a turn did run
+                               (dict(GONE_REASONING=9), 1),     # reasoning tokens are activity too
+                               (dict(GONE_NO_REPORT='1'), 1)):  # no usage report: unknown, may have done work
             self.calls.unlink(missing_ok=True)
             self.post(row('g-' + next(iter(behavior)).lower()))
             self.steer(GONE='live-2', **behavior)
             self.assertEqual(self.turn(), 1, behavior)
-            self.assertEqual(len(self.invocations()), 1, behavior)
+            calls = self.invocations()
+            self.assertEqual(len(calls), runs, behavior)
+            self.assertTrue(all('live-2' in call['argv'] for call in calls), behavior)
             self.assertEqual(hermes.session_id(self.lane), 'live-2')
 
     def test_a_request_left_during_an_empty_wake_is_served_before_the_runner_leaves(self):
