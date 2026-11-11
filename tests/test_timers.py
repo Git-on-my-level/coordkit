@@ -41,6 +41,10 @@ class TimerTests(AddressedCase):
         timers.fire(self.manifest, now=now + 602)
         self.assertTrue(self.rows()[-1]['text'].endswith(full))
         self.assertLessEqual(len(self.rows()[-1]['text']), self.manifest.bus.text_cap)
+        kept, _ = timers.schedule(self.manifest, 'lead-a', 'z' * 200, after='10m', now=now)
+        self.manifest.bus.text_cap = 50  # lowered after the timer was accepted
+        timers.fire(self.manifest, now=now + 603)
+        self.assertTrue(self.rows()[-1]['text'].endswith('z' * 200))
         self.assertEqual(timers.fire(self.manifest, now=now + 700), [])  # fired once
         self.assertEqual([r['id'] for _, r in timers.pending(self.manifest)], [later])
 

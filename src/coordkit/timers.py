@@ -167,7 +167,8 @@ def fire(manifest, now=None):
                 bus.append([dict(ts=dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(timespec='seconds'),
                                  id='wake-at-' + row['id'], origin='coordkit', frm='coordkit', to=row['lane'],
                                  topic='coordkit-timer', kind='handoff',
-                                 text=str(row.get('row_text') or row.get('text', ''))[:manifest.bus.text_cap])],
+                                 # Posted as accepted: a cap lowered since then must not cut the row short.
+                                 text=str(row.get('row_text') or row.get('text', '')))],
                            project=False)
                 fired.append(row['id'])
             path.unlink(missing_ok=True)
