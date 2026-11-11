@@ -283,9 +283,9 @@ COMMANDS = {
     'lane': 'lane', 'lane-move': 'lanemove', 'wait': 'wait', 'loop': 'loop', 'reconcile': 'reconcile', 'shadow': 'shadow',
     'obligations': 'obligations', 'review': 'review', 'question': 'questions',
     'init': 'lifecycle', 'up': 'lifecycle', 'down': 'lifecycle', 'doctor': 'lifecycle', 'lead': 'lifecycle',
-    'ops': 'ops', 'version': 'ops', 'retire': 'wake', 'unretire': 'wake', 'wake-scan': 'wake', 'hooks': 'hooks', 'update': 'selfupdate', 'mcp': 'mcp_install',
+    'ops': 'ops', 'version': 'ops', 'retire': 'wake', 'unretire': 'wake', 'wake-scan': 'wake', 'wake-at': 'timers', 'hooks': 'hooks', 'update': 'selfupdate', 'mcp': 'mcp_install',
 }
-OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down','relay','lane-move','mcp-clients') else 'read',
+OPERATIONS = BUS_OPS + MCP_OPS + tuple(Operation(name, 'write' if name in ('init','up','down','relay','lane-move','mcp-clients','wake-at') else 'read',
                                                 handler=module+(':clients_main' if name == 'mcp-clients' else ':main')) for name,module in COMMANDS.items() if name != 'bus')
 
 
@@ -337,6 +337,8 @@ CLI_ARGS = {
     'retire': (Arg('lane'), Arg('--to')),
     'unretire': (Arg('lane'),),
     'wake-scan': (Arg('--dry-run',action='store_true'),),
+    'wake-at': (Arg('lane',nargs='?'), Arg('text',nargs='?'), Arg('--at'), Arg('--in',dest='after'), Arg('--from',dest='frm'),
+                Arg('--list',action='store_true'), Arg('--cancel')),
     'relay': (Arg('action',choices=('run','status','install','uninstall')), Arg('--apply',action='store_true')),
     'hooks': (Arg('action',choices=('install','status','uninstall')), Arg('--settings'), Arg('--hermes-lane')),
     'mcp': (Arg('action',choices=('install','uninstall')),Arg('--secret-file'),Arg('--clients-file'),Arg('--port',type=int,default=8767)),

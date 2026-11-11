@@ -227,6 +227,16 @@ def scan(manifest, dry_run=False):
     from .tail import TailReader
     path = manifest.paths.bus_log.parent/'state/wakes/scan.json'
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        # Due timers become ordinary rows first, so this same scan can wake their lanes.
+        try:
+            from .timers import fire
+            fired = fire(manifest)
+            if fired:
+                print('WAKE_TIMERS fired=' + ','.join(fired))
+        except Exception as exc:
+            import sys
+            print(f'WAKE_TIMERS failed: {type(exc).__name__}: {exc}', file=sys.stderr)
     with locked(path.with_suffix('.lock')):
         reader = TailReader(manifest.paths.bus_log)
         mark = read_json(path, {})
