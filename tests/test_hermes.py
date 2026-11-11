@@ -41,7 +41,8 @@ if 'sessions' in argv:
 calls = len(log.read_text().splitlines()) if log.exists() else 0
 with log.open('a') as stream:
     stream.write(json.dumps(dict(argv=argv, cwd=os.getcwd(), as_=os.environ.get('COORDKIT_AS'),
-                                 leaked=os.environ.get('SENDER_SECRET'), accept=os.environ.get('HERMES_ACCEPT_HOOKS'))) + '\\n')
+                                 leaked=os.environ.get('SENDER_SECRET'), accept=os.environ.get('HERMES_ACCEPT_HOOKS'),
+                                 home=os.environ.get('HERMES_HOME'))) + '\\n')
 resumed = argv[argv.index('--resume') + 1] if '--resume' in argv else ''
 if resumed and resumed == cfg.get('GONE'):
     message = 'Session not found: ' + resumed
@@ -61,6 +62,12 @@ late = cfg.get('LATE_ROW')
 if late and calls == 0:
     with open(cfg['BUS'], 'a') as stream:
         stream.write(late + '\\n')
+if cfg.get('STUBBORN'):
+    import subprocess
+    child = subprocess.Popen([sys.executable, '-S', '-c',
+        'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
+    Path(cfg['STUBBORN']).write_text(str(child.pid))
+    time.sleep(30)
 if cfg.get('ORPHAN'):
     import subprocess
     subprocess.Popen([sys.executable, '-S', '-c', 'import time; time.sleep(20)'], start_new_session=True)
@@ -181,6 +188,7 @@ class TurnTests(HermesCase):
         self.assertNotIn('other', argv[-1])
         self.assertEqual((calls[0]['as_'], calls[0]['accept']), ('ops', '1'))
         self.assertIsNone(calls[0]['leaked'])  # the poster's environment stays with the poster
+        self.assertEqual(calls[0]['home'], self.lane.config_dir)  # the lane's profile, whatever the poster's HOME
         self.assertEqual(calls[0]['cwd'], self.lane.cwd)
         receipt = hermes.last_receipt(self.lane)
         self.assertTrue(receipt['ok'])
@@ -194,6 +202,7 @@ class TurnTests(HermesCase):
     def test_rows_that_arrive_during_a_turn_start_the_next_round(self):
         """Contract: a lane with no waiter must not end while addressed work is unread."""
         self.attach()
+        self.post(row('first1'))
         self.steer(LATE_ROW=row('late1'))
         self.assertEqual(self.turn(), 0)
         calls = self.invocations()
@@ -257,6 +266,7 @@ class TurnTests(HermesCase):
     def test_a_plain_message_posted_mid_turn_still_gets_a_round(self):
         """Contract: the re-check covers every row the wake path would have acted on."""
         self.attach()
+        self.post(row('first2'))
         self.steer(LATE_ROW=row('m1', kind='msg'))
         self.assertEqual(self.turn(), 0)
         calls = self.invocations()
@@ -277,9 +287,47 @@ class TurnTests(HermesCase):
         self.assertEqual(record, {})
         self.assertLess(time.monotonic() - started, 8)
 
+    def test_a_timeout_ends_every_process_in_the_turns_group(self):
+        """Contract: nothing from a timed-out turn is still running when the lane lock is released."""
+        pidfile = self.root/'stubborn.pid'
+        self.steer(STUBBORN=str(pidfile))
+        with patch.object(hermes_turn, 'KILL_GRACE', .5):
+            _, timed_out, *_ = hermes_turn.run_turn(self.manifest, self.lane, 'hello', 1.5)
+        self.assertTrue(timed_out)
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while alive and time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+                time.sleep(.05)
+            except ProcessLookupError:
+                alive = False
+        self.assertFalse(alive, 'a child that ignored SIGTERM survived the timeout')
+
+    def test_a_replayed_wake_with_nothing_unread_starts_no_turn_but_is_receipted(self):
+        """Contract: the same row arriving twice (post, then a scan replay) costs one turn."""
+        self.attach()
+        self.post(row('once1'))
+        self.assertEqual(self.turn(), 0)
+        self.assertEqual(self.turn(), 0)
+        self.assertEqual(len(self.invocations()), 1)
+        last = hermes.last_receipt(self.lane)
+        self.assertEqual((last['ok'], last['skipped'], last['usage']), (True, 'nothing unread', {'api_calls': 0}))
+        record = {'at': last['ended_at'] - 1, 'status': 'woken'}
+        self.assertTrue(hermes.settled(self.manifest, 'ops', record))
+
+    def test_role_and_owner_rows_are_unread_work_for_the_scan(self):
+        targets = {'ops', 'all', 'operators'}
+        plain = json.loads(row('p1', to='operators', kind='msg'))
+        self.assertTrue(hermes_turn.wants_turn(plain, 'ops', targets))
+        self.assertTrue(hermes_turn.wants_turn(dict(json.loads(row('p2', to='x', kind='msg')), owner='ops'), 'ops', targets))
+        self.assertFalse(hermes_turn.wants_turn(json.loads(row('p3', to='all', kind='msg')), 'ops', targets))
+
     def test_a_request_left_while_the_lock_was_held_is_served_after_release(self):
         """Contract: a row posted just after the runner's last cursor read still gets its turn."""
         self.attach()
+        self.post(row('first3'))
         seen = []
         real = hermes_turn.pending
         def pending(manifest, name):

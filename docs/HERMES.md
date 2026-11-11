@@ -46,8 +46,11 @@ row posted just as a turn ends is not missed. The runner:
    with `COORDKIT_AS=LANE` in its environment. `hermes` is found on the turn's
    own `PATH`, the same one the wake checks. The turn does not inherit the
    environment of whoever posted the row: it gets `HOME`, `USER`, `SHELL`,
-   locale, temp and XDG variables, and `PATH` (the manifest's `[launchd] path`
-   when set). Credentials come from the profile. The first turn starts a new
+   locale, temp and XDG variables, `PATH` (the manifest's `[launchd] path`
+   when set), and `HERMES_HOME` set to the lane's `config_dir`, so the lane's
+   own profile is used whatever the sender's home is. Credentials come from the
+   profile. On timeout the turn's whole process group is ended before the lock
+   is released. The first turn starts a new
    session, which the runner titles with the lane name; later turns resume the
    session id the last turn reported. A session Hermes reports as not found,
    before any provider call, is replaced once. No other failure is retried: the
@@ -58,6 +61,8 @@ row posted just as a turn ends is not missed. The runner:
    Hermes turn cannot be held open the way a Claude Stop hook holds one.
 
 A failed or timed-out turn ends the wake. The row stays in the lane's bus inbox.
+A wake that finds nothing unread (the same row delivered twice) starts no turn
+and writes a receipt saying so.
 
 ## Listening
 

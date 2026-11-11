@@ -31,19 +31,18 @@ KILL_GRACE = 10
 def wants_turn(row, name, targets, resolved=None):
     """Every row that would have woken the lane, plus what delivery shows a busy session.
 
-    `resolved` holds the row's recipients after alias resolution.
-
-    While a turn runs, the wake path treats the lane as listening and starts nothing.
-    The re-check must therefore cover the same rows the wake path would have acted on,
-    or a plain message posted mid-turn is never read.
+    While a turn runs, the wake path treats the lane as listening and starts nothing, and
+    a wake with nothing unread starts no turn. The scan must therefore cover exactly the
+    rows the wake path acts on: the lane by name or alias, a role it belongs to, or its
+    ownership. `resolved` holds the row's recipients after alias resolution.
     """
     from .. import deliver
     if deliver.addressed_row(row, name, targets):
         return True
     if resolved is None:
         resolved = {row.get('to')}
-    to_lane = name in resolved  # the wake path resolves aliases before it compares
-    return (to_lane and row.get('frm') != name and row.get('kind') != 'fyi'
+    mine = bool(resolved & (targets - {'all'})) or row.get('owner') == name
+    return (mine and row.get('frm') != name and row.get('kind') != 'fyi'
             and not row.get('digest_only')
             and not (row.get('kind') in ('reply', 'answer', 'ack') and row.get('re'))
             and all(isinstance(row.get(key), str) for key in ('id', 'frm', 'kind')))
@@ -161,7 +160,9 @@ def title_session(manifest, lane, session):
 def turn_env(manifest, lane):
     env = {key: os.environ[key] for key in ENV_ALLOW if key in os.environ}
     env['PATH'] = hermes.turn_path(manifest)
-    env.update(COORDKIT_AS=lane.name, HERMES_ACCEPT_HOOKS='1')
+    # The lane names its profile home; the sender's HOME must not pick a different profile of that name.
+    env.update(COORDKIT_AS=lane.name, HERMES_ACCEPT_HOOKS='1',
+               HERMES_HOME=str(Path(lane.config_dir).expanduser()))
     return env
 
 
@@ -209,6 +210,8 @@ def run_turn(manifest, lane, text, timeout, session=''):
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
+            # The whole group, both signals: the leader exiting on TERM says nothing about a
+            # child that ignores it, and the lane lock is released as soon as this returns.
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
                     os.killpg(proc.pid, sig)
@@ -216,9 +219,8 @@ def run_turn(manifest, lane, text, timeout, session=''):
                     pass
                 try:
                     proc.wait(timeout=KILL_GRACE)
-                    break
                 except subprocess.TimeoutExpired:
-                    continue
+                    pass
         with out_file.open('rb') as stream:
             stream.seek(max(0, os.fstat(stream.fileno()).st_size - MAX_RECORD))
             out = stream.read()
@@ -263,6 +265,9 @@ def main(argv=None):
         print(f'HERMES_TURN no hermes lane named {opts.lane}', file=sys.stderr)
         return 2
     timeout = duration(lane.turn_timeout or hermes.DEFAULT_TURN_TIMEOUT)
+    from .. import deliver
+    from ..state import read_json
+    attached = read_json(deliver.cursor_path(manifest, lane.name)) is not None
     rounds = 0
     while True:
         with hermes.turn_lock(lane) as held:
@@ -273,6 +278,16 @@ def main(argv=None):
                 identity, offset, lines = pending(manifest, lane.name)
                 if rounds and not lines:
                     break
+                if not lines and attached:
+                    # A replayed wake: its rows were already handed over. No turn, but a
+                    # receipt, so the wake reads as served rather than as a vanished runner.
+                    now = time.time()
+                    hermes.append_receipt(lane, {'at': now, 'ended_at': now, 'lane': lane.name, 'profile': lane.profile,
+                                                 'key': opts.key, 'round': 0, 'rows': 0, 'exit': 0, 'ok': True,
+                                                 'skipped': 'nothing unread', 'error': '', 'session_id': '',
+                                                 'model': '', 'provider': '', 'usage': {'api_calls': 0}})
+                    print(f'HERMES_TURN lane={lane.name} nothing unread; no turn', file=sys.stderr, flush=True)
+                    return 0
                 round_number, rounds = rounds, rounds + 1
                 advance(manifest, lane.name, identity, offset)
                 started = time.time()

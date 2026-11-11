@@ -241,8 +241,9 @@ def manage_hook(manifest, name, action):
     receipt = manifest.paths.root/f'hook-hermes-{lane_key(lane)}.json'
     if action != 'status':
         manifest.writable()
-    # One writer at a time, and the bytes replaced are the bytes that were read.
-    with locked(receipt.with_suffix('.lock')):
+    # Keyed by the profile's config file, so two manifests sharing a profile take the same lock.
+    shared = hashlib.sha256(str(config.resolve()).encode()).hexdigest()[:32]
+    with locked(state_dir()/f'{shared}.config.lock'):
         existed = config.exists()
         text = config.read_text() if existed else ''
         mode = config.stat().st_mode & 0o777 if existed else 0o600
@@ -276,8 +277,9 @@ def manage_hook(manifest, name, action):
         if action == 'uninstall' and record.get('created') and not rest.strip():
             config.unlink(missing_ok=True)  # coordkit created it for the hook alone
         else:
-            temporary = config.with_name(config.name + '.coordkit.tmp')
-            fd = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            import uuid
+            temporary = config.with_name(f'{config.name}.{uuid.uuid4().hex}.coordkit.tmp')
+            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd, 'w') as stream:
                 stream.write(rest)
                 stream.flush()
