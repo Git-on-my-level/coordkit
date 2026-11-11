@@ -20,7 +20,8 @@ MAX_READ = 256 * 1024
 MAX_TRANSCRIPT_READ = 64 * 1024
 HERMES_EVENT = 'pre_llm_call'  # Hermes shell hook, once at turn start: its {"context": ...} answer joins the user message
 EVENTS = ('PostToolUse', 'UserPromptSubmit', HERMES_EVENT)
-HOOK_EVENTS = ('PostToolUse', 'UserPromptSubmit', 'Stop')  # the Claude settings entries coordkit installs
+HOOK_EVENTS = ('PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionStart')
+HOOK_FLAGS = {'Stop': '--stop-hook', 'SessionStart': '--session-start-hook'}
 from .hook_runtime import HOOK_TIMEOUT, hook_deadline
 
 
@@ -268,7 +269,14 @@ def receipt_path(manifest, target):
 def command(manifest, event=None):
     return shlex.join([*env_args(), 'COORDKIT_HOOK_OWNER=coordkit-delivery',
                        manifest.launchd.python, '-m', 'coordkit.cli', '--manifest', str(manifest.file),
-                       'deliver', '--stop-hook' if event == 'Stop' else '--hook'])
+                       'deliver', HOOK_FLAGS.get(event, '--hook')])
+
+
+def hook_spec(manifest, event):
+    hook = {'type': 'command', 'command': command(manifest, event)}
+    if event == 'SessionStart':
+        hook['timeout'] = HOOK_TIMEOUT
+    return hook
 
 
 def install(manifest, target):
@@ -294,12 +302,12 @@ def install(manifest, target):
         after = json.loads(json.dumps(before))
         for groups in after.get('hooks', {}).values():
             for group in groups:
-                if any(any(f' deliver {flag}' in h.get('command', '') for flag in ('--hook', '--stop-hook'))
+                if any(any(f' deliver {flag}' in h.get('command', '') for flag in ('--hook', *HOOK_FLAGS.values()))
                        for h in group.get('hooks', [])):
                     raise ManifestError('delivery_hooks_present: inspect before installing again')
         for event in HOOK_EVENTS:
             after.setdefault('hooks', {}).setdefault(event, []).append(
-                {'hooks': [{'type': 'command', 'command': command(manifest, event)}]})
+                {'hooks': [hook_spec(manifest, event)]})
         return after
     def prepare(before, after):
         nonlocal expected_receipt
@@ -342,14 +350,18 @@ def main(argv, manifest):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--hook', action='store_true')
     mode.add_argument('--stop-hook', action='store_true')
+    mode.add_argument('--session-start-hook', action='store_true')
     parser.add_argument('--settings')
     opts = parser.parse_args(argv)
+    if opts.session_start_hook and not opts.action:
+        from .session_start import run
+        return run(manifest)
     if opts.stop_hook and not opts.action:
         return run_stop_hook(manifest)
     if opts.hook and not opts.action:
         return run_hook(manifest)
-    if not opts.action or not opts.settings or opts.hook or opts.stop_hook:
-        parser.error('use --hook/--stop-hook, or install/uninstall --settings PATH')
+    if not opts.action or not opts.settings or opts.hook or opts.stop_hook or opts.session_start_hook:
+        parser.error('use a hook mode, or install/uninstall --settings PATH')
     (install if opts.action == 'install' else uninstall)(manifest, opts.settings)
     return 0
 
@@ -358,7 +370,8 @@ def bootstrap(argv):
     """Fail open even before loading a missing/invalid manifest, without loading lifecycle."""
     try:
         errors = io.StringIO()
-        with contextlib.redirect_stderr(errors), (hook_deadline(HOOK_TIMEOUT) if '--stop-hook' in argv else contextlib.nullcontext()):
+        with contextlib.redirect_stderr(errors), (hook_deadline(HOOK_TIMEOUT) if any(
+                flag in argv for flag in HOOK_FLAGS.values()) else contextlib.nullcontext()):
             from .adapters.claude_hook import load
             parser = argparse.ArgumentParser()
             parser.add_argument('--manifest')

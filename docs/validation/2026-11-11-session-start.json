@@ -1,0 +1,36 @@
+{
+  "measured_at": "2026-11-11T14:32:53.279199+00:00",
+  "binary_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "hook_python_version": "3.11.15",
+  "cases": [
+    {
+      "capability_session_start": true,
+      "bridge_session_start": true,
+      "unrelated_hook_preserved": true,
+      "distinct_per_hook_env_handles": true,
+      "matching_private_exports": true,
+      "file_private": true,
+      "manual_bash_provider_matches": true,
+      "manual_bash_session_matches": true,
+      "managed_context_preserved_at_manual_source": true
+    },
+    {
+      "capability_session_start": true,
+      "bridge_session_start": true,
+      "unrelated_hook_preserved": true,
+      "distinct_per_hook_env_handles": true,
+      "matching_private_exports": true,
+      "file_private": true,
+      "manual_bash_provider_matches": true,
+      "manual_bash_session_matches": true,
+      "managed_context_preserved_at_manual_source": true
+    }
+  ],
+  "network_deny_verified": true,
+  "binary_version": "2.1.322 (Claude Code)",
+  "distinct_native_sessions": true,
+  "manual_sourcing_only": true,
+  "provider_prompt_submitted": false,
+  "process_groups_reaped": true,
+  "temporary_contexts_removed": true
+}

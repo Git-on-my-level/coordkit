@@ -2,7 +2,8 @@
 
 Source preparation is authorized, but coordkit PR #23 remains draft. The parent
 owns the shipping sequence after the official release containing
-[agentctl PR #147](https://github.com/Git-on-my-level/agentctl/pull/147) is
+[agentctl PR #147](https://github.com/Git-on-my-level/agentctl/pull/147) and
+[#148](https://github.com/Git-on-my-level/agentctl/pull/148) is
 installed. This integration requires `children-result` v1 and its authoritative
 waiter handling; see the query's reviewed contract at
 [`9799439`](https://github.com/Git-on-my-level/agentctl/blob/9799439e7f837d82ae75dbf17abd2b8033873388/internal/store/children.go#L163-L166).
@@ -35,6 +36,14 @@ launch. Hashing is owned by agentctl's identity contract. The label-hash fallbac
 has been removed entirely; launches without caller attribution remain outside
 coverage.
 
+The prepared SessionStart bridge supplies this pair only for an explicitly
+scoped unmanaged Claude lane, from its actual hook session into Claude's private
+session env. A matching configured pin or existing saved binding to a known
+Claude lane is required. All managed execution/adapter/authority markers skip
+the bridge so an explicit declaration cannot suppress observed parent linkage.
+It makes no agentctl call and never backfills attribution. See
+[hook limits](docs/HOOKS.md) and [native probe evidence](docs/validation/2026-11-11-session-start.md).
+
 A successful v1 query has `complete: true`, scope, count and at most 200
 executions. Rows identify `terminal_uncollected` or
 `running_without_known_waiter`. Bounded/incomplete queries return an error;
@@ -52,6 +61,10 @@ the five-second Stop deadline and the existing shared block budget.
   Attribution is correlation evidence, not authentication. A managed caller with
   conflicting inherited markers can stay
   unknown; an unmanaged caller must make the correct per-invocation assertion.
+- Existing unmanaged processes adopt the bridge only on a supported future
+  SessionStart lifecycle. Source preparation does not change a live binding.
+  Unknown scope, conflicting managed markers, nonprivate env files or an
+  unrecognized native env layout fail open; they do not establish coverage.
 - Agentctl alone proves journal-scoped exact waiters and supported durable
   terminal subscriptions. Coordkit does not second-guess that decision with
   process snapshots. Attention and integrity-conflicted children returned as

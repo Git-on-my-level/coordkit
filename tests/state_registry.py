@@ -342,6 +342,13 @@ row('deliver.py', '.lock|writer:stop_hook', 'known session requests Stop', 'clea
 row('routing.py', '.wait|.wait.lock|state/cursors', 'Stop inspects waiter evidence', 'read-only; no cursor or lease renewal', 'waiter-refreshed cursor within deliver.waiter_fresh_seconds or held kernel lock', 'missing waiter blocks Stop within the loop budget')
 
 row('deliver.py', 'writer:prepare_recovery', 'retry an install with durable receipt and unchanged original settings', 'complete owned settings transform under the sibling lock', 'same original receipt; one re-merge on unrelated edit', 'receipt or managed-entry conflicts fail without overwriting edits')
+row('session_start.py', 'sessions.json', 'SessionStart reads only an existing explicit session-to-lane binding',
+    'read-only scope lookup; never enrolls unknown sessions', '256 KiB read inside the 250 ms bridge deadline',
+    'missing/invalid scope fails open without a declaration')
+row('session_start.py', 'writer:private_append', 'known unmanaged Claude SessionStart supplies its private env target',
+    'Claude owns the session env lifecycle; receipt uninstall removes only the installed hook',
+    'one idempotent append at most 2 KiB within a 64 KiB file; nonblocking lock and 250 ms deadline',
+    'unknown/managed/unsafe/missing parent or write failure skips silently; no public identity copy')
 # Relay state is local to one durable site; it never carries reader cursors.
 row('relay.py', 'relay|state.sqlite3', 'configured sink or relay runner opens the local outbox',
     'rows marked sent on server acceptance; checkpoint advances only after durable apply/queue',

@@ -219,7 +219,7 @@ class DeliveryTests(DeliveryCase):
         self.assertEqual(deliver.main(['install', '--settings', str(target)], self.manifest), 0)
         record = read_json(deliver.receipt_path(self.manifest, target))
         after = read_json(target)
-        self.assertEqual(sum((hooks.entries(after)-hooks.entries(before)).values()), 3)
+        self.assertEqual(sum((hooks.entries(after)-hooks.entries(before)).values()), 4)
         self.assertEqual(record['before'], before)
         self.assertEqual(record['after'], after)
         deliver.install(self.manifest, target)  # owned installation is idempotent

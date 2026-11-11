@@ -1,5 +1,9 @@
 # Stop retained-children source validation
 
+This record predates the SessionStart bridge. Its full-suite result applies to
+that earlier checkpoint; see the later [focused SessionStart validation](2026-11-11-session-start.md)
+for the current preparation and pending full gates.
+
 This is source-only validation for PR #23 on 2026-11-11. It does not satisfy
 official installed-agentctl measurements, full-hook acceptance probes, final
 version selection, independent review or shipping gates. The PR remains draft.
