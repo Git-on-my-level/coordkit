@@ -21,6 +21,7 @@ MAX_PER_LANE = 64
 MAX_FIRE = 32  # per scan; the rest fire on the next one
 CLAIM_STALE = 300  # seconds before a claim that did not finish is tried again
 MAX_ATTEMPTS = 12
+PREFIX_ROOM = 120  # the row says who set the timer and when; the text must still fit whole
 
 
 def directory(manifest):
@@ -75,8 +76,9 @@ def schedule(manifest, lane, text, *, at=None, after=None, frm='', now=None):
         raise ManifestError('lane_not_registered: ' + lane)
     refuse_retired(manifest, lane)
     text = ' '.join(str(text or '').split())
-    if not text or len(text) > manifest.bus.text_cap:
-        raise ManifestError(f'invalid_timer_text: 1..{manifest.bus.text_cap} characters')
+    room = max(1, manifest.bus.text_cap - PREFIX_ROOM)
+    if not text or len(text) > room:
+        raise ManifestError(f'invalid_timer_text: 1..{room} characters')
     if frm and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', frm):
         raise ManifestError('invalid_timer_sender')
     now = time.time() if now is None else now
@@ -196,12 +198,20 @@ def main(argv, manifest):
               + (' (its row is being posted now; not cancelled)' if outcome == 'firing' else ''))
         return 1 if outcome == 'firing' else 0
     if opts.list:
+        from . import bus
+        bus.configure(manifest)
+        only = bus.resolve(opts.lane) if opts.lane else None  # timers are stored under the resolved name
         for _, row in sorted(pending(manifest), key=lambda item: item[1]['due']):
-            if not opts.lane or row['lane'] == opts.lane:
+            if not only or row['lane'] == only:
                 print(f"TIMER {row['id']} {stamp(row['due'])} to={row['lane']} from={row.get('frm', '')} {json.dumps(row['text'])}")
         for suffix, label in (('.firing', 'TIMER_FIRING'), ('.failed', 'TIMER_FAILED')):
             for path in sorted(directory(manifest).glob('*' + suffix)):
-                print(f'{label} {path.stem}')
+                try:
+                    lane = (read_json(path, None) or {}).get('lane', '?')
+                except (ValueError, UnicodeError, OSError, AttributeError):
+                    lane = '?'
+                if not only or lane in (only, '?'):
+                    print(f'{label} {path.stem} to={lane}')
         return 0
     if not opts.lane or not opts.text:
         parser.error('give a lane and the row text, or --list, or --cancel ID')
