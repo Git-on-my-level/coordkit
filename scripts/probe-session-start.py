@@ -174,6 +174,9 @@ def main():
                                     '[launchd]\npython=' + json.dumps(str(python)) + '\n'
                                     '[[lanes]]\nname="probe"\nconfig_dir="config"\ncwd="cwd"\n'
                                     'model="test"\neffort="test"\nsession_id=' + json.dumps(observed['session']) + '\n')
+                    if number == 1:
+                        file.write_text(file.read_text() + 'harness="claude-code"\n')
+                    result['lane_harness'] = 'claude-code' if number == 1 else 'default'
                     deliver.install(load(file), settings)  # isolated fixture only; no live hooks
                     # Claude gives each SessionStart command its own env handle.
                     # Capture this command's handle, then run its exact generated

@@ -90,6 +90,26 @@ class SessionStartTests(unittest.TestCase):
         self.consume(second, 's2')
         self.assertNotEqual(self.target.read_bytes(), second.read_bytes())
 
+    def check_claude_code_alias(self, bound):
+        raw = self.file.read_text() + 'harness="claude-code"\n'
+        self.file.write_text(raw.replace('session_id="s1"', 'session_id=""') if bound else raw)
+        if bound:
+            write_json(identity.home(load(self.file))/'sessions.json', {'s1': {'name': 'lane'}})
+        # Both supported manifest readers must keep the established Claude alias
+        # in scope; silently dropping it loses attribution for future children.
+        for reader in (load, hook_manifest):
+            with self.subTest(reader=reader.__module__):
+                self.target.unlink(missing_ok=True)
+                self.run_hook(manifest=reader(self.file))
+                self.assertTrue(self.target.is_file())
+                self.consume(self.target, 's1')
+
+    def test_claude_code_alias_pin_binds(self):
+        self.check_claude_code_alias(False)
+
+    def test_claude_code_alias_saved_binding_binds(self):
+        self.check_claude_code_alias(True)
+
     def test_conflicting_pins_and_saved_binding_never_choose_a_lane(self):
         other = copy.copy(self.manifest.lanes[0])
         other.name = 'other'

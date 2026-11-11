@@ -350,7 +350,11 @@ if sys.argv[1] == 'status':
     print(status.read_text() if status.exists() else '{{}}')
 else:
     if sys.argv[1] == '50':
-        status.write_text(json.dumps(dict(event='arm', owner=str(os.getpid())+':fake')))
+        # Publish a complete receipt: existence must not expose an empty file
+        # between creation and write to the one-shot verifier.
+        pending = status.with_suffix('.pending')
+        pending.write_text(json.dumps(dict(event='arm', owner=str(os.getpid())+':fake')))
+        pending.replace(status)
     until = time.monotonic()+90
     while not finish.exists() and time.monotonic() < until:
         time.sleep(.02)

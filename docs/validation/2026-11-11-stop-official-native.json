@@ -1,10 +1,11 @@
 {
-  "measured_at": "2026-11-11T16:57:18.418460+00:00",
+  "measured_at": "2026-11-11T17:07:52.005938+00:00",
   "binary_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
   "hook_python_version": "3.11.15",
   "cases": [
     {
       "capability_session_start": true,
+      "lane_harness": "default",
       "bridge_session_start": true,
       "unrelated_hook_preserved": true,
       "distinct_per_hook_env_handles": true,
@@ -22,9 +23,9 @@
         "authoritative_child_found": true,
         "isolated_query_bytes_unchanged": true,
         "stop_seconds": [
-          0.07203466701321304,
-          0.04634741705376655,
-          0.04591245809569955
+          0.0684316250262782,
+          0.04740016593132168,
+          0.07892154192086309
         ],
         "budget_counts": [
           1,
@@ -44,15 +45,15 @@
         "first_two_block": true,
         "third_allows": true,
         "error_fails_open": true,
-        "error_seconds": 0.04803341708611697,
+        "error_seconds": 0.04943329200614244,
         "error_help_observed": true,
         "error_actual_query_observed": true,
         "timeout_fails_open": true,
-        "timeout_seconds": 0.8183363330317661,
+        "timeout_seconds": 0.7902172920294106,
         "timeout_help_observed": true,
         "timeout_actual_query_observed": true,
         "old_fails_open": true,
-        "old_seconds": 0.07131320796906948,
+        "old_seconds": 0.04371462494600564,
         "old_help_observed": true,
         "old_query_skipped": true,
         "unsupported_cached": true,
@@ -61,12 +62,13 @@
         "pending_after_controls_blocks": true,
         "descendant_declarations_stripped": true,
         "collected_fresh_budget_allows": true,
-        "execution_id_collected": "exec-enter-erosion-roof-hungry-average-include",
+        "execution_id_collected": "exec-congress-custom-labor-sister-access-mistake",
         "native_lifecycle_active_after_collection": true
       }
     },
     {
       "capability_session_start": true,
+      "lane_harness": "claude-code",
       "bridge_session_start": true,
       "unrelated_hook_preserved": true,
       "distinct_per_hook_env_handles": true,
@@ -84,9 +86,9 @@
         "authoritative_child_found": true,
         "isolated_query_bytes_unchanged": true,
         "stop_seconds": [
-          0.07460308307781816,
-          0.04347533290274441,
-          0.04287812497932464
+          0.07494512503035367,
+          0.062043124926276505,
+          0.06419050006661564
         ],
         "budget_counts": [
           1,
@@ -106,15 +108,15 @@
         "first_two_block": true,
         "third_allows": true,
         "error_fails_open": true,
-        "error_seconds": 0.04745941690634936,
+        "error_seconds": 0.05562741600442678,
         "error_help_observed": true,
         "error_actual_query_observed": true,
         "timeout_fails_open": true,
-        "timeout_seconds": 0.8035118330735713,
+        "timeout_seconds": 0.7903289999812841,
         "timeout_help_observed": true,
         "timeout_actual_query_observed": true,
         "old_fails_open": true,
-        "old_seconds": 0.06990379199851304,
+        "old_seconds": 0.043115542037412524,
         "old_help_observed": true,
         "old_query_skipped": true,
         "unsupported_cached": true,
@@ -123,7 +125,7 @@
         "pending_after_controls_blocks": true,
         "descendant_declarations_stripped": true,
         "collected_fresh_budget_allows": true,
-        "execution_id_collected": "exec-cream-wheat-narrow-devote-police-celery",
+        "execution_id_collected": "exec-wine-drill-always-prison-swamp-move",
         "native_lifecycle_active_after_collection": true
       }
     }

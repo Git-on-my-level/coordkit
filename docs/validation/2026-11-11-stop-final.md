@@ -29,14 +29,14 @@ documents the native session input and private environment persistence.
 ## Read-only real-journal latency
 
 The [measurement record](2026-11-11-stop-official-journal.json) was produced at
-2026-11-11 16:56:45 UTC against the installed official binary and real journal.
+2026-11-11 17:09:05 UTC against the installed official binary and real journal.
 Twenty instrumented core hook invocations made twenty complete `children`
 queries, with **zero query errors**. The first includes capability discovery.
 
 | Measurement | Runs | p50 | p95 (nearest rank) |
 | --- | ---: | ---: | ---: |
-| Core `run_stop_hook`, excluding Python startup/manifest loading | 20 | 6.64 ms | 21.80 ms |
-| Full candidate CLI including startup/manifest loading, capability cache warm | 20 | 43.11 ms | 48.96 ms |
+| Core `run_stop_hook`, excluding Python startup/manifest loading | 20 | 8.13 ms | 8.73 ms |
+| Full candidate CLI including startup/manifest loading, capability cache warm | 20 | 46.59 ms | 57.92 ms |
 
 All full CLI invocations exited 0 silently. Their internal query outcomes are
 not separately instrumented; the twenty core queries above are instrumented.
@@ -64,6 +64,7 @@ network denial. Real account/config/keychain reads are denied except for the
 required executable/runtime files. Exact native process groups are bounded and
 reaped, and temporary contexts are removed.
 
+The cases cover the default Claude harness and its supported `claude-code` alias.
 Each case observes a native-generated SessionStart session first, then pins that
 observed session in a fresh fixture. The bridge receives the actual native hook
 input and its own private env handle. The unrelated hook is preserved and gets a
@@ -126,15 +127,23 @@ bash scripts/leak-check.sh
 git diff --check
 ```
 
-**1,394 tests pass in 116.176 seconds**, including current main's audit tests.
+**1,396 tests pass in 92.314 seconds**, including current main's audit tests.
 The first run exposed an existing fixture startup race: the independent
 lane-move verifier could snapshot `{}` before its fake heartbeat published its
-receipt. This reproduced alone; a bounded five-second readiness wait in that
-fake resolves it without changing production verification. The isolated test
-then passes, as does the full suite. The 98 focused SessionStart/Stop/delivery,
+receipt. This reproduced alone; a bounded five-second readiness wait and atomic receipt publication in that
+fake resolve it without changing production verification. The isolated test then passes three consecutive runs. The 113 focused checks (100 SessionStart/Stop/delivery and 13 merge checks),
 security/ownership, receipt migration/reconcile/uninstall and state-registry tests
-also pass (1.118 seconds). Four relay tests, compile, leak and whitespace gates
+also pass (1.471 seconds). Four relay tests, compile, leak and whitespace gates
 pass. Native probes are opt-in, not part of automatic unit tests.
+
+Automated review verified that the bridge omitted the manifest's established
+`claude-code` alias. Two new regression tests first failed for both readers,
+covering pinned and saved-binding scope. The filter now accepts that alias under
+the same scope/privacy/managed-context rules; the second native case exercises
+it end to end. The first hosted run also exposed an instantaneous positive
+review-fixture timestamp sharing its start's filesystem tick on Ubuntu/Python
+3.12. Giving that synthetic completion a distinct tick fixes the fixture while
+preserving production evidence freshness enforcement.
 
 Tests use stub external destinations and isolated synthetic bus files. No real
 page, Telegram, ANX, bus, provider, cloud or production operation occurs. No

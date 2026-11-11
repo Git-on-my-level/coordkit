@@ -28,7 +28,7 @@ def valid_session(session):
 def scoped_lane(manifest, session):
     """Use explicit pins/bindings only; never call the transcript resolver."""
     from .identity import home
-    lanes = [lane for lane in manifest.lanes if getattr(lane, 'harness', '') in ('', 'claude')]
+    lanes = [lane for lane in manifest.lanes if getattr(lane, 'harness', '') in ('', 'claude', 'claude-code')]
     names = {lane.name for lane in lanes if lane.session_id == session}
     try:
         with (home(manifest)/'sessions.json').open('rb') as stream:

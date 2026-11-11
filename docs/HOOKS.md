@@ -95,7 +95,7 @@ These declarations are stripped before child launch. Missing legacy attribution
 is not backfilled or guessed; retained attributable children have no local age cutoff.
 
 The synchronous SessionStart hook supplies that declaration for explicitly scoped
-unmanaged Claude lanes. It accepts only a matching configured session pin or an
+unmanaged Claude lanes (`harness` absent, `claude` or `claude-code`). It accepts only a matching configured session pin or an
 existing saved session binding to a known Claude lane; conflicting evidence skips.
 It never enrolls an unknown session, infers identity from cwd, reads a transcript,
 or uses `COORDKIT_AS` as native session evidence. The same collection switch and
