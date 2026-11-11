@@ -144,8 +144,13 @@ def _cycle(manifest, name, settings, handle, state):
         findings.write_text(auditor.report(cycle, items))
         if items:
             _post(manifest, handle, auditor.message(items, findings), findings, publication_id="loop-" + cycle)
+        # The audit work is done; what remains is the note, local finalization and the receipt, each bounded
+        # by its own tool timeout. Disarm max_age here so a late deadline cannot fail a cycle that completed or
+        # interrupt the note before it is marked sent.
+        signal.setitimer(signal.ITIMER_REAL, 0)
         # A receipt is required even when the auditor correctly raises zero findings. Notes are not keyed,
-        # so remember the sent note in pending.json: a resumed cycle must not post it twice.
+        # so remember the sent note in pending.json: a resumed cycle must not post it twice. (A crash between
+        # the note and this marker can still repeat it once; ANX offers no note key to close that.)
         if not pending.get('noted'):
             client.note(f'card:{handle}', f'Loop {name} cycle {cycle}: {len(items)} findings',
                         evidence=str(findings), met=True)
@@ -166,8 +171,6 @@ def _cycle(manifest, name, settings, handle, state):
             fcntl.flock(lock, fcntl.LOCK_EX)
             (state/'escalation.json').unlink(missing_ok=True)
             failures_path.write_text('0\n')
-        # The cycle is finalized: disarm the max_age alarm so a late deadline cannot turn it into a failure.
-        signal.setitimer(signal.ITIMER_REAL, 0)
         # Only after the cycle is finalized, so a success receipt never precedes a local failure of the same run.
         _receipt(client, name, handle, cycle, 'acted' if items else 'no_op',
                  f'Loop {name} cycle {cycle}: {len(items)} findings', finalized=True)
