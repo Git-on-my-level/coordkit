@@ -144,9 +144,13 @@ def _cycle(manifest, name, settings, handle, state):
         findings.write_text(auditor.report(cycle, items))
         if items:
             _post(manifest, handle, auditor.message(items, findings), findings, publication_id="loop-" + cycle)
-        # A receipt is required even when the auditor correctly raises zero findings.
-        client.note(f'card:{handle}', f'Loop {name} cycle {cycle}: {len(items)} findings',
-                    evidence=str(findings), met=True)
+        # A receipt is required even when the auditor correctly raises zero findings. Notes are not keyed,
+        # so remember the sent note in pending.json: a resumed cycle must not post it twice.
+        if not pending.get('noted'):
+            client.note(f'card:{handle}', f'Loop {name} cycle {cycle}: {len(items)} findings',
+                        evidence=str(findings), met=True)
+            pending['noted'] = True
+            write_json(pending_path, pending)
         if f'## Cycle {cycle}\n' not in prior.read_text():
             with prior.open('a') as stream:
                 stream.write(f'\n## Cycle {cycle}\n')
@@ -162,6 +166,8 @@ def _cycle(manifest, name, settings, handle, state):
             fcntl.flock(lock, fcntl.LOCK_EX)
             (state/'escalation.json').unlink(missing_ok=True)
             failures_path.write_text('0\n')
+        # The cycle is finalized: disarm the max_age alarm so a late deadline cannot turn it into a failure.
+        signal.setitimer(signal.ITIMER_REAL, 0)
         # Only after the cycle is finalized, so a success receipt never precedes a local failure of the same run.
         _receipt(client, name, handle, cycle, 'acted' if items else 'no_op',
                  f'Loop {name} cycle {cycle}: {len(items)} findings', finalized=True)
@@ -174,7 +180,7 @@ def _cycle(manifest, name, settings, handle, state):
         # pending.json resumes this cycle id. ANX drops a second receipt with the
         # same run id, so a retryable failure must not spend it on infra_error.
         # Record the attempt under a new id so last-run time still moves.
-        run_id = cycle if not pending_path.exists() else f'{cycle}-attempt-{uuid.uuid4().hex[:6]}'
+        run_id = cycle if not pending_path.exists() else f'{cycle}-attempt-{uuid.uuid4().hex}'
         _receipt(AnxClient(manifest), name, handle, run_id, 'infra_error',
                  f'Loop {name} cycle {cycle} failed: {exc}')
         return 1

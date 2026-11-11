@@ -154,6 +154,10 @@ class LoopTests(FakeCase):
         self.assertEqual(self.invoke()[0], 0)
         last = self.receipts()[-1]
         self.assertEqual((last[last.index('--outcome')+1], last[last.index('--run-id')+1]), ('acted', cycle))
+        notes = [c['args'] for c in self.calls() if c['tool'] == 'anx' and 'note' in c['args'] and '--met' in c['args']]
+        self.assertEqual(len(notes), 1, 'a resumed cycle must not post its note again')
+        attempt = receipts[0][receipts[0].index('--run-id')+1]
+        self.assertEqual(len(attempt.rsplit('-', 1)[1]), 32, 'attempt ids carry a full uuid')
 
     def test_deadline_records_distinct_infra_error_runs(self):
         with patch.object(loop, 'snapshot', side_effect=lambda manifest: signal.raise_signal(signal.SIGALRM)):
