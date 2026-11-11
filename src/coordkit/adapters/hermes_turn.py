@@ -18,6 +18,7 @@ import time
 from . import hermes
 
 MAX_ROUNDS = 3
+IDLE_RETRY_WAIT = 20  # seconds before the one retry of a run that made no model call
 FAILURE_RETRIES = 2  # delayed returns, one debounce apart, for rows posted during a failed turn
 # A wake runs in the process of whoever posted the row. The lane's turn must not
 # inherit that sender's credentials or agent identity, so it gets these and nothing else.
@@ -326,6 +327,14 @@ def main(argv=None):
                     hermes.remember_session(lane, '')
                     known = ''
                     code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout)
+                if code and not timed_out and usage['idle']:
+                    # Hermes reported no call and no token: the run ended before a turn began
+                    # (a backend that did not start in time on a loaded host, for example).
+                    # Nothing was done, so the same rows get one more try instead of being lost.
+                    print(f'HERMES_TURN lane={lane.name} ended before any model call (exit {code}); retrying once',
+                          file=sys.stderr, flush=True)
+                    time.sleep(IDLE_RETRY_WAIT)
+                    code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout, known)
                 if session and session != known:
                     hermes.remember_session(lane, session)
                     if not known:
