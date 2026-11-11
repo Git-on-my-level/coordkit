@@ -172,7 +172,7 @@ class AuditTests(AuditCase):
 
     def test_auditor_fields_lose_control_characters(self):
         gap = dict(kind='commit\nment', item='first\x00second\x1b[31m',
-                   evidence='a\tb\r\nc\x7f', when='tomorrow\u202e')
+                   evidence='a\tb\r\nc\x7f', when='tomorrow\u202e\ud800')
         self.reply(json.dumps([gap]))
         receipt = self.run_audit()
         clean, = receipt['open_items']

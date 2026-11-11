@@ -222,7 +222,7 @@ def _run(manifest, name, *, transcript=None, state=None, dry_run=False, turn_hel
                 write_json(path_for(manifest, lane, '.status.json'), {'status': 'running', 'at': started})
                 gaps, execution = auditor(manifest, lane, digest, clean_state, started)
                 # Scrub returned evidence as well, before storing or displaying it.
-                gaps = [{key: scrub(''.join(ch for ch in value if unicodedata.category(ch) not in ('Cc', 'Cf')))[0]
+                gaps = [{key: scrub(''.join(ch for ch in value if unicodedata.category(ch) not in ('Cc', 'Cf', 'Cs')))[0]
                          for key, value in row.items()} for row in gaps]
                 receipt = dict(stats, at=started, ended_at=time.time(), cursor=cursor,
                                gap_count=len(gaps), execution_id=execution, open_items=gaps)
