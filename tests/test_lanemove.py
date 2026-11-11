@@ -341,6 +341,12 @@ import json, os, sys, time
 from pathlib import Path
 status, finish = Path({str(status)!r}), Path({str(finish)!r})
 if sys.argv[1] == 'status':
+    # The independent verifier can start before this fake timer is scheduled.
+    # Wait for fixture readiness rather than permanently snapshotting an empty
+    # status; the production verifier and process-identity checks still run.
+    until = time.monotonic()+5
+    while not status.exists() and time.monotonic() < until:
+        time.sleep(.02)
     print(status.read_text() if status.exists() else '{{}}')
 else:
     if sys.argv[1] == '50':

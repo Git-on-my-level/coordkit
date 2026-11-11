@@ -1,5 +1,9 @@
 # Stop retained-children source validation
 
+Historical source checkpoint. The later [official-binary final validation](2026-11-11-stop-final.md)
+records dependency acceptance, version selection and full gates; pending claims
+below describe this earlier checkpoint.
+
 This record predates the SessionStart bridge. Its full-suite result applies to
 that earlier checkpoint; see the later [focused SessionStart validation](2026-11-11-session-start.md)
 for the current preparation and pending full gates.

@@ -30,6 +30,7 @@ def main():
     parser.add_argument('--scratch-dir')
     parser.add_argument('--runs', type=int, default=20)
     parser.add_argument('--exercise-child', action='store_true')
+    parser.add_argument('--full-cli', action='store_true', help='also measure 20 complete CLI invocations, including startup')
     args = parser.parse_args()
     if not 1 <= args.runs <= 100:
         parser.error('--runs must be between 1 and 100')
@@ -82,6 +83,19 @@ def main():
                       hook_ms=samples, p50_ms=statistics.median(samples),
                       p95_ms=sorted(samples)[math.ceil(.95 * len(samples)) - 1],
                       percentile_method='nearest rank', calls=calls)
+        if args.full_cli:
+            cli_samples = []
+            for _ in range(args.runs):
+                started = time.perf_counter()
+                result = subprocess.run([sys.executable, '-m', 'coordkit.cli', '--manifest', str(file),
+                                         'deliver', '--stop-hook'], input=payload, env=os.environ,
+                                        capture_output=True, text=True, timeout=7)
+                cli_samples.append((time.perf_counter() - started) * 1000)
+                assert result.returncode == 0 and not result.stdout and not result.stderr, 'full CLI failed'
+            report['full_cli'] = dict(runs=args.runs, ms=cli_samples,
+                p50_ms=statistics.median(cli_samples), p95_ms=sorted(cli_samples)[math.ceil(.95 * len(cli_samples)) - 1],
+                method='CLI subprocess including Python startup/manifest load; capability cache already warm; empty synthetic caller; quiet exit 0 for every run',
+                exit_errors=0)
         if args.exercise_child:
             env = dict(os.environ, AGENTCTL_UPDATE_MODE='off', AGENTCTL_CALLER_PROVIDER='claude',
                        AGENTCTL_CALLER_NATIVE_SESSION_ID=session)

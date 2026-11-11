@@ -1,24 +1,21 @@
 # Agentctl release dependency and remaining coverage limits
 
-Source preparation is authorized, but coordkit PR #23 remains draft. The parent
-owns the shipping sequence after the official release containing
-[agentctl PR #147](https://github.com/Git-on-my-level/agentctl/pull/147) and
-[#148](https://github.com/Git-on-my-level/agentctl/pull/148) is
-installed. This integration requires `children-result` v1 and its authoritative
-waiter handling; see the query's reviewed contract at
-[`9799439`](https://github.com/Git-on-my-level/agentctl/blob/9799439e7f837d82ae75dbf17abd2b8033873388/internal/store/children.go#L163-L166).
-The earlier `v0.21.9-pr147.85c10f6` measurements are historical prerelease evidence,
-not installed-binary or live acceptance for the current source.
+This integration requires **agentctl v0.21.11 or later** with the complete
+`children-result` v1 contract. The official
+[v0.21.11 release](https://github.com/Git-on-my-level/agentctl/releases/tag/v0.21.11)
+contains [#147](https://github.com/Git-on-my-level/agentctl/pull/147) and
+[#148](https://github.com/Git-on-my-level/agentctl/pull/148), covering caller-session
+attribution, authoritative waiter handling and the managed parent-exit safeguard.
+The installed official binary, not a source build, is used by the
+[final validation record](docs/validation/2026-11-11-stop-final.md).
+Historical `v0.21.9-pr147.85c10f6` measurements are not acceptance for this source.
 
-No coordkit release version is selected during this source preparation. After
-the dependency is installed, the parent must fetch current main and tags, select
-the next free version consistently, and pin the exact official dependency.
-Outstanding gates are 20 read-only real-journal measurements; fresh throwaway
-full-hook error/fail-open, two-block budget, collection, timeout and kill-switch
-probes; final unit/lint/full checks; an independent review of the exact final
-head; and hosted green checks with verified threads resolved. Only then may the
-parent mark ready and handle merge, tag, release and any live update. Rollback
-version and installed baseline must also be freshly verified by the parent.
+The prepared coordkit version is **0.4.8**, integrating current main's ANX
+receipts, Hermes harness/hooks, scheduled wakes and state audits. Source/probe
+validation does not install hooks or change an existing lane's binding. The
+parent retains independent review of the exact frozen head, merge, release,
+installation and final live verification. The parent must freshly check the
+installed baseline before any update/rollback; it was 0.4.7 during validation.
 
 ## Contract now used
 
@@ -76,8 +73,7 @@ the five-second Stop deadline and the existing shared block budget.
   changes without metadata changes can retain a capability answer until expiry.
 
 The dated [prerelease validation record](docs/validation/2026-11-11-stop-children.md)
-is historical evidence only. The parent will use the
-[measurement script](scripts/measure-stop-children.py) and final full-hook probes
-after the official dependency is installed; those gates are still outstanding.
-The [retained-children source validation](docs/validation/2026-11-11-stop-retained-children.md)
-records the local age-cutoff correction and stubbed regression coverage.
+is historical evidence only. See the [official-binary final validation](docs/validation/2026-11-11-stop-final.md)
+for the exact dependency, real-journal measurements and native-session full-Stop
+probes. The [retained-children source validation](docs/validation/2026-11-11-stop-retained-children.md)
+records the age-cutoff correction and stubbed regression coverage.

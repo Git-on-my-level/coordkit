@@ -80,13 +80,14 @@ The reason lists at most five execution IDs with exact commands and `+N more`.
 A bus waiter does not collect agentctl results. The probe honors the `AGENTCTL`
 executable override; recovery commands use it.
 
-This requires the `children` v1 contract from
-[agentctl #147](https://github.com/Git-on-my-level/agentctl/pull/147), including
-its authoritative waiter handling. The prior build `v0.21.9-pr147.85c10f6` was
-prerelease source validation only. It does not satisfy the official installed
-binary gates for the prepared source. Keep this PR draft until the official
-release containing #147 and the parent exit safeguard in #148 is installed, remeasured and gated; then pin that exact
-version. See [the release gate and coverage limits](../AGENTCTL_GAP.md).
+This requires **agentctl v0.21.11 or later** with the complete `children-result`
+v1 contract, including the caller attribution, authoritative waiter handling and
+parent-exit safeguard from [#147](https://github.com/Git-on-my-level/agentctl/pull/147)
+and [#148](https://github.com/Git-on-my-level/agentctl/pull/148). The official
+[v0.21.11 release](https://github.com/Git-on-my-level/agentctl/releases/tag/v0.21.11)
+is the installed binary used for the final integration probes. Older binaries
+without `children` skip the collection guard through the bounded capability
+cache. See [validation and coverage limits](../AGENTCTL_GAP.md).
 Managed launches record their caller automatically. Unmanaged Claude launches
 must declare the actual current session on each launch using agentctl's
 `AGENTCTL_CALLER_PROVIDER=claude` and `AGENTCTL_CALLER_NATIVE_SESSION_ID` contract.

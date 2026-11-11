@@ -1,5 +1,9 @@
 # Unmanaged Claude SessionStart source validation
 
+Historical source checkpoint. The later [official-binary final validation](2026-11-11-stop-final.md)
+records dependency acceptance, version selection and full gates; pending claims
+below describe this earlier checkpoint.
+
 This is source preparation for draft PR #23, based on
 `38b717dd36cfff9eb65fb3cf820787a633cad769`. It does not establish live lane
 coverage, actual agentctl child admission/collection, official installed-agentctl

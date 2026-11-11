@@ -31,7 +31,25 @@ fd=os.open(sys.argv[1],os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
 with os.fdopen(fd,'w') as out: json.dump(v,out)
 if len(sys.argv)>2:
  result=subprocess.run(sys.argv[2:],input=raw,timeout=5)
- raise SystemExit(result.returncode)
+ if result.returncode: raise SystemExit(result.returncode)
+ if os.environ.get('PROBE_STOP_WORKER'):
+  from pathlib import Path
+  argv=json.loads(Path(os.environ['PROBE_STOP_WORKER']).read_text())
+  # Explicit manual sourcing while the native lifecycle is still active.
+  # The nested Stop decisions stay in private subprocess captures, never stdout.
+  v['worker_started']=True
+  Path(sys.argv[1]).write_text(json.dumps(v))
+  try:
+   result=subprocess.run(['/bin/bash','--noprofile','--norc','-c',
+    '. "$1"; shift; exec "$@"','probe',v['env_file'],*argv],
+    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=25)
+  except Exception as exc:
+   v['worker_failure']=type(exc).__name__
+   Path(sys.argv[1]).write_text(json.dumps(v))
+   raise SystemExit(1)
+  v['worker_exit_zero']=result.returncode==0
+  Path(sys.argv[1]).write_text(json.dumps(v))
+  raise SystemExit(result.returncode)
 '''
 FAKE_AGENTCTL = '''import json,os,sys
 from pathlib import Path
@@ -51,6 +69,10 @@ def bounded(argv, *, env, cwd, timeout=DEADLINE):
     with tempfile.TemporaryFile(dir=cwd) as out, tempfile.TemporaryFile(dir=cwd) as err:
         process = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.DEVNULL,
                                    stdout=out, stderr=err, start_new_session=True)
+        if '--init-only' in argv and env.get('PROBE_NATIVE_PID_FILE'):
+            handle = Path(env['PROBE_NATIVE_PID_FILE'])
+            handle.write_text(str(process.pid))
+            handle.chmod(0o600)
         try:
             process.wait(timeout=timeout)
         finally:
@@ -83,6 +105,7 @@ def main():
     parser.add_argument('--claude', required=True)
     parser.add_argument('--scratch-dir', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--agentctl', help='also run isolated real-child/full-Stop acceptance')
     args = parser.parse_args()
     if sys.platform != 'darwin' or not Path('/usr/bin/sandbox-exec').is_file():
         parser.error('requires macOS sandbox-exec; no unsandboxed fallback')
@@ -95,6 +118,8 @@ def main():
         profile = root/'deny.sb'
         # Native binary and Python runtime only: no real account/config/keychain reads.
         permitted = [binary.parent, Path(sys.base_prefix).resolve()]
+        if args.agentctl:
+            permitted.append(Path(args.agentctl).resolve().parent)
         profile.write_text('(version 1)\n(allow default)\n(deny network*)\n'
                            '(deny file-read* (require-all (subpath ' + json.dumps(str(Path.home())) + ') '
                            '(require-not (require-any ' + ' '.join('(subpath ' + json.dumps(str(p)) + ')'
@@ -117,6 +142,14 @@ def main():
         if code != 0 or len(version) > 100:
             raise RuntimeError('native_version_unavailable')
         report['binary_version'] = version.decode('utf-8').strip()
+        if args.agentctl:
+            agentctl = Path(args.agentctl).resolve()
+            code, version, _ = bounded([*sandbox, str(agentctl), '--version'],
+                                       env=probe_env, cwd=root, timeout=5)
+            if code != 0:
+                raise RuntimeError('agentctl_version_unavailable')
+            report['agentctl_version'] = json.loads(version)['result']['version']
+            report['agentctl_sha256'] = hashlib.sha256(agentctl.read_bytes()).hexdigest()
         observed_sessions = []
         for number in range(2):
             # Observe a real native session first; never invent the manifest pin.
@@ -125,6 +158,7 @@ def main():
             for phase in ('capability', 'bridge'):
                 work = root/f'{number}-{phase}'
                 env = isolated(work)
+                env['PROBE_NATIVE_PID_FILE'] = str(work/'native-pid.private')
                 capture, receipt = work/'capture.py', work/'native.private.json'
                 capture.write_text(CAPTURE)
                 settings = work/'settings.json'
@@ -147,6 +181,17 @@ def main():
                     # handle cannot stand in for the bridge's private target.
                     installed = json.loads(settings.read_text())
                     bridge = installed['hooks']['SessionStart'][-1]['hooks'][0]
+                    if args.agentctl:
+                        worker_args = work/'stop-worker.private.json'
+                        stop_report = work/'stop-report.private.json'
+                        worker_args.write_text(json.dumps([str(python),
+                            str(Path(__file__).with_name('probe-stop-collection.py').resolve()),
+                            str(receipt), str(file), str(Path(args.agentctl).resolve()), str(stop_report)]))
+                        worker_args.chmod(0o600)
+                        env['PROBE_STOP_WORKER'] = str(worker_args)
+                        env['PROBE_EXECUTION_LEDGER'] = str(Path(args.output).resolve().with_suffix('.executions.jsonl'))
+                        env['PYTHONPATH'] = str(Path(deliver.__file__).resolve().parents[1])
+                        bridge['timeout'] = 30
                     bridge['command'] = shlex.join([str(python), str(capture), str(receipt),
                                                     *shlex.split(bridge['command'])])
                     settings.write_text(json.dumps(installed))
@@ -197,6 +242,17 @@ def main():
                 booleans = json.loads(answer) if code == 0 and not error else {}
                 result['managed_context_preserved_at_manual_source'] = all(
                     booleans.get(key) is True for key in ('provider_absent', 'session_absent', 'managed_preserved'))
+                if args.agentctl:
+                    if current.get('worker_exit_zero') is not True:
+                        raise RuntimeError('stop_collection_probe_failed')
+                    if not stop_report.is_file():
+                        print(json.dumps({k: current[k] for k in
+                              ('worker_started', 'worker_exit_zero', 'worker_failure') if k in current}), flush=True)
+                        raise RuntimeError('stop_collection_probe_failed')
+                    result['stop_collection'] = json.loads(stop_report.read_text())
+                    if 'probe_failure' in result['stop_collection']:
+                        print(json.dumps(result['stop_collection']), flush=True)
+                        raise RuntimeError('stop_collection_probe_failed')
             if not all(result.values()):
                 raise RuntimeError('bridge_boolean_failed')
             report['cases'].append(result)
@@ -219,7 +275,8 @@ if __name__ == '__main__':
                 'probe_output_bound', 'network_deny_not_verified', 'native_version_unavailable',
                 'init_only_unsupported', 'init_only_failed_no_prompt_fallback',
                 'native_sessionstart_handle_unavailable', 'native_pin_mismatch',
-                'native_target_outside_isolation', 'bridge_target_not_created', 'bridge_boolean_failed'}:
+                'native_target_outside_isolation', 'bridge_target_not_created', 'bridge_boolean_failed',
+                'stop_collection_probe_failed', 'agentctl_version_unavailable'}:
             code = str(exc)
         elif isinstance(exc, subprocess.TimeoutExpired):
             code = 'native_init_only_deadline' if '--init-only' in exc.cmd else 'local_check_deadline'
