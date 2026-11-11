@@ -44,7 +44,11 @@ with log.open('a') as stream:
                                  leaked=os.environ.get('SENDER_SECRET'), accept=os.environ.get('HERMES_ACCEPT_HOOKS'))) + '\\n')
 resumed = argv[argv.index('--resume') + 1] if '--resume' in argv else ''
 if resumed and resumed == cfg.get('GONE'):
-    print(json.dumps(dict(type='result', status='failed', error='session not found: ' + resumed)))
+    message = 'Session not found: ' + resumed
+    if cfg.get('GONE_STDERR'):
+        print(message, file=sys.stderr)  # pruned resume: no result row
+    else:
+        print(json.dumps(dict(type='result', status='failed', error=message)))
     sys.exit(1)
 if resumed and resumed == cfg.get('CRASH'):
     sys.exit(1)  # died after possibly doing work: no terminal record
@@ -215,6 +219,18 @@ class TurnTests(HermesCase):
     def test_a_session_that_no_longer_resumes_is_replaced_once(self):
         hermes.remember_session(self.lane, 'gone-1')
         self.steer(GONE='gone-1')
+        self.assertEqual(self.turn(), 0)
+        calls = self.invocations()
+        self.assertEqual(len(calls), 2)
+        self.assertIn('gone-1', calls[0]['argv'])
+        self.assertNotIn('--resume', calls[1]['argv'])
+        self.assertEqual(hermes.session_id(self.lane), 'sess-1')
+        self.assertEqual(len(hermes.receipts(self.lane)[0]), 1)
+
+    def test_a_session_reported_missing_on_stderr_is_replaced_once(self):
+        """Contract: `Session not found` with no result row still drops the stored id."""
+        hermes.remember_session(self.lane, 'gone-1')
+        self.steer(GONE='gone-1', GONE_STDERR=1)
         self.assertEqual(self.turn(), 0)
         calls = self.invocations()
         self.assertEqual(len(calls), 2)

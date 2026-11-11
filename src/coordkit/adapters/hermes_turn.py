@@ -165,21 +165,33 @@ def turn_env(manifest, lane):
     return env
 
 
+def missing_session_line(text):
+    """`Session not found: <id>` from a pruned resume, or ''."""
+    if isinstance(text, bytes):
+        text = text[:MAX_RECORD].decode(errors='replace')
+    for line in str(text or '').splitlines():
+        cleaned = line.strip()
+        if 'session not found' in cleaned.lower():
+            return cleaned
+    return ''
+
+
 def run_turn(manifest, lane, text, timeout, session=''):
     """(exit code, terminal record, usage report fields). The child gets its own group so a timeout can end it."""
     with tempfile.TemporaryDirectory(prefix='coordkit-hermes-') as scratch:
         usage_file = Path(scratch)/'usage.json'
         env = turn_env(manifest, lane)
-        # Output goes to a file, not a pipe: a tool the turn left running may keep the
+        # Output goes to files, not pipes: a tool the turn left running may keep a
         # descriptor open, and a pipe would then hold this runner (and the lane lock) with it.
         out_file = Path(scratch)/'result.json'
+        err_file = Path(scratch)/'stderr.txt'
         binary = hermes.binary_path(manifest)
         try:
             if not binary:
                 raise FileNotFoundError('hermes binary unavailable on the turn PATH')
-            with out_file.open('wb') as sink:
+            with out_file.open('wb') as sink, err_file.open('wb') as err_sink:
                 proc = subprocess.Popen(argv_for(binary, lane, text, usage_file, session),
-                                        stdin=subprocess.DEVNULL, stdout=sink, stderr=sys.stderr,
+                                        stdin=subprocess.DEVNULL, stdout=sink, stderr=err_sink,
                                         env=env, cwd=lane.cwd, start_new_session=True)
         except OSError as exc:
             # The failure still gets a receipt, so the lane reads as unreachable with a reason.
@@ -203,6 +215,13 @@ def run_turn(manifest, lane, text, timeout, session=''):
         with out_file.open('rb') as stream:
             stream.seek(max(0, os.fstat(stream.fileno()).st_size - MAX_RECORD))
             out = stream.read()
+        try:
+            err = err_file.read_bytes()
+        except OSError:
+            err = b''
+        if err:
+            sys.stderr.write(err.decode(errors='replace'))
+            sys.stderr.flush()
         record = {}
         for line in reversed((out or b'')[-MAX_RECORD:].decode(errors='replace').splitlines()):
             try:
@@ -213,6 +232,11 @@ def run_turn(manifest, lane, text, timeout, session=''):
                 record = value
                 break
         usage, model, provider, session = read_usage(usage_file, record)
+        if not record:
+            # A pruned resume exits before any result row and prints this on stderr.
+            note = missing_session_line(err) or missing_session_line(out)
+            if note:
+                record = {'type': 'result', 'status': 'failed', 'error': note}
     return proc.returncode, timed_out, record, usage, model, provider, session
 
 
