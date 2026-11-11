@@ -116,6 +116,40 @@ class LoopTests(FakeCase):
         self.assertIn('CYCLE_RECEIPT_FAILED audit',err)
         self.assertEqual((self.state/'fails').read_text().strip(),'0')
 
+    def test_success_receipt_is_the_last_write_of_a_finalized_cycle(self):
+        code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        anx = [c['args'] for c in self.calls() if c['tool'] == 'anx']
+        writes = [i for i,a in enumerate(anx) if 'note' in a or 'receipt' in a]
+        self.assertIn('receipt', anx[writes[-1]], 'the run receipt follows the note and finalization')
+        self.assertFalse((self.state/'pending.json').exists())
+
+    def test_deadline_inside_success_receipt_keeps_cycle_ok(self):
+        def deadline(*args, **kwargs):
+            raise loop.CycleDeadline('loop max_age exceeded')
+        with patch('coordkit.anxcli.AnxClient.work_receipt', side_effect=deadline):
+            code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        self.assertIn('CYCLE_OK audit',out)
+        self.assertIn('CYCLE_RECEIPT_FAILED audit',err)
+        self.assertEqual((self.state/'fails').read_text().strip(),'0')
+
+    def test_lock_held_skip_records_no_receipt(self):
+        import fcntl
+        self.state.mkdir(parents=True)
+        with (self.state/'cycle.lock').open('a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.invoke()
+        self.assertEqual(self.receipts(), [])
+
+    def test_receipt_summary_is_one_bounded_line(self):
+        from coordkit.anxcli import AnxClient
+        AnxClient(self.manifest).work_receipt('card:loop-audit', 'c1', 'infra_error', 'line one\nline two ' + 'x'*400)
+        args = self.receipts()[-1]
+        summary = args[args.index('--summary')+1]
+        self.assertNotIn('\n', summary)
+        self.assertLessEqual(len(summary), 280)
+
     def test_snapshot_failure_no_delegate(self):
         self.respond({'tool':'gh','exit':1,'stderr':'not authenticated'})
         code,out,err = self.invoke()

@@ -147,8 +147,6 @@ def _cycle(manifest, name, settings, handle, state):
         # A receipt is required even when the auditor correctly raises zero findings.
         client.note(f'card:{handle}', f'Loop {name} cycle {cycle}: {len(items)} findings',
                     evidence=str(findings), met=True)
-        # Best effort: the cycle's work and note are done, so a receipt failure must not replay them.
-        _receipt(client, name, handle, cycle, 'acted' if items else 'no_op', f'Loop {name} cycle {cycle}: {len(items)} findings')
         if f'## Cycle {cycle}\n' not in prior.read_text():
             with prior.open('a') as stream:
                 stream.write(f'\n## Cycle {cycle}\n')
@@ -164,6 +162,9 @@ def _cycle(manifest, name, settings, handle, state):
             fcntl.flock(lock, fcntl.LOCK_EX)
             (state/'escalation.json').unlink(missing_ok=True)
             failures_path.write_text('0\n')
+        # Only after the cycle is finalized, so a success receipt never precedes a local failure of the same run.
+        _receipt(client, name, handle, cycle, 'acted' if items else 'no_op',
+                 f'Loop {name} cycle {cycle}: {len(items)} findings', finalized=True)
         print(f'CYCLE_OK {name} {cycle} findings={findings} items={len(items)}')
         return 0
     except (ToolError, ManifestError, OSError, ValueError) as exc:
@@ -175,11 +176,13 @@ def _cycle(manifest, name, settings, handle, state):
         return 1
 
 
-def _receipt(client, name, handle, cycle, outcome, summary):
-    """ANX loop health counts run receipts, not notes. Never let a receipt failure change the cycle result."""
+def _receipt(client, name, handle, cycle, outcome, summary, finalized=False):
+    """ANX loop health counts run receipts, not notes. Never let a receipt failure change the cycle result.
+    After finalization the deadline alarm can still fire inside this call; the cycle already completed, so absorb it."""
+    absorbed = (ToolError, ManifestError, OSError) + ((CycleDeadline,) if finalized else ())
     try:
         client.work_receipt(f'card:{handle}', cycle, outcome, summary)
-    except (ToolError, ManifestError, OSError) as exc:
+    except absorbed as exc:
         print(f'CYCLE_RECEIPT_FAILED {name} {cycle}: {exc}', file=sys.stderr)
 
 
@@ -305,6 +308,7 @@ def run_cycle(manifest, name):
             error_file = directory/'err.txt'
             error_file.write_text(str(exc)+'\n')
             record_failure(manifest, name, settings, handle, state, str(exc), error_file=error_file)
+            _receipt(AnxClient(manifest), name, handle, directory.name, 'infra_error', f'Loop {name} cycle hit its deadline: {exc}')
             return 1
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
