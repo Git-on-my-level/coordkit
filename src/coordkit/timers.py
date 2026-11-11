@@ -21,7 +21,6 @@ MAX_PER_LANE = 64
 MAX_FIRE = 32  # per scan; the rest fire on the next one
 CLAIM_STALE = 300  # seconds before a claim that did not finish is tried again
 MAX_ATTEMPTS = 12
-PREFIX_ROOM = 120  # the row says who set the timer and when; the text must still fit whole
 
 
 def directory(manifest):
@@ -76,9 +75,8 @@ def schedule(manifest, lane, text, *, at=None, after=None, frm='', now=None):
         raise ManifestError('lane_not_registered: ' + lane)
     refuse_retired(manifest, lane)
     text = ' '.join(str(text or '').split())
-    room = max(1, manifest.bus.text_cap - PREFIX_ROOM)
-    if not text or len(text) > room:
-        raise ManifestError(f'invalid_timer_text: 1..{room} characters')
+    if not text:
+        raise ManifestError('invalid_timer_text: the row needs text')
     if frm and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', frm):
         raise ManifestError('invalid_timer_sender')
     now = time.time() if now is None else now
@@ -87,8 +85,14 @@ def schedule(manifest, lane, text, *, at=None, after=None, frm='', now=None):
         if sum(1 for _, row in pending(manifest) if row['lane'] == lane) >= MAX_PER_LANE:
             raise ManifestError('timer_limit: too many pending timers for ' + lane)
         ident = secrets.token_hex(6)
+        # The row is composed now and stored whole, so what is accepted is exactly what is posted.
+        row_text = f'Timer set by {frm or lane} at {stamp(now)}: {text}'
+        if len(row_text) > manifest.bus.text_cap:
+            raise ManifestError(f'invalid_timer_text: the row would be {len(row_text)} characters; '
+                                f'[bus] text_cap is {manifest.bus.text_cap}')
         write_json(directory(manifest)/f'{ident}.json',
-                   {'id': ident, 'lane': lane, 'due': due, 'text': text, 'frm': frm or lane, 'created': now})
+                   {'id': ident, 'lane': lane, 'due': due, 'text': text, 'row_text': row_text,
+                    'frm': frm or lane, 'created': now})
     return ident, due
 
 
@@ -163,8 +167,8 @@ def fire(manifest, now=None):
                 bus.append([dict(ts=dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(timespec='seconds'),
                                  id='wake-at-' + row['id'], origin='coordkit', frm='coordkit', to=row['lane'],
                                  topic='coordkit-timer', kind='handoff',
-                                 text=f"Timer set by {row.get('frm') or row['lane']} at {stamp(row.get('created', now))}: "
-                                      f"{row.get('text', '')}"[:manifest.bus.text_cap])], project=False)
+                                 text=str(row.get('row_text') or row.get('text', ''))[:manifest.bus.text_cap])],
+                           project=False)
                 fired.append(row['id'])
             path.unlink(missing_ok=True)
         except Exception as exc:

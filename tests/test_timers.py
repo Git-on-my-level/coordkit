@@ -33,7 +33,10 @@ class TimerTests(AddressedCase):
                          ('wake-at-' + soon, 'lead-a', 'coordkit', 'handoff', 'coordkit'))
         self.assertIn('Timer set by lead-a', row['text'])
         self.assertTrue(row['text'].endswith('check the 2h readback'))
-        full = 'y' * (self.manifest.bus.text_cap - timers.PREFIX_ROOM)  # the longest accepted text arrives whole
+        prefix = f'Timer set by a-sender-with-a-long-name at {timers.stamp(now)}: '
+        full = 'y' * (self.manifest.bus.text_cap - len(prefix))  # the longest accepted text arrives whole
+        with self.assertRaisesRegex(ManifestError, 'invalid_timer_text'):
+            timers.schedule(self.manifest, 'lead-a', full + 'y', after='10m', frm='a-sender-with-a-long-name', now=now)
         longest, _ = timers.schedule(self.manifest, 'lead-a', full, after='10m', frm='a-sender-with-a-long-name', now=now)
         timers.fire(self.manifest, now=now + 602)
         self.assertTrue(self.rows()[-1]['text'].endswith(full))
@@ -115,7 +118,7 @@ class TimerTests(AddressedCase):
                               (dict(after='1m', at=timers.stamp(now + 60)), 'timer_needs_one_of'),
                               (dict(after='1m', text=''), 'invalid_timer_text'),
                               (dict(after='1m', text='x' * 5000), 'invalid_timer_text'),
-                              (dict(after='1m', text='x' * (self.manifest.bus.text_cap - 50)), 'invalid_timer_text'),
+                              (dict(after='1m', text='x' * (self.manifest.bus.text_cap - 20)), 'invalid_timer_text'),
                               (dict(after='1m', frm='bad name'), 'invalid_timer_sender')):
             lane, text = kwargs.pop('lane', 'lead-a'), kwargs.pop('text', 'hello')
             with self.subTest(error=error), self.assertRaisesRegex(ManifestError, error):
