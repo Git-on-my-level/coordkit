@@ -1,0 +1,198 @@
+{
+  "measured_at": "2026-11-11T05:00:01.996606+00:00",
+  "binary_sha256": "18f919aa262b00b15f37f4934a7f1f60aa6eaec8351cda5b047c54c3de786514",
+  "binary_version": "v0.21.9-pr147.85c10f6",
+  "runs": 20,
+  "method": "in-process run_stop_hook; first capability probe included; no Python startup/manifest loading",
+  "hook_ms": [
+    74.5913750724867,
+    18.942874972708523,
+    23.176500108093023,
+    22.72854105103761,
+    19.89770808722824,
+    19.228333956561983,
+    18.493999959900975,
+    18.310417071916163,
+    19.84016690403223,
+    19.337209057994187,
+    25.629500043578446,
+    21.992666996084154,
+    23.41204194817692,
+    23.375542019493878,
+    19.817542051896453,
+    24.178833002224565,
+    22.832749993540347,
+    20.738375023938715,
+    22.794167045503855,
+    23.26816599816084
+  ],
+  "p50_ms": 22.36060402356088,
+  "p95_ms": 25.629500043578446,
+  "percentile_method": "nearest rank",
+  "calls": [
+    {
+      "command": "help",
+      "outcome": "ok",
+      "complete": null,
+      "count": null,
+      "ms": 17.472708015702665
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 19.834709004499018
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 17.713916953653097
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 22.15974999126047
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 21.59745793323964
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 18.595334026031196
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 18.25887500308454
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 17.59479194879532
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 17.310833907686174
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 18.902750103734434
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 18.09429202694446
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 22.777959005907178
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 20.262041012756526
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 22.022792021743953
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 21.95779199246317
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 18.342958064749837
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 22.814749972894788
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 21.51150000281632
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 19.604834029451013
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 21.279749926179647
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 21.93245803937316
+    }
+  ],
+  "blocking_case": {
+    "state": "completed",
+    "attribution": "launch-time caller_identity from explicit unmanaged Claude declaration; no labels",
+    "before_collection": "block",
+    "after_collection": "allow",
+    "collection_output": "synthetic child collected",
+    "hook": "real CLI subprocess against default journal",
+    "execution_collected": true
+  },
+  "legacy_compatibility": {
+    "measured_at": "2026-11-11T05:04:19.785892+00:00",
+    "version": "v0.21.10",
+    "invocations": 2,
+    "help_probes": 1,
+    "children_queries": 0,
+    "cached_supported": false
+  }
+}

@@ -7,3 +7,4 @@ dist/
 briefs/
 .oss/
 .venv/
+coordkit-collection-*.jsonl

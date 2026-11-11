@@ -42,12 +42,16 @@ def load(path=None):
         raise ManifestError('invalid_hook_roster')
     deliver = raw.get('deliver', {})
     requires_waiter = deliver.get('stop_requires_waiter', True)
+    requires_collection = deliver.get('stop_requires_agentctl_collection', True)
     fresh = deliver.get('waiter_fresh_seconds', 180)
     lanes = raw.get('lanes', [])
-    if (type(requires_waiter) is not bool or type(fresh) is not int or fresh < 0
-            or any('stop_requires_waiter' in lane and type(lane['stop_requires_waiter']) is not bool for lane in lanes)):
+    if (type(requires_waiter) is not bool or type(requires_collection) is not bool or type(fresh) is not int or fresh < 0
+            or any(key in lane and type(lane[key]) is not bool
+                   for lane in lanes for key in ('stop_requires_waiter', 'stop_requires_agentctl_collection'))):
         raise ManifestError('invalid_hook_deliver')
-    return SimpleNamespace(deliver=SimpleNamespace(stop_requires_waiter=requires_waiter, waiter_fresh_seconds=fresh),
+    return SimpleNamespace(deliver=SimpleNamespace(stop_requires_waiter=requires_waiter,
+                                                 stop_requires_agentctl_collection=requires_collection,
+                                                 waiter_fresh_seconds=fresh),
                            agents=[SimpleNamespace(**a) for a in raw.get('agents', [])],
                            lanes=[SimpleNamespace(**dict(lane, config_dir=str(resolve(lane['config_dir'])),
                                                          cwd=str(resolve(lane['cwd'])), session_id=lane.get('session_id', '')))

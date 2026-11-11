@@ -1,0 +1,142 @@
+{
+  "measured_at": "2026-11-11T17:34:24.900516+00:00",
+  "binary_sha256": "a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450",
+  "hook_python_version": "3.11.15",
+  "cases": [
+    {
+      "capability_session_start": true,
+      "lane_harness": "default",
+      "bridge_session_start": true,
+      "unrelated_hook_preserved": true,
+      "distinct_per_hook_env_handles": true,
+      "matching_private_exports": true,
+      "file_private": true,
+      "manual_bash_provider_matches": true,
+      "manual_bash_session_matches": true,
+      "managed_context_preserved_at_manual_source": true,
+      "stop_collection": {
+        "native_lifecycle_active_at_admission": true,
+        "empty_preflight_allows": true,
+        "caller_provider_matches": true,
+        "caller_identity_matches": true,
+        "unmanaged_parent_absent": true,
+        "authoritative_child_found": true,
+        "isolated_query_bytes_unchanged": true,
+        "stop_seconds": [
+          0.18631945794913918,
+          0.15382416697684675,
+          0.12196741695515811
+        ],
+        "budget_counts": [
+          1,
+          2
+        ],
+        "first_decisions": [
+          "block",
+          "block",
+          null
+        ],
+        "first_call_sequence": [
+          "help",
+          "children",
+          "children",
+          "children"
+        ],
+        "first_two_block": true,
+        "third_allows": true,
+        "error_fails_open": true,
+        "error_seconds": 0.1437453750986606,
+        "error_help_observed": true,
+        "error_actual_query_observed": true,
+        "timeout_fails_open": true,
+        "timeout_seconds": 0.8585469590034336,
+        "timeout_help_observed": true,
+        "timeout_actual_query_observed": true,
+        "old_fails_open": true,
+        "old_seconds": 0.11955599999055266,
+        "old_help_observed": true,
+        "old_query_skipped": true,
+        "unsupported_cached": true,
+        "global_kill_switch_allows": true,
+        "lane_kill_switch_allows": true,
+        "pending_after_controls_blocks": true,
+        "descendant_declarations_stripped": true,
+        "collected_fresh_budget_allows": true,
+        "execution_collected": true,
+        "native_lifecycle_active_after_collection": true
+      }
+    },
+    {
+      "capability_session_start": true,
+      "lane_harness": "claude-code",
+      "bridge_session_start": true,
+      "unrelated_hook_preserved": true,
+      "distinct_per_hook_env_handles": true,
+      "matching_private_exports": true,
+      "file_private": true,
+      "manual_bash_provider_matches": true,
+      "manual_bash_session_matches": true,
+      "managed_context_preserved_at_manual_source": true,
+      "stop_collection": {
+        "native_lifecycle_active_at_admission": true,
+        "empty_preflight_allows": true,
+        "caller_provider_matches": true,
+        "caller_identity_matches": true,
+        "unmanaged_parent_absent": true,
+        "authoritative_child_found": true,
+        "isolated_query_bytes_unchanged": true,
+        "stop_seconds": [
+          0.15280350006651133,
+          0.1026082499884069,
+          0.1154345409013331
+        ],
+        "budget_counts": [
+          1,
+          2
+        ],
+        "first_decisions": [
+          "block",
+          "block",
+          null
+        ],
+        "first_call_sequence": [
+          "help",
+          "children",
+          "children",
+          "children"
+        ],
+        "first_two_block": true,
+        "third_allows": true,
+        "error_fails_open": true,
+        "error_seconds": 0.11539079109206796,
+        "error_help_observed": true,
+        "error_actual_query_observed": true,
+        "timeout_fails_open": true,
+        "timeout_seconds": 0.8494384170044214,
+        "timeout_help_observed": true,
+        "timeout_actual_query_observed": true,
+        "old_fails_open": true,
+        "old_seconds": 0.12145479104947299,
+        "old_help_observed": true,
+        "old_query_skipped": true,
+        "unsupported_cached": true,
+        "global_kill_switch_allows": true,
+        "lane_kill_switch_allows": true,
+        "pending_after_controls_blocks": true,
+        "descendant_declarations_stripped": true,
+        "collected_fresh_budget_allows": true,
+        "execution_collected": true,
+        "native_lifecycle_active_after_collection": true
+      }
+    }
+  ],
+  "network_deny_verified": true,
+  "binary_version": "2.1.322 (Claude Code)",
+  "agentctl_version": "v0.21.11",
+  "agentctl_sha256": "eb6b9366ac494809f95b6cf2bce4ab4af0f0954c1784f73539acf30b4ea3b853",
+  "distinct_native_sessions": true,
+  "manual_sourcing_only": true,
+  "provider_prompt_submitted": false,
+  "process_groups_reaped": true,
+  "temporary_contexts_removed": true
+}

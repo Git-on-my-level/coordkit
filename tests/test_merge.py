@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 from unittest.mock import patch
 from coordkit import merge
 from tests.support import FakeCase
@@ -38,6 +39,11 @@ class ReviewGateTests(FakeCase):
                 patch.object(review, 'live_head', return_value=live or head or self.head):
             run = review.start(self.manifest, 12345, head or self.head, str(out), label)
             out.write_text(f'findings...\nVERDICT: {verdict}\n')  # the run writes its result after starting
+            # Give the synthetic completion a distinct filesystem tick. Fast
+            # writes can share the start's tick on CI; keep the production
+            # evidence freshness check intact.
+            completed = review.open_start(self.manifest, 12345, head or self.head, str(out), run)['started_at'] + 1
+            os.utime(out, (completed, completed))
             return review.record(self.manifest, 12345, head or self.head, str(out), label, run=run, rc=0)
 
     def bus(self):

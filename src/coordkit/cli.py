@@ -24,7 +24,7 @@ def question_hook(argv):
 
 def main(argv=None):
     raw = sys.argv[1:] if argv is None else argv
-    if 'deliver' in raw and '--stop-hook' in raw:
+    if 'deliver' in raw and any(flag in raw for flag in ('--stop-hook', '--session-start-hook')):
         try:
             from .hook_runtime import hook_deadline
             with hook_deadline():

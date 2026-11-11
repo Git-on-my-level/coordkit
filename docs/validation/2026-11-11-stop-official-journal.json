@@ -1,0 +1,210 @@
+{
+  "measured_at": "2026-11-11T17:09:05.050837+00:00",
+  "binary_sha256": "eb6b9366ac494809f95b6cf2bce4ab4af0f0954c1784f73539acf30b4ea3b853",
+  "binary_version": "v0.21.11",
+  "runs": 20,
+  "method": "in-process run_stop_hook; first capability probe included; no Python startup/manifest loading",
+  "hook_ms": [
+    23.965165950357914,
+    7.108124904334545,
+    7.551249931566417,
+    8.113124989904463,
+    8.018124965019524,
+    7.018208969384432,
+    7.553125033155084,
+    6.930332980118692,
+    7.907958002761006,
+    6.4055409748107195,
+    8.252791012637317,
+    8.214334025979042,
+    8.154749986715615,
+    8.731624926440418,
+    8.1835410092026,
+    8.655457990244031,
+    8.492959081195295,
+    8.301958092488348,
+    8.310792036354542,
+    7.915416965261102
+  ],
+  "p50_ms": 8.133937488310039,
+  "p95_ms": 8.731624926440418,
+  "percentile_method": "nearest rank",
+  "calls": [
+    {
+      "command": "help",
+      "outcome": "ok",
+      "complete": null,
+      "count": null,
+      "ms": 7.042167009785771
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 6.656209006905556
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 6.689750007353723
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 6.980458041653037
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.578417076729238
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.374500040896237
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 6.590457982383668
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.159917033277452
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 6.47883303463459
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.54091702401638
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 6.008666940033436
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.648833096027374
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.488416973501444
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 6.866959040053189
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 8.300374960526824
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.761458051390946
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 8.222874952480197
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.8483340330421925
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.841957965865731
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.812791969627142
+    },
+    {
+      "command": "children",
+      "outcome": "ok",
+      "complete": true,
+      "count": 0,
+      "ms": 7.380082970485091
+    }
+  ],
+  "full_cli": {
+    "runs": 20,
+    "ms": [
+      57.02033406123519,
+      55.15079200267792,
+      57.12895805481821,
+      57.921416009776294,
+      58.423709007911384,
+      52.94891691301018,
+      47.7124999742955,
+      45.183332986198366,
+      45.78983294777572,
+      44.57295895554125,
+      43.726874981075525,
+      44.89279096014798,
+      43.836832977831364,
+      43.4002080000937,
+      43.96549996454269,
+      46.93387495353818,
+      46.24220891855657,
+      47.47058404609561,
+      49.353625043295324,
+      45.676291920244694
+    ],
+    "p50_ms": 46.588041936047375,
+    "p95_ms": 57.921416009776294,
+    "method": "CLI subprocess including Python startup/manifest load; capability cache already warm; empty synthetic caller; quiet exit 0 for every run",
+    "exit_errors": 0
+  }
+}
