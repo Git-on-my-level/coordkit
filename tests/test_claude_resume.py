@@ -98,7 +98,10 @@ Path(os.environ['CK_RESUME_DONE']).write_text('finished')
     def stop_children(self):
         for proc in self.children:
             if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass  # it exited between the poll and the signal; macOS answers EPERM for a zombie's group
             proc.wait(timeout=3)
 
     def wait_for(self, path, timeout=3):

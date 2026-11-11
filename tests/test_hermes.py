@@ -46,7 +46,8 @@ with log.open('a') as stream:
 resumed = argv[argv.index('--resume') + 1] if '--resume' in argv else ''
 if resumed and resumed == cfg.get('GONE') and not cfg.get('GONE_NO_REPORT'):
     Path(argv[argv.index('--usage-file') + 1]).write_text(json.dumps(dict(
-        api_calls=None, model=None, input_tokens=cfg.get('GONE_TOKENS'))))
+        api_calls=None, model=None, input_tokens=cfg.get('GONE_TOKENS'),
+        reasoning_tokens=cfg.get('GONE_REASONING'))))
 if resumed and resumed == cfg.get('GONE'):
     message = 'Session not found: ' + ('some-other-session' if cfg.get('GONE_OTHER') else resumed)
     if cfg.get('GONE_STDERR'):
@@ -409,6 +410,7 @@ class TurnTests(HermesCase):
         hermes.remember_session(self.lane, 'live-2')
         for behavior in (dict(GONE_OTHER='1'),        # the error names some other session
                          dict(GONE_TOKENS=40),        # the report shows tokens: a turn did run
+                         dict(GONE_REASONING=9),      # reasoning tokens are activity too
                          dict(GONE_NO_REPORT='1')):   # no usage report: unknown, may have done work
             self.calls.unlink(missing_ok=True)
             self.post(row('g-' + next(iter(behavior)).lower()))

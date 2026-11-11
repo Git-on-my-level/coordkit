@@ -151,7 +151,8 @@ def read_usage(usage_file, record):
              'reported': reported}
     # Hermes wrote its report and it shows no activity of any kind: the run ended before a turn began.
     usage['idle'] = reported and not any(usage[key] for key in (
-        'api_calls', 'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
+        'api_calls', 'input_tokens', 'output_tokens', 'reasoning_tokens',
+        'cache_read_input_tokens', 'cache_creation_input_tokens'))
     def text(key):
         value = report.get(key) or record.get(key)
         return value if isinstance(value, str) else ''
