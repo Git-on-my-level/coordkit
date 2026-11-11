@@ -91,6 +91,9 @@ def main(argv=None):
             from .ops import parser_for
             from .wake import scan
             return scan(manifest, dry_run=parser_for('wake-scan').parse_args(rest).dry_run)
+        if options.command == 'audit-state':
+            from .audit import main as audit_main
+            return audit_main(rest, manifest)
         if options.command == 'wake-at':
             from .timers import main as timers_main
             return timers_main(rest, manifest)

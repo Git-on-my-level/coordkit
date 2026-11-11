@@ -18,6 +18,7 @@ import time
 from . import hermes
 
 MAX_ROUNDS = 3
+IDLE_RETRY_WAIT = 20  # seconds before the one retry of a run that made no model call
 FAILURE_RETRIES = 2  # delayed returns, one debounce apart, for rows posted during a failed turn
 # A wake runs in the process of whoever posted the row. The lane's turn must not
 # inherit that sender's credentials or agent identity, so it gets these and nothing else.
@@ -106,6 +107,10 @@ def advance(manifest, name, identity, offset):
 def prompt(manifest, name, lines, round_number):
     inbox = f'coordkit --manifest {shlex.quote(str(manifest.file))} bus inbox {shlex.quote(name)} --full'
     head = f'Coordkit wake for lane {name}. Your bus name is {name}.'
+    lane = hermes.lane_for(manifest, name)
+    if lane and lane.state_file:
+        head = (f'Read your durable state first: {lane.state_file}\n'
+                f'Then read state audit gaps: {Path(lane.state_file).with_name(f"state-gaps-{name}.md")} (if present).\n' + head)
     if round_number:
         head += ' More addressed work arrived while your last turn ran.'
     rows = ('\nAddressed rows since your last turn:\n' + '\n'.join(lines) + '\n') if lines else '\n'
@@ -263,6 +268,51 @@ def run_turn(manifest, lane, text, timeout, session=''):
     return proc.returncode, timed_out, record, usage, model, provider, session
 
 
+def rotate_session(manifest, lane):
+    """Count completed turns in existing receipts, stopping at the last rotation."""
+    if not lane.rotate_turns:
+        return
+    session = hermes.session_id(lane)
+    if not session:
+        return
+    completed, rotated = 0, False
+    # Stream existing receipts: a large rotate_turns must not be capped by the
+    # bounded receipt tail used for status/usage reads.
+    try:
+        with hermes.receipts_path(lane).open() as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if row.get('rotated') == session:
+                    completed, rotated = 0, True
+                elif row.get('session_id') == session and row.get('ok') and not row.get('skipped'):
+                    completed, rotated = completed + 1, False
+    except FileNotFoundError:
+        return
+    if rotated:
+        hermes.remember_session(lane, '')  # a crash after the rotation receipt
+        return
+    if completed < lane.rotate_turns:
+        return
+    from .. import audit
+    ok = False
+    try:
+        audit.run(manifest, lane.name, turn_held=True)
+        ok = True
+    except Exception as exc:
+        print('HERMES_AUDIT_FAILED lane=' + lane.name + ' ' + type(exc).__name__, file=sys.stderr, flush=True)
+    # A failed audit is visible in doctor; rotation still starts fresh on the next turn.
+    now = time.time()
+    hermes.append_receipt(lane, {'at': now, 'ended_at': now, 'lane': lane.name, 'ok': True,
+                                 'usage': {'api_calls': 0}, 'skipped': 'session rotation', 'rotated': session,
+                                 'audit_ok': ok})
+    hermes.remember_session(lane, '')
+
+
 def failure_wait(manifest):
     return manifest.bus.wake_debounce_minutes * 60 + 1
 
@@ -311,6 +361,7 @@ def main(argv=None):
                 round_number, rounds = rounds, rounds + 1
                 advance(manifest, lane.name, identity, offset)
                 started = time.time()
+                rotate_session(manifest, lane)  # recover a crash after a completed turn receipt
                 text = prompt(manifest, lane.name, lines, round_number)
                 known = hermes.session_id(lane)
                 code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout, known)
@@ -326,6 +377,16 @@ def main(argv=None):
                     hermes.remember_session(lane, '')
                     known = ''
                     code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout)
+                if code and not timed_out and usage['idle']:
+                    # Hermes reported no call and no token: the run ended before a turn began
+                    # (a backend that did not start in time on a loaded host, for example).
+                    # Nothing was done, so the same rows get one more try instead of being lost.
+                    print(f'HERMES_TURN lane={lane.name} ended before any model call (exit {code}); retrying once',
+                          file=sys.stderr, flush=True)
+                    time.sleep(IDLE_RETRY_WAIT)
+                    # Resume the session the idle run reported, if it created one.
+                    code, timed_out, record, usage, model, provider, session = run_turn(
+                        manifest, lane, text, timeout, session or known)
                 if session and session != known:
                     hermes.remember_session(lane, session)
                     if not known:
@@ -340,6 +401,8 @@ def main(argv=None):
                                              'usage': usage})
                 print(f'HERMES_TURN lane={lane.name} round={round_number} rows={len(lines)} '
                       f'ok={ok} exit={code} {error}'.rstrip(), file=sys.stderr, flush=True)
+                if ok:
+                    rotate_session(manifest, lane)
                 if not ok:
                     failure = 1 if round_number else (code or 1)
                     break

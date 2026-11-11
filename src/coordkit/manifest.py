@@ -98,6 +98,15 @@ class UsageLane:
     turn_timeout: str = ""  # hermes only: wall-clock ceiling for one turn (default 2h)
     stop_requires_waiter: bool | None = None  # absent inherits [deliver]
     stop_requires_agentctl_collection: bool | None = None
+    state_file: str = ""  # absolute durable lane memory
+    rotate_turns: int = 0  # hermes only; absent disables session rotation
+
+
+@dataclass
+class Audit:
+    selector: dict[str, str] = field(default_factory=lambda: {"pool": "plan"})
+    timeout: str = "30m"
+    interval: str = ""  # absent disables scheduled audits
 
 
 @dataclass
@@ -361,7 +370,7 @@ def _table(cls, data, section, required=()):
     lists = {"failure_realert_intervals", "directories", "flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as", "observed_labels"}
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects", "repos", "selector"}
     booleans = {"required", "stop_requires_waiter", "stop_requires_agentctl_collection", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
-    integers = {"orphan_batch_lines", "orphan_ask_cap", "fetch_timeout_seconds", "max_bytes", "auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes", "roster_unenrolled_posts", "roster_sink_received"} | {f.name for f in fields(Limits)}
+    integers = {"rotate_turns", "orphan_batch_lines", "orphan_ask_cap", "fetch_timeout_seconds", "max_bytes", "auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes", "roster_unenrolled_posts", "roster_sink_received"} | {f.name for f in fields(Limits)}
     numbers = {"wake_debounce_minutes", "idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
     for key, value in data.items():
         ok = (isinstance(value, list) and all(type(x) is (int if key == "ci" else str) for x in value)) if key in lists else (
@@ -424,6 +433,7 @@ class Manifest:
     lanes: list[UsageLane] = field(default_factory=list)
     mcp: Mcp = field(default_factory=Mcp)
     services: Services = field(default_factory=Services)
+    audit: Audit = field(default_factory=Audit)
     accounts: Accounts = field(default_factory=Accounts)
     handoffs: Handoffs = field(default_factory=Handoffs)
     relay: Relay | None = None
@@ -536,7 +546,7 @@ def load(path: str | Path | None = None, *, allow_unknown_tables: bool = False) 
         question_data["delivery_cli"] = question_data.get("delivery_cli") or legacy_delivery_cli
         raw["questions"] = question_data
     config = {name: _table(cls, raw.get(name, {}), name) for name, cls in
-              (("deliver", Deliver), ("bus", Bus), ("agentctl", Agentctl), ("lane", Lane), ("loop", Loop), ("reconciler", Reconciler),
+              (("audit", Audit), ("deliver", Deliver), ("bus", Bus), ("agentctl", Agentctl), ("lane", Lane), ("loop", Loop), ("reconciler", Reconciler),
                ("wait", Wait), ("merge", Merge), ("launchd", Launchd), ("rc_host", RcHost), ("shadow", Shadow), ("limits", Limits), ("escalation", Escalation), ("obligations", Obligations), ("addressed", Addressed), ("review", Review), ("questions", Questions), ("mcp", Mcp), ("services", Services), ("accounts", Accounts), ("handoffs", Handoffs))}
     from .handoffs import validate_config
     validate_config(config['handoffs'])
@@ -551,6 +561,13 @@ def load(path: str | Path | None = None, *, allow_unknown_tables: bool = False) 
         config['relay'] = _table(Relay, raw['relay'], 'relay', ('url', 'site', 'secret_file'))
         from .relay import validate
         validate(config['relay'])
+    audit = config['audit']
+    if not audit.selector:
+        raise ManifestError('invalid_value: audit.selector must be nonempty')
+    if parse_selector('+'.join(f'{key}:{value}' for key, value in audit.selector.items())) != audit.selector:
+        raise ManifestError('invalid_value: audit.selector values must be single selector fields')
+    if duration(audit.timeout) <= 0 or (audit.interval and duration(audit.interval) <= 0):
+        raise ManifestError('invalid_value: audit durations must be positive')
     actl = config["agentctl"]
     if "agentctl" in raw and not actl.pools.get("implement"):
         raise ManifestError("missing_key: agentctl.pools.implement")
@@ -676,6 +693,12 @@ def load(path: str | Path | None = None, *, allow_unknown_tables: bool = False) 
             raise ManifestError("invalid_value: lanes.resume must be headless or absent")
         if lane.harness not in ("", "claude", "claude-code", "opencode", "hermes"):
             raise ManifestError("invalid_value: lanes.harness must be claude, opencode or hermes")
+        if lane.state_file and not Path(lane.state_file).is_absolute():
+            raise ManifestError('invalid_value: lanes.state_file must be absolute')
+        if 'state_file' in row and not lane.state_file:
+            raise ManifestError('invalid_value: lanes.state_file must be nonempty')
+        if 'rotate_turns' in row and (lane.rotate_turns < 1 or lane.harness != 'hermes' or not lane.state_file):
+            raise ManifestError('invalid_value: lanes.rotate_turns needs a positive integer, hermes and state_file')
         if lane.harness == "hermes":
             # The profile is an argv token and names the lane's only session owner.
             if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", lane.profile):
