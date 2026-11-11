@@ -57,6 +57,10 @@ late = cfg.get('LATE_ROW')
 if late and calls == 0:
     with open(cfg['BUS'], 'a') as stream:
         stream.write(late + '\\n')
+if cfg.get('ORPHAN'):
+    import subprocess
+    subprocess.Popen([sys.executable, '-S', '-c', 'import time; time.sleep(20)'], start_new_session=True)
+    time.sleep(20)
 release = cfg.get('RELEASE')
 deadline = time.monotonic() + 30
 while release and not Path(release).exists() and time.monotonic() < deadline:
@@ -130,6 +134,8 @@ class ManifestTests(HermesCase):
                          ('harness = "hermes"\n', '')):
             with self.subTest(new=new), self.assertRaises(ManifestError):
                 self.load_with(old, new)
+        with self.assertRaisesRegex(ManifestError, 'runtime hermes but no'):
+            self.load_with('name = "ops"\nconfig_dir', 'name = "renamed"\nconfig_dir')
         twin = LANE.partition('[[lanes]]')[2].replace('name = "ops"', 'name = "ops2"')
         self.file.write_text(BASE + LANE + '[[lanes]]' + twin)
         with self.assertRaisesRegex(ManifestError, 'one hermes lane per profile'):
@@ -239,6 +245,35 @@ class TurnTests(HermesCase):
                       json.dumps(dict(json.loads(row('ack1', kind='ack')), re='x'))):
             self.assertFalse(hermes_turn.wants_turn(json.loads(quiet), 'ops', targets), quiet)
 
+    def test_a_timed_out_turn_with_a_detached_child_does_not_hold_the_runner(self):
+        """Contract: the lane lock is never held by a descendant that kept the output open."""
+        self.steer(ORPHAN='1')
+        started = time.monotonic()
+        with patch.object(hermes_turn, 'KILL_GRACE', .5):
+            code, timed_out, record, *_ = hermes_turn.run_turn(self.manifest, self.lane, 'hello', .5)
+        self.assertTrue(timed_out)
+        self.assertEqual(record, {})
+        self.assertLess(time.monotonic() - started, 8)
+
+    def test_a_request_left_while_the_lock_was_held_is_served_after_release(self):
+        """Contract: a row posted just after the runner's last cursor read still gets its turn."""
+        self.attach()
+        seen = []
+        real = hermes_turn.pending
+        def pending(manifest, name):
+            result = real(manifest, name)
+            seen.append(len(result[2]))
+            if len(seen) == 2:  # the runner has read "nothing new"; a sender now posts and asks
+                self.post(row('race1'))
+                hermes.request_turn(self.lane)
+            return result
+        with patch.object(hermes_turn, 'pending', side_effect=pending):
+            self.assertEqual(self.turn(), 0)
+        calls = self.invocations()
+        self.assertEqual(len(calls), 2)
+        self.assertIn('--re race1', calls[1]['argv'][-1])
+        self.assertFalse(hermes.turn_requested(self.lane))
+
     def test_a_second_runner_yields_to_the_lock_holder(self):
         with hermes.turn_lock(self.lane) as held:
             self.assertIsNotNone(held)
@@ -306,6 +341,34 @@ class WakeTests(HermesCase):
         self.assertFalse(live)
         self.assertIn('hermes binary unavailable', evidence)
 
+    def test_role_and_owner_rows_wake_the_lane_and_leave_a_request(self):
+        """Contract: an on-demand lane has no waiter to show it role or owned rows; the wake must."""
+        self.file.write_text(self.file.read_text() + '[addressed.roles]\noperators = ["ops"]\n')
+        self.manifest = load(self.file)
+        bus.configure(self.manifest)
+        woken = []
+        self.adapter.wake = lambda manifest, name, rows, key: woken.append(name) or {'status': 'woken'}
+        with patch('coordkit.wake.wake_adapters', return_value=[self.adapter]):
+            wake.notify(self.manifest, [json.loads(row('r1', to='operators'))])
+            self.assertEqual(woken, ['ops'])
+            self.assertTrue(hermes.turn_requested(self.lane))
+            wake.wake_path(self.manifest, 'ops').unlink()
+            owned = dict(json.loads(row('o1', to='someone-else', kind='ruling')), owner='ops')
+            wake.notify(self.manifest, [owned])
+            self.assertEqual(woken, ['ops', 'ops'])
+            wake.wake_path(self.manifest, 'ops').unlink()
+            wake.notify(self.manifest, [json.loads(row('self1', to='operators', frm='ops'))])
+        self.assertEqual(woken, ['ops', 'ops'])  # its own post to its role wakes nobody
+
+    def test_a_runner_that_vanished_without_a_receipt_reads_as_unreachable(self):
+        record = {'at': time.time() - 5, 'lane': 'ops', 'key': 'k', 'status': 'woken', 'attempts': []}
+        write_json(wake.wake_path(self.manifest, 'ops'), record)
+        self.assertEqual(addressed.listening(self.manifest, 'ops'), (True, 'hermes wake-on-demand lane'))  # still starting
+        write_json(wake.wake_path(self.manifest, 'ops'), dict(record, at=time.time() - hermes.RUNNER_GRACE - 5))
+        self.assertEqual(addressed.listening(self.manifest, 'ops'), (False, 'hermes runner exited without a receipt'))
+        hermes.append_receipt(self.lane, {'at': time.time(), 'ended_at': time.time(), 'ok': True, 'usage': {}})
+        self.assertTrue(addressed.listening(self.manifest, 'ops')[0])
+
     def test_other_lanes_are_untouched(self):
         self.assertIsNone(wake.on_demand(self.manifest, 'worker'))
         self.assertEqual(self.adapter.wake(self.manifest, 'worker', [], 'k'),
@@ -320,6 +383,8 @@ class UsageAndDeliveryTests(HermesCase):
             hermes.append_receipt(self.lane, {'at': ended - 5, 'ended_at': ended, 'ok': True, 'model': model,
                                               'usage': {'input_tokens': 10, 'output_tokens': 2,
                                                         'cache_read_input_tokens': 4, 'api_calls': 2}})
+        hermes.append_receipt(self.lane, {'at': now - 20, 'ended_at': now - 10, 'ok': False,  # no provider call made
+                                          'usage': {'api_calls': 0}})
         with hermes.receipts_path(self.lane).open('a') as stream:
             stream.write('not json\n')
         at = dt.datetime.fromtimestamp(now, dt.timezone.utc)
@@ -336,7 +401,11 @@ class UsageAndDeliveryTests(HermesCase):
 
     def test_hook_block_is_owned_reversible_and_never_edits_a_foreign_hooks_map(self):
         config = Path(self.lane.config_dir)/'config.yaml'
+        self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'install'), 'OK install')
+        self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'uninstall'), 'OK uninstall')
+        self.assertFalse(config.exists())  # created for the hook alone, so removed with it
         config.write_text('model:\n  provider: vendor\n')
+        config.chmod(0o640)
         self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'status'), 'absent')
         self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'install'), 'OK install')
         self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'install'), 'OK install')  # reconciles in place
@@ -352,8 +421,10 @@ class UsageAndDeliveryTests(HermesCase):
                 hermes.manage_hook(self.manifest, 'ops', action)
         self.assertIn('timeout: 30', config.read_text())
         config.write_text(text)
+        self.assertEqual(config.stat().st_mode & 0o777, 0o640)
         self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'uninstall'), 'OK uninstall')
         self.assertEqual(config.read_text(), 'model:\n  provider: vendor\n')
+        self.assertEqual(config.stat().st_mode & 0o777, 0o640)
         self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'uninstall'), 'absent')
         config.write_text('hooks:\n  pre_tool_call: []\n')
         with self.assertRaisesRegex(ManifestError, 'hermes_hooks_present'):
@@ -382,4 +453,12 @@ class UsageAndDeliveryTests(HermesCase):
             stranger = io.StringIO()
             deliver.run_hook(self.manifest, json.dumps(dict(payload, profile='someone-else')), stranger)
             self.assertEqual(stranger.getvalue(), '')
+            # A turn of another lane that starts Hermes here passes its own COORDKIT_AS down.
+            with patch.dict(os.environ, COORDKIT_AS='worker'):
+                deliver.run_hook(self.manifest, json.dumps(payload), stranger)
+            self.assertEqual(stranger.getvalue(), '')
+        # And an inherited COORDKIT_AS=ops in a different profile's session names nobody.
+        with patch.dict(os.environ, COORDKIT_AS='ops', HERMES_HOME=str(self.root/'another-home')):
+            deliver.run_hook(self.manifest, json.dumps(dict(payload, profile='someone-else')), stranger)
+        self.assertEqual(stranger.getvalue(), '')
         self.assertEqual(len(hermes_turn.pending(self.manifest, 'ops')[2]), 1)  # h2 stays for the lane

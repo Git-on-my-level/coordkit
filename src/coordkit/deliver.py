@@ -174,18 +174,17 @@ def deliver(manifest, payload, out=None):
     event = payload.get('hook_event_name')
     if event not in EVENTS:
         return
-    profile_lane = None
-    if event == HERMES_EVENT and not os.environ.get('COORDKIT_AS'):
-        # Hermes names the profile in every hook payload, and a profile holds one lane.
-        # The payload alone is not identity: the hook must also run with that profile's
-        # home, which Hermes exports to its hooks, as COORDKIT_AS is for other sessions.
+    if event == HERMES_EVENT:
+        # A Hermes hook speaks for exactly one lane: the one whose profile the payload names
+        # and whose home Hermes exported to this hook. An inherited COORDKIT_AS (a turn that
+        # starts Hermes in another profile) never widens that, and must agree if present.
         home = os.environ.get('HERMES_HOME')
-        profile_lane = next((lane for lane in manifest.lanes if getattr(lane, 'harness', '') == 'hermes'
-                             and getattr(lane, 'profile', '') == payload.get('profile') and home
-                             and Path(home).expanduser().resolve() == Path(lane.config_dir).expanduser().resolve()),
-                            None)
-    if profile_lane is not None:
-        name, how = profile_lane.name, 'profile'
+        lane = next((lane for lane in manifest.lanes if getattr(lane, 'harness', '') == 'hermes'
+                     and getattr(lane, 'profile', '') == payload.get('profile') and home
+                     and Path(home).expanduser().resolve() == Path(lane.config_dir).expanduser().resolve()), None)
+        if lane is None or os.environ.get('COORDKIT_AS', lane.name) not in ('', lane.name):
+            return
+        name, how = lane.name, 'profile'
     else:
         name, how = identity.asker_for(manifest, payload.get('session_id'), payload.get('transcript_path'),
                                        transcript_max_bytes=MAX_TRANSCRIPT_READ)

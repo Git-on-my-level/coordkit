@@ -19,6 +19,7 @@ import time
 from ..process import ToolError
 
 REFUSAL_SECONDS = 5
+RUNNER_GRACE = 120  # a runner that is neither holding its lock nor receipted by now is gone
 DEFAULT_TURN_TIMEOUT = '2h'
 RECEIPT_TAIL = 2 * 1024 * 1024
 HOOK_MARKER = 'deliver --hook'
@@ -53,6 +54,25 @@ def lock_path(lane):
 
 def receipts_path(lane):
     return state_dir()/f'{lane_key(lane)}.turns.jsonl'
+
+
+def request_path(lane):
+    return state_dir()/f'{lane_key(lane)}.rewake'
+
+
+def request_turn(lane):
+    """Left by a sender before it checks whether a turn is running; the runner reads it after its lock."""
+    path = request_path(lane)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
+
+
+def turn_requested(lane):
+    return request_path(lane).exists()
+
+
+def take_request(lane):
+    request_path(lane).unlink(missing_ok=True)
 
 
 def session_path(lane):
@@ -166,6 +186,10 @@ def reachable(manifest, name):
     last = last_receipt(lane)
     if last and not last.get('ok') and last['ended_at'] >= record.get('at', 0):
         return False, 'hermes turn failed: ' + ' '.join(str(last.get('error') or last.get('exit')).split())[:160]
+    if (record.get('status') == 'woken' and time.time() - record.get('at', 0) > RUNNER_GRACE
+            and not (last and last['ended_at'] >= record['at'])):
+        # The runner holds the lock until it has written a receipt. Neither exists: it died.
+        return False, 'hermes runner exited without a receipt'
     return True, 'hermes wake-on-demand lane'
 
 
@@ -200,40 +224,54 @@ def manage_hook(manifest, name, action):
     lane = lane_for(manifest, name)
     if lane is None:
         raise ManifestError('not_a_hermes_lane: ' + name)
+    from ..routing import locked
     config = Path(lane.config_dir).expanduser()/'config.yaml'
-    text = config.read_text() if config.exists() else ''
-    start, end = text.find(HOOK_BEGIN), text.find(HOOK_END)
-    owned = start >= 0 and end > start
-    block = text[start:end + len(HOOK_END)] + '\n' if owned else ''
     receipt = manifest.paths.root/f'hook-hermes-{lane_key(lane)}.json'
-    written = (read_json(receipt, {}) or {}).get('block')
-    if action == 'status':
-        return ('drift' if owned and block != written else 'installed coordkit-owned' if owned else
-                'installed by hand' if HOOK_MARKER in text else 'absent')
-    manifest.writable()
-    if owned and block != written:
-        # The receipt holds exactly what coordkit wrote. A block that differs was edited
-        # by someone else, and replacing or removing it would lose their change.
-        raise ManifestError('hermes_hook_conflict: the marked block in ' + str(config)
-                            + ' was changed after install; inspect and remove it by hand')
-    rest = (text[:start] + text[end + len(HOOK_END):].lstrip('\n')) if owned else text
-    if action == 'install':
-        if rest.lstrip().startswith('{') or re.search(r'^hooks\s*:', rest, re.M):
-            raise ManifestError('hermes_hooks_present: add this under hooks.pre_llm_call in ' + str(config)
-                                + ' yourself:\n' + hook_block(manifest))
-        rest = rest + ('' if not rest or rest.endswith('\n') else '\n') + hook_block(manifest)
-        write_json(receipt, {'target': str(config), 'block': hook_block(manifest)})  # receipt first
-    elif not owned:
-        return 'absent'
-    temporary = config.with_name(config.name + '.coordkit.tmp')
-    fd = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as stream:
-        stream.write(rest)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, config)
-    if action == 'uninstall':
-        receipt.unlink(missing_ok=True)
+    if action != 'status':
+        manifest.writable()
+    # One writer at a time, and the bytes replaced are the bytes that were read.
+    with locked(receipt.with_suffix('.lock')):
+        existed = config.exists()
+        text = config.read_text() if existed else ''
+        mode = config.stat().st_mode & 0o777 if existed else 0o600
+        start, end = text.find(HOOK_BEGIN), text.find(HOOK_END)
+        owned = start >= 0 and end > start
+        block = text[start:end + len(HOOK_END)] + '\n' if owned else ''
+        record = read_json(receipt, {}) or {}
+        if action == 'status':
+            return ('drift' if owned and block != record.get('block') else 'installed coordkit-owned' if owned else
+                    'installed by hand' if HOOK_MARKER in text else 'absent')
+        if owned and block != record.get('block'):
+            # The receipt holds exactly what coordkit wrote. A block that differs was edited
+            # by someone else, and replacing or removing it would lose their change.
+            raise ManifestError('hermes_hook_conflict: the marked block in ' + str(config)
+                                + ' was changed after install; inspect and remove it by hand')
+        rest = (text[:start] + text[end + len(HOOK_END):].lstrip('\n')) if owned else text
+        if action == 'install':
+            if rest.lstrip().startswith('{') or re.search(r'^hooks\s*:', rest, re.M):
+                raise ManifestError('hermes_hooks_present: add this under hooks.pre_llm_call in ' + str(config)
+                                    + ' yourself:\n' + hook_block(manifest))
+            rest = rest + ('' if not rest or rest.endswith('\n') else '\n') + hook_block(manifest)
+            # Receipt first. It keeps whether the file existed before the first install.
+            write_json(receipt, {'target': str(config), 'block': hook_block(manifest),
+                                 'created': record.get('created', not existed)})
+        elif not owned:
+            return 'absent'
+        if (config.read_text() if config.exists() else '') != text:
+            raise ManifestError('hermes_config_changed: ' + str(config) + ' changed during the update; run it again')
+        if action == 'uninstall' and record.get('created') and not rest.strip():
+            config.unlink(missing_ok=True)  # coordkit created it for the hook alone
+        else:
+            temporary = config.with_name(config.name + '.coordkit.tmp')
+            fd = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as stream:
+                stream.write(rest)
+                stream.flush()
+                os.fchmod(stream.fileno(), mode)
+                os.fsync(stream.fileno())
+            os.replace(temporary, config)
+        if action == 'uninstall':
+            receipt.unlink(missing_ok=True)
     return 'OK ' + action
 
 

@@ -141,26 +141,31 @@ def run_turn(manifest, lane, text, timeout, session=''):
     with tempfile.TemporaryDirectory(prefix='coordkit-hermes-') as scratch:
         usage_file = Path(scratch)/'usage.json'
         env = turn_env(manifest, lane)
-        proc = subprocess.Popen(argv_for(lane, text, usage_file, session), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=sys.stderr, env=env, cwd=lane.cwd,
-                                start_new_session=True)
+        # Output goes to a file, not a pipe: a tool the turn left running may keep the
+        # descriptor open, and a pipe would then hold this runner (and the lane lock) with it.
+        out_file = Path(scratch)/'result.json'
+        with out_file.open('wb') as sink:
+            proc = subprocess.Popen(argv_for(lane, text, usage_file, session), stdin=subprocess.DEVNULL,
+                                    stdout=sink, stderr=sys.stderr, env=env, cwd=lane.cwd,
+                                    start_new_session=True)
         timed_out = False
         try:
-            out, _ = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
                     os.killpg(proc.pid, sig)
-                except ProcessLookupError:
-                    break
+                except (ProcessLookupError, PermissionError):
+                    pass
                 try:
-                    out, _ = proc.communicate(timeout=KILL_GRACE)
+                    proc.wait(timeout=KILL_GRACE)
                     break
                 except subprocess.TimeoutExpired:
                     continue
-            else:
-                out, _ = proc.communicate()
+        with out_file.open('rb') as stream:
+            stream.seek(max(0, os.fstat(stream.fileno()).st_size - MAX_RECORD))
+            out = stream.read()
         record = {}
         for line in reversed((out or b'')[-MAX_RECORD:].decode(errors='replace').splitlines()):
             try:
@@ -188,44 +193,51 @@ def main(argv=None):
         print(f'HERMES_TURN no hermes lane named {opts.lane}', file=sys.stderr)
         return 2
     timeout = duration(lane.turn_timeout or hermes.DEFAULT_TURN_TIMEOUT)
-    with hermes.turn_lock(lane) as held:
-        if held is None:
-            return 0  # another runner owns this lane's turns and will see the new rows
-        for round_number in range(MAX_ROUNDS):
-            identity, offset, lines = pending(manifest, lane.name)
-            if round_number and not lines:
-                break
-            advance(manifest, lane.name, identity, offset)
-            started = time.time()
-            text = prompt(manifest, lane.name, lines, round_number)
-            known = hermes.session_id(lane)
-            code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout, known)
-            if (known and code and not timed_out and not usage['api_calls']
-                    and str(record.get('error', '')).startswith('session not found')):
-                # Hermes says the session is gone and made no provider call, so nothing
-                # ran. Any other failure may have done work and is never repeated here.
-                print(f'HERMES_TURN lane={lane.name} session {known} did not resume (exit {code}); starting a new one',
-                      file=sys.stderr, flush=True)
-                hermes.remember_session(lane, '')
-                known = ''
-                code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout)
-            if session and session != known:
-                hermes.remember_session(lane, session)
-                if not known:
-                    title_session(lane, session)
-            ok = code == 0 and not timed_out and record.get('status') == 'success'
-            error = '' if ok else ('turn_timeout' if timed_out else
-                                   ' '.join(str(record.get('error') or f'exit {code}').split())[:300])
-            hermes.append_receipt(lane, {'at': started, 'ended_at': time.time(), 'lane': lane.name,
-                                         'profile': lane.profile, 'key': opts.key, 'round': round_number,
-                                         'rows': len(lines), 'exit': code, 'ok': ok, 'error': error,
-                                         'session_id': session, 'model': model, 'provider': provider,
-                                         'usage': usage})
-            print(f'HERMES_TURN lane={lane.name} round={round_number} rows={len(lines)} '
-                  f'ok={ok} exit={code} {error}'.rstrip(), file=sys.stderr, flush=True)
-            if not ok:
-                return 1 if round_number else (code or 1)
-    return 0
+    rounds = 0
+    while True:
+        with hermes.turn_lock(lane) as held:
+            if held is None:
+                return 0  # another runner owns this lane's turns and will see the new rows
+            while rounds < MAX_ROUNDS:
+                hermes.take_request(lane)
+                identity, offset, lines = pending(manifest, lane.name)
+                if rounds and not lines:
+                    break
+                round_number, rounds = rounds, rounds + 1
+                advance(manifest, lane.name, identity, offset)
+                started = time.time()
+                text = prompt(manifest, lane.name, lines, round_number)
+                known = hermes.session_id(lane)
+                code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout, known)
+                if (known and code and not timed_out and not usage['api_calls']
+                        and str(record.get('error', '')).startswith('session not found')):
+                    # Hermes says the session is gone and made no provider call, so nothing
+                    # ran. Any other failure may have done work and is never repeated here.
+                    print(f'HERMES_TURN lane={lane.name} session {known} did not resume (exit {code}); starting a new one',
+                          file=sys.stderr, flush=True)
+                    hermes.remember_session(lane, '')
+                    known = ''
+                    code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout)
+                if session and session != known:
+                    hermes.remember_session(lane, session)
+                    if not known:
+                        title_session(lane, session)
+                ok = code == 0 and not timed_out and record.get('status') == 'success'
+                error = '' if ok else ('turn_timeout' if timed_out else
+                                       ' '.join(str(record.get('error') or f'exit {code}').split())[:300])
+                hermes.append_receipt(lane, {'at': started, 'ended_at': time.time(), 'lane': lane.name,
+                                             'profile': lane.profile, 'key': opts.key, 'round': round_number,
+                                             'rows': len(lines), 'exit': code, 'ok': ok, 'error': error,
+                                             'session_id': session, 'model': model, 'provider': provider,
+                                             'usage': usage})
+                print(f'HERMES_TURN lane={lane.name} round={round_number} rows={len(lines)} '
+                      f'ok={ok} exit={code} {error}'.rstrip(), file=sys.stderr, flush=True)
+                if not ok:
+                    return 1 if round_number else (code or 1)
+        # A sender that saw the lock held just before it was released has left a request
+        # and started nothing. It is checked only after the release, so none is missed.
+        if rounds >= MAX_ROUNDS or not hermes.turn_requested(lane):
+            return 0
 
 
 if __name__ == '__main__':

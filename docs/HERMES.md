@@ -5,7 +5,7 @@ work arrives, and the lane's memory, skills and model live in the profile.
 
 ```toml
 [addressed.agents.ops]
-runtime = "hermes"
+runtime = "hermes"          # needs the [[lanes]] entry below with the same name
 fallback = "coordinator"
 
 [[lanes]]
@@ -26,8 +26,11 @@ credentials or model settings.
 
 ## What happens on a wake
 
-An addressed row for the lane starts a detached runner
-(`python -m coordkit.adapters.hermes_turn`). The runner:
+A row addressed to the lane, to a role it is a member of, or naming it as
+owner starts a detached runner (`python -m coordkit.adapters.hermes_turn`).
+The sender first leaves a turn request, then checks whether a runner holds the
+lane's lock; the runner looks for a request again after releasing the lock, so a
+row posted just as a turn ends is not missed. The runner:
 
 1. Takes the lane's turn lock. A second runner exits at once; the first one will
    see the new rows.
@@ -57,7 +60,8 @@ A failed or timed-out turn ends the wake. The row stays in the lane's bus inbox.
 
 `bus state`, the roster and the deaf sweep treat a Hermes lane as reachable
 while a turn can be started: a turn is running, or the last wake and turn did
-not fail. After a failed wake or turn the lane reads as not listening, with the
+not fail. After a failed wake or turn, or when a woken runner is gone two
+minutes later without a receipt, the lane reads as not listening, with the
 reason, until a later wake succeeds, so its fallback hears about it.
 
 The wake debounce ends as soon as the woken turn finishes cleanly. A row posted
@@ -80,12 +84,15 @@ their rows in the prompt, so the hook matters for turns you start in the profile
 yourself. It shares the delivery cursor with the runner; a row is shown once.
 
 The hook answers only when it runs with that profile's home (`HERMES_HOME`,
-which Hermes exports to its hooks) and the payload names the lane's profile.
+which Hermes exports to its hooks) and the payload names the lane's profile. A
+`COORDKIT_AS` inherited from another lane's turn does not change that.
 
 Coordkit has no YAML parser. If the profile already has a `hooks:` map, install
 refuses and prints the entry to add by hand. A receipt records the block as
 written; if the block is edited afterwards, `status` reports `drift` and install
-and uninstall refuse until you remove it by hand. The runner passes `--accept-hooks`,
+and uninstall refuse until you remove it by hand. Updates keep the file's mode,
+refuse if the file changed while they ran, and uninstall removes a config file
+that install created. The runner passes `--accept-hooks`,
 so every hook in that profile's config runs without a consent prompt: keep the
 profile's config under your own control.
 

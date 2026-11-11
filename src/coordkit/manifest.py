@@ -691,6 +691,11 @@ def load(path: str | Path | None = None, *, allow_unknown_tables: bool = False) 
     profiles = [lane.profile for lane in lanes if lane.harness == "hermes"]
     if len(set(profiles)) != len(profiles):
         raise ManifestError("invalid_value: lanes.profile duplicate; one hermes lane per profile")
+    hermes_lanes = {lane.name for lane in lanes if lane.harness == "hermes"}
+    for name, spec in config["addressed"].agents.items():
+        # Routing asks the lane table which harness owns a name; a runtime label alone wakes nothing.
+        if spec.get("runtime") == "hermes" and name not in hermes_lanes:
+            raise ManifestError(f'invalid_value: addressed.agents.{name} has runtime hermes but no [[lanes]] entry with harness = "hermes"')
     session_ids = [lane.session_id for lane in lanes if lane.session_id]
     if len(set(session_ids)) != len(session_ids):
         raise ManifestError("invalid_value: lanes.session_id duplicate")

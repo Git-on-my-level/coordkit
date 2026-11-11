@@ -154,7 +154,21 @@ def notify(manifest, rows):
                   and row.get('frm') != row.get('to')
                   and not (row.get('kind') in ('reply', 'answer', 'ack')
                            and (row.get('re') or recently_woken(manifest, row.get('frm', ''))))]
-    for name in dict.fromkeys(row['to'] for row in actionable):
+    from .routing import roles as role_members
+    members = role_members(manifest)
+
+    def recipients(row):
+        """The addressee, plus lanes that only a wake can reach: a waiter or hook shows a
+        busy session its role's and its owned rows, but an on-demand lane has neither."""
+        extra = [m for m in members.get(row['to'], ()) if on_demand(manifest, m) is not None]
+        if row.get('owner') and on_demand(manifest, row['owner']) is not None:
+            extra.append(row['owner'])
+        return [row['to'], *[m for m in extra if m != row.get('frm')]]
+
+    for name in dict.fromkeys(name for row in actionable for name in recipients(row)):
+        if name in names and not retired(manifest, name) and on_demand(manifest, name) is not None:
+            # Ask before looking: a runner about to release its lock still finds the request.
+            on_demand(manifest, name).request_turn(on_demand(manifest, name).lane_for(manifest, name))
         if name not in names or retired(manifest, name) or is_listening(manifest, name, rows):
             continue
         path = wake_path(manifest, name)

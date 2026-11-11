@@ -489,9 +489,9 @@ def hermes_usage(lane, since, until):
         if not since <= at <= until:
             continue
         usage = row.get('usage') or {}
-        calls = _count(usage.get('api_calls'))
-        result.turns += calls or 1
-        result.missing_usage += not calls
+        known = type(usage.get('api_calls')) is int and usage['api_calls'] >= 0
+        result.turns += usage['api_calls'] if known else 1  # a run that made no call counts none
+        result.missing_usage += not known
         for key in TOKEN_FIELDS:
             setattr(result, key, getattr(result, key) + _count(usage.get(key)))
         model = row.get('model')
