@@ -70,7 +70,7 @@ def block_reason(session):
     def remaining():
         budget = deadline - time.monotonic()
         if budget <= 0:
-            raise TimeoutError('agentctl collection guard deadline')
+            raise process.ToolError('agentctl', 6, 'collection guard deadline', 'tool_timeout')
         return budget
     try:
         now = dt.datetime.now(dt.timezone.utc)
@@ -104,5 +104,7 @@ def block_reason(session):
                 actions.append(f'arm a background waiter: `agentctl await {key} --content`')
         more = f'; +{len(pending) - 5} more' if len(pending) > 5 else ''
         return 'agentctl work needs collection: ' + '; '.join(actions) + more
-    except (process.ToolError, OSError, ValueError, KeyError, TypeError, AttributeError, TimeoutError):
+    except TimeoutError:
+        raise  # The outer hook alarm must abort all remaining state access.
+    except (process.ToolError, OSError, ValueError, KeyError, TypeError, AttributeError):
         return None

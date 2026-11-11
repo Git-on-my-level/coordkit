@@ -6,6 +6,7 @@ import datetime as dt
 import io
 import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 import time
@@ -104,8 +105,9 @@ class StopGuardTests(DeliveryCase):
             time.sleep(1)
             finished.append(True)
         self.inventory.side_effect = slow_inventory
-        with patch.object(deliver, 'HOOK_TIMEOUT', .03):
+        with patch.object(deliver, 'HOOK_TIMEOUT', .03), patch.object(Path, 'unlink') as unlink:
             self.assertIsNone(self.decision())
+            unlink.assert_not_called()
         self.assertEqual(finished, [])
 
     def test_agentctl_and_bus_reasons_share_budget(self):
