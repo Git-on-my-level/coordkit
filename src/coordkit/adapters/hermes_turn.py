@@ -334,7 +334,9 @@ def main(argv=None):
                     print(f'HERMES_TURN lane={lane.name} ended before any model call (exit {code}); retrying once',
                           file=sys.stderr, flush=True)
                     time.sleep(IDLE_RETRY_WAIT)
-                    code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout, known)
+                    # Resume the session the idle run reported, if it created one.
+                    code, timed_out, record, usage, model, provider, session = run_turn(
+                        manifest, lane, text, timeout, session or known)
                 if session and session != known:
                     hermes.remember_session(lane, session)
                     if not known:
