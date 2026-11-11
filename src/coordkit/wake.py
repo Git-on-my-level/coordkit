@@ -97,8 +97,22 @@ def recently_woken(manifest, name):
             0 <= time.time() - record['at'] < manifest.bus.wake_debounce_minutes * 60)
 
 
+def on_demand(manifest, name):
+    """The harness module for a lane that has no process between turns, else None."""
+    from .adapters import hermes
+    return hermes if hermes.lane_for(manifest, name) else None
+
+
 def is_listening(manifest, name, rows):
     from . import addressed
+    harness = on_demand(manifest, name)
+    if harness is not None:
+        # Only a running turn can hear a new row: its runner re-reads the cursor when
+        # the turn ends. A recent post or a finished wake proves nothing afterwards.
+        lane = harness.lane_for(manifest, name)
+        record = wake_record(manifest, name)
+        return harness.turn_running(lane) or (
+            recently_woken(manifest, name) and not harness.settled(manifest, name, record))
     if recently_woken(manifest, name):
         return True
     if addressed.listening(manifest, name, rows=rows)[0]:
@@ -147,7 +161,9 @@ def notify(manifest, rows):
         with locked(path.with_suffix('.lock')):
             at = time.time()
             record = wake_record(manifest, name)
-            if record and at - record['at'] < manifest.bus.wake_debounce_minutes * 60:
+            harness = on_demand(manifest, name)
+            if record and at - record['at'] < manifest.bus.wake_debounce_minutes * 60 and not (
+                    harness is not None and harness.settled(manifest, name, record)):
                 continue
             # A pending attempt may already have launched its continuation. Replay
             # its idempotency key after a crash, even beyond the debounce window.
@@ -156,7 +172,11 @@ def notify(manifest, rows):
             attempts = record.get('attempts', []) if pending else []
             record = dict(at=at, lane=name, key=key, status='pending', ids=[r.get('id') for r in rows if r.get('to') == name], attempts=attempts)
             write_json(path, record)
+            # An on-demand lane belongs to its harness alone; other lanes never try it.
+            owner = 'hermes' if harness is not None else None
             for adapter in wake_adapters(manifest):
+                if (adapter.name == 'hermes') != (owner == 'hermes'):
+                    continue
                 attempt = {'adapter': adapter.name, 'status': 'pending'}
                 record['attempts'].append(attempt)
                 write_json(path, record)

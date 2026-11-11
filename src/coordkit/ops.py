@@ -338,7 +338,7 @@ CLI_ARGS = {
     'unretire': (Arg('lane'),),
     'wake-scan': (Arg('--dry-run',action='store_true'),),
     'relay': (Arg('action',choices=('run','status','install','uninstall')), Arg('--apply',action='store_true')),
-    'hooks': (Arg('action',choices=('install','status','uninstall')), Arg('--settings')),
+    'hooks': (Arg('action',choices=('install','status','uninstall')), Arg('--settings'), Arg('--hermes-lane')),
     'mcp': (Arg('action',choices=('install','uninstall')),Arg('--secret-file'),Arg('--clients-file'),Arg('--port',type=int,default=8767)),
     'mcp-clients': (Arg('action',choices=('add','list','revoke')),Arg('name',nargs='?'),Arg('--clients-file'),
                     Arg('--write',action='store_true'),Arg('--answer',action='store_true'),Arg('--post-as',action='append',default=[])),

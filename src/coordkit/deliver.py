@@ -18,8 +18,9 @@ from .state import name_key, read_json, write_json, update_json
 MAX_OUTPUT = 1536  # bytes, including the JSON envelope
 MAX_READ = 256 * 1024
 MAX_TRANSCRIPT_READ = 64 * 1024
-EVENTS = ('PostToolUse', 'UserPromptSubmit')
-HOOK_EVENTS = (*EVENTS, 'Stop')
+HERMES_EVENT = 'pre_llm_call'  # Hermes shell hook, once at turn start: its {"context": ...} answer joins the user message
+EVENTS = ('PostToolUse', 'UserPromptSubmit', HERMES_EVENT)
+HOOK_EVENTS = ('PostToolUse', 'UserPromptSubmit', 'Stop')  # the Claude settings entries coordkit installs
 from .hook_runtime import HOOK_TIMEOUT, hook_deadline
 
 
@@ -37,6 +38,8 @@ def clean(value, limit):
 
 
 def envelope(event, lines):
+    if event == HERMES_EVENT:
+        return json.dumps({'context': '\n'.join(lines)}, ensure_ascii=False)
     return json.dumps({'hookSpecificOutput': {'hookEventName': event,
                        'additionalContext': '\n'.join(lines)}}, ensure_ascii=False)
 
@@ -171,8 +174,16 @@ def deliver(manifest, payload, out=None):
     event = payload.get('hook_event_name')
     if event not in EVENTS:
         return
-    name, how = identity.asker_for(manifest, payload.get('session_id'), payload.get('transcript_path'),
-                                   transcript_max_bytes=MAX_TRANSCRIPT_READ)
+    profile_lane = None
+    if event == HERMES_EVENT and not os.environ.get('COORDKIT_AS'):
+        # Hermes names the profile in every hook payload, and a profile holds one lane.
+        profile_lane = next((lane for lane in manifest.lanes if getattr(lane, 'harness', '') == 'hermes'
+                             and getattr(lane, 'profile', '') == payload.get('profile')), None)
+    if profile_lane is not None:
+        name, how = profile_lane.name, 'profile'
+    else:
+        name, how = identity.asker_for(manifest, payload.get('session_id'), payload.get('transcript_path'),
+                                       transcript_max_bytes=MAX_TRANSCRIPT_READ)
     if how == 'unknown':
         return
     cursor = cursor_path(manifest, name)

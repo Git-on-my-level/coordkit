@@ -70,6 +70,9 @@ hook reconciliation and rollback. Normal venv installs keep using their package
 manager. See the [v0.2 contracts and operations guide](docs/V02.md) and
 [generated operation reference](docs/OPS.md).
 
+Lanes can also live in Hermes Agent profiles, woken one turn at a time; see
+[Hermes lanes](docs/HERMES.md).
+
 ## Concepts and contracts
 
 - **Bus:** explicit sender, recipient, kind, topic, timestamp and ID; long bodies spill to ref files.

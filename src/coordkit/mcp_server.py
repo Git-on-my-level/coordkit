@@ -725,7 +725,9 @@ def agent_rows(manifest, rows, args, at):
         from . import routing, usage
         identity = routing.roster_identity(manifest, name)
         lane = next((lane for lane in manifest.lanes if lane.name == name), None)
-        if lane and usage.lane_harness(lane) == 'opencode':
+        if lane and usage.lane_harness(lane) == 'hermes':
+            model, model_at = usage.hermes_observed_model(lane)
+        elif lane and usage.lane_harness(lane) == 'opencode':
             # A roster transcript path is Claude-shaped; the lane harness decides
             # which store to read. Unpinned OpenCode lanes share their store and
             # cwd, so apply the same ambiguity rule as Claude.

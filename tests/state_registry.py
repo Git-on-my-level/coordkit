@@ -317,6 +317,12 @@ row('hooks.py', 'writer:reconcile|.claude/settings.json', 'explicit hooks instal
 row('services.py', 'writer:install|writer:uninstall|launchd|.plist|.service|.timer|systemd/user|.config', 'explicit lifecycle apply', 'down disables timers and removes owned units', 'persistent until uninstall', 'doctor compares disk and loaded configuration')
 row('selfupdate.py', 'update.lock|releases|writer:shim|coordkit/cli.py|update-policy.json|coordkit|.current-|current/bin/coordkit|update-state.json|writer:check|bin|.json|bin/coordkit|install-manifest.json|rollback|writer:register|writer:swap|lifecycle.json|manifests.json|writer:apply|current', 'explicit update or manifest registration', 'atomic swap or restore prior pointer', 'network 10s; smoke 30s; failed staging removed', 'update fails with rollback receipt; user conflicts preserved')
 row('wake.py', '.json|.wait.lock|state|attempts.jsonl|lanes.json|state/cursors|state/wakes|.lock|writer:change|writer:notify', 'addressed post or retire command', 'attempt result recorded or explicit unretire', 'wake_debounce_minutes; pending attempts hold window', 'failed or unavailable wake remains inspectable in bus state')
+row('adapters/hermes.py', 'coordkit/hermes|.turn.lock|.turns.jsonl|.session.json|writer:append_receipt|writer:remember_session',
+    'a hermes lane wake starts its turn runner', 'kernel releases the lock when the runner exits; receipts are append-only; the session record follows the last turn',
+    'lanes.turn_timeout per turn, three rounds per wake', 'a failed wake or turn makes the lane read as not listening, so its fallback is told')
+row('adapters/hermes.py', '.hermes.log|config.yaml|.coordkit.tmp|writer:manage_hook', 'wake launch or explicit hooks install --hermes-lane',
+    'log is append-only diagnostics; the marked config block is removed by hooks uninstall --hermes-lane', 'no latch',
+    'install refuses an existing hooks map instead of editing it')
 row('wake.py', 'state/wakes/scan.json|writer:scan', 'scan of rows written outside bus.append', 'checkpoint advances past complete rows; replaced or truncated log restarts at end', 'one scan interval', 'missed rows are only those written before the first scan')
 
 row('mcp_install.py', 'mcp-service.json|mcp/stdout.log|mcp/stderr.log|writer:main', 'explicit mcp install', 'mcp uninstall or lifecycle down', 'persistent service; existing credentials only, never recreated after retirement', 'secret validation and manager failure')

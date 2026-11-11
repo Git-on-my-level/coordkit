@@ -86,3 +86,5 @@ Rollback uses `coordkit hooks uninstall --settings /path/to/settings.json` with
 the same manifest. This reverses all three managed delivery entries and preserves
 unrelated edits. For headless resume, remove the lane's `resume` field to disable
 future starts; an already running resumed turn is not cancelled by that change.
+
+Hermes profiles use a different mechanism; see [Hermes lanes](HERMES.md).

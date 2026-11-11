@@ -146,6 +146,11 @@ def listening(manifest, name, at=None, probe=None, rows=None, *, waiter_only=Fal
         return waiter_evidence(manifest, name, at)
     if is_human(manifest, name):
         return True, 'human recipient'
+    from .wake import on_demand
+    harness = on_demand(manifest, name)
+    if harness is not None:
+        # No waiter exists to lease: the lane is reachable while a turn can be started.
+        return harness.reachable(manifest, name)
     lease = read_lease(manifest, name)
     if lease:
         open_ids = unconfirmed(manifest, name, lease, rows, at=at)

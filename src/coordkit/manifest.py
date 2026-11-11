@@ -92,7 +92,9 @@ class UsageLane:
     session_id: str = ""   # optional: pins the lane's current session (Claude or OpenCode)
     pane: str = ""
     resume: str = ""      # only "headless" permits Claude Code resume
-    harness: str = ""     # "" / "claude" read Claude transcripts; "opencode" reads its local store
+    harness: str = ""     # "" / "claude" read Claude transcripts; "opencode" reads its local store; "hermes" runs turns in a profile
+    profile: str = ""     # hermes only: the profile whose named session is this lane; config_dir is its home
+    turn_timeout: str = ""  # hermes only: wall-clock ceiling for one turn (default 2h)
     stop_requires_waiter: bool | None = None  # absent inherits [deliver]
 
 
@@ -670,12 +672,25 @@ def load(path: str | Path | None = None, *, allow_unknown_tables: bool = False) 
             raise ManifestError("invalid_value: lanes.pane must be nonempty without whitespace")
         if lane.resume not in ("", "headless"):
             raise ManifestError("invalid_value: lanes.resume must be headless or absent")
-        if lane.harness not in ("", "claude", "claude-code", "opencode"):
-            raise ManifestError("invalid_value: lanes.harness must be claude or opencode")
+        if lane.harness not in ("", "claude", "claude-code", "opencode", "hermes"):
+            raise ManifestError("invalid_value: lanes.harness must be claude, opencode or hermes")
+        if lane.harness == "hermes":
+            # The profile is an argv token and names the lane's only session owner.
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", lane.profile):
+                raise ManifestError("invalid_value: lanes.profile is required for a hermes lane (lowercase name)")
+            if lane.resume or lane.session_id or lane.pane:
+                raise ManifestError("invalid_value: a hermes lane takes no resume, session_id or pane")
+            if lane.turn_timeout and not 60 <= duration(lane.turn_timeout) <= 86400:
+                raise ManifestError("invalid_value: lanes.turn_timeout must be 60s..24h")
+        elif lane.profile or lane.turn_timeout:
+            raise ManifestError("invalid_value: lanes.profile and lanes.turn_timeout need harness = \"hermes\"")
         lane.config_dir = str((file.parent / Path(lane.config_dir).expanduser()).resolve())
         lane.cwd = str((file.parent / Path(lane.cwd).expanduser()).resolve())
         if lane.session_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", lane.session_id):
             raise ManifestError("invalid_value: lanes.session_id")
+    profiles = [lane.profile for lane in lanes if lane.harness == "hermes"]
+    if len(set(profiles)) != len(profiles):
+        raise ManifestError("invalid_value: lanes.profile duplicate; one hermes lane per profile")
     session_ids = [lane.session_id for lane in lanes if lane.session_id]
     if len(set(session_ids)) != len(session_ids):
         raise ManifestError("invalid_value: lanes.session_id duplicate")
