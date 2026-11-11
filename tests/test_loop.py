@@ -88,6 +88,34 @@ class LoopTests(FakeCase):
         self.assertEqual(self.invoke()[0],0)
         self.assertEqual(int((self.state/'fails').read_text()),0)
 
+    def receipts(self):
+        return [c['args'] for c in self.calls() if c['tool'] == 'anx' and 'work' in c['args'] and 'receipt' in c['args']]
+
+    def test_cycles_record_anx_run_receipts(self):
+        # ANX loop health counts run_recorded events only; notes alone left a cadence card past_promise.
+        code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        receipts = self.receipts()
+        self.assertEqual(len(receipts),1)
+        args = receipts[0]
+        self.assertEqual(args[args.index('receipt')+1],'card:loop-audit')
+        self.assertEqual(args[args.index('--outcome')+1],'acted')
+        cycle = next(self.state.glob('runs/*')).name
+        self.assertEqual(args[args.index('--run-id')+1],cycle)
+        self.respond({'tool':'agentctl','contains':['delegate','--wait'],'stdout':'MISSED_JSON_START {"items":[]} MISSED_JSON_END'})
+        self.assertEqual(self.invoke()[0],0)
+        self.assertEqual(self.receipts()[-1][self.receipts()[-1].index('--outcome')+1],'no_op')
+        self.respond({'tool':'agentctl','contains':['delegate','--wait'],'exit':11,'stderr':'failed auditor'})
+        self.assertEqual(self.invoke()[0],1)
+        self.assertEqual(self.receipts()[-1][self.receipts()[-1].index('--outcome')+1],'infra_error')
+
+    def test_receipt_failure_never_changes_cycle_result(self):
+        self.respond({'tool':'anx','contains':['work','receipt'],'exit':2,'stderr':'receipt refused'})
+        code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        self.assertIn('CYCLE_RECEIPT_FAILED audit',err)
+        self.assertEqual((self.state/'fails').read_text().strip(),'0')
+
     def test_snapshot_failure_no_delegate(self):
         self.respond({'tool':'gh','exit':1,'stderr':'not authenticated'})
         code,out,err = self.invoke()

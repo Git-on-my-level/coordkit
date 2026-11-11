@@ -147,6 +147,8 @@ def _cycle(manifest, name, settings, handle, state):
         # A receipt is required even when the auditor correctly raises zero findings.
         client.note(f'card:{handle}', f'Loop {name} cycle {cycle}: {len(items)} findings',
                     evidence=str(findings), met=True)
+        # Best effort: the cycle's work and note are done, so a receipt failure must not replay them.
+        _receipt(client, name, handle, cycle, 'acted' if items else 'no_op', f'Loop {name} cycle {cycle}: {len(items)} findings')
         if f'## Cycle {cycle}\n' not in prior.read_text():
             with prior.open('a') as stream:
                 stream.write(f'\n## Cycle {cycle}\n')
@@ -168,7 +170,17 @@ def _cycle(manifest, name, settings, handle, state):
         error_file = run_dir/'err.txt'
         error_file.write_text(str(exc) + '\n')
         record_failure(manifest, name, settings, handle, state, str(exc), cycle, error_file)
+        # Two infra_error runs in a row make ANX report the loop unhealthy.
+        _receipt(AnxClient(manifest), name, handle, cycle, 'infra_error', f'Loop {name} cycle {cycle} failed: {exc}')
         return 1
+
+
+def _receipt(client, name, handle, cycle, outcome, summary):
+    """ANX loop health counts run receipts, not notes. Never let a receipt failure change the cycle result."""
+    try:
+        client.work_receipt(f'card:{handle}', cycle, outcome, summary)
+    except (ToolError, ManifestError, OSError) as exc:
+        print(f'CYCLE_RECEIPT_FAILED {name} {cycle}: {exc}', file=sys.stderr)
 
 
 def record_failure(manifest, name, settings, handle, state, detail, cycle=None, error_file=None):
