@@ -288,6 +288,28 @@ class DigestTests(AuditCase):
         self.assertNotIn('newest item', digest)
         self.assertEqual(final['offset'], self.transcript.stat().st_size)
 
+    def test_prior_gaps_survive_when_new_transcript_fills_the_digest(self):
+        self.messages('old item', *('x' * 2000 for _ in range(60)), 'newest item')
+        digest, _, stats = audit_digest.build(self.lane, transcript=self.transcript, carry=[GAP])
+        self.assertLessEqual(len(digest.encode()), audit_digest.MAX_DIGEST)
+        self.assertTrue(stats['truncated'])
+        self.assertIn('Prior audit gaps', digest)
+        self.assertIn(GAP['item'], digest)
+        self.assertIn(GAP['evidence'], digest)
+        self.assertIn('newest item', digest)
+        self.assertLess(digest.index('Prior audit gaps'), digest.index('newest item'))
+        self.assertNotIn('old item', digest)
+
+    def test_a_carry_larger_than_the_digest_is_kept_ahead_of_transcript(self):
+        self.messages('newest item')
+        with patch.object(audit_digest, 'MAX_DIGEST', 1024):
+            digest, _, stats = audit_digest.build(self.lane, transcript=self.transcript,
+                                                  carry=[dict(GAP, evidence='e' * 5000)])
+        self.assertLessEqual(len(digest.encode()), 1024)
+        self.assertTrue(stats['truncated'])
+        self.assertIn('Prior audit gaps', digest)
+        self.assertNotIn('newest item', digest)
+
     def test_an_oversized_newest_complete_record_fails_instead_of_being_empty(self):
         self.messages('x' * 8000)
         with patch.object(audit_digest, 'MAX_READ', 4096), self.assertRaisesRegex(ManifestError, 'record_too_large'):

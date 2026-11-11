@@ -180,10 +180,14 @@ def build(lane, prior=None, transcript=None, carry=()):
         text, count = render(row)
         parts.append(text)
         removed += count
-    body = ''.join(parts).encode()
-    truncated |= len(body) > MAX_DIGEST - 256
+    # Prior gaps stay whole in front. Newest transcript fills only the bytes left over.
+    prefix = parts[0].encode() if carry else b''
+    tail = b''.join(part.encode() for part in (parts[1:] if carry else parts))
+    truncated |= len(prefix) + len(tail) > MAX_DIGEST - 256
     header = (f'Transcript digest. Secret spans removed: {removed}. '
               f'Older content omitted by bounds: {str(truncated).lower()}.\n')
-    body = body[-(MAX_DIGEST - len(header.encode())):].decode('utf-8', errors='ignore')
-    text = header + body
+    budget = MAX_DIGEST - len(header.encode())
+    room = budget - len(prefix)
+    body = prefix[:budget] if room <= 0 else prefix + tail[-room:]
+    text = header + body.decode('utf-8', errors='ignore')
     return text, cursor, {'digest_bytes': len(text.encode()), 'removed_spans': removed, 'truncated': truncated}
