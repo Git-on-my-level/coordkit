@@ -48,7 +48,7 @@ unmanaged Claude declaration. Agentctl recorded its `caller_identity` at
 admission; no label or manual journal edit was used. This validates that supported
 unmanaged path, without claiming it was a native interactive Claude session.
 
-Execution: `exec-effort-owner-album-elegant-dry-never`. State: `completed`.
+The throwaway execution's state was `completed`.
 A real `coordkit.cli deliver --stop-hook` subprocess, scoped by the matching
 Stop session, returned `decision=block` and named the execution. Collecting it
 with the built binary's `result <id> --content` returned the expected synthetic
