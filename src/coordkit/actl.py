@@ -113,10 +113,10 @@ class AgentctlClient:
                     entries[key] = item
         return list(entries.values())
 
-    def await_result(self, execution, timeout="30m", ignore_attention=False):
+    def await_result(self, execution, timeout="30m", ignore_attention=False, call_timeout=None):
         self.manifest.writable()
         result = run([self.binary, "await", execution, "--content", "--timeout", timeout, *(["--ignore-attention"] if ignore_attention else [])],
-                     timeout=60 + duration(timeout))
+                     timeout=call_timeout if call_timeout is not None else 60 + duration(timeout))
         if result.returncode:
             raise ToolError(self.binary, result.returncode, result.stderr + result.stdout)
         return result.stdout
@@ -167,7 +167,7 @@ class AgentctlClient:
         return out
 
 
-    def delegate(self, prompt, run_dir, *, key, pool="plan", selector=None, label=None, plan=False, detach=False, access="read_only", timeout=None, card=None, owns=(), wakeable=False):
+    def delegate(self, prompt, run_dir, *, key, pool="plan", selector=None, label=None, plan=False, detach=False, access="read_only", timeout=None, card=None, owns=(), wakeable=False, cwd=None, call_timeout=None, timeout_override=None):
         self.manifest.writable()
         resolved = self.selector(pool=pool, selector=selector)
         request = {"schema_version": 1, "request_key": key,
@@ -175,7 +175,7 @@ class AgentctlClient:
         request_path = run_dir / "request.json"
         request_path.write_text(json.dumps(request) + "\n")
         argv = [self.binary, "delegate", "--request-file", str(request_path), "--prompt-stdin",
-                "--cwd", str(self.manifest.file.parent), "--plan" if plan else "--detach" if detach else "--wait"]
+                "--cwd", str(cwd or self.manifest.file.parent), "--plan" if plan else "--detach" if detach else "--wait"]
         if not plan and not detach:
             argv += ["--content"]
         if label:
@@ -189,11 +189,11 @@ class AgentctlClient:
             argv += ["--label", f"pr-{pr}"]
         if detach:
             argv += ["--output", "json"]
-        timeout = self.manifest.agentctl.timeout or timeout
+        timeout = timeout_override or self.manifest.agentctl.timeout or timeout
         if timeout:
             argv += ["--timeout", timeout]
-        result = run(argv, timeout=300 if plan or detach else duration(timeout) + 120 if timeout else None,
-                     stdin=prompt, cwd=self.manifest.file.parent)
+        result = run(argv, timeout=call_timeout if call_timeout is not None else 300 if plan or detach else duration(timeout) + 120 if timeout else None,
+                     stdin=prompt, cwd=cwd or self.manifest.file.parent)
         if result.returncode:
             raise ToolError(self.binary, result.returncode, result.stderr + result.stdout)
         if not result.stdout.strip():

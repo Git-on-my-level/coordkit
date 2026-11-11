@@ -421,3 +421,24 @@ row('questions.py', 'writer:accept_anx_delivery',
     'waiting question becomes answered before acknowledgement; settled questions remain unchanged',
     'pending runtime delivery follows the existing question delivery ladder',
     'bus or store failure leaves the requester response unread and retained')
+
+row('audit.py', 'state/audits|scan.lock|writer:schedule',
+    'wake-scan claims one due lane and transfers kernel scan and lane locks to its detached child',
+    'child completion or process death closes claims; a later scan can retry',
+    'audit timeout bounds external work; five minute retry spacing; kernel claims have no stale PID lease',
+    'doctor reports failed attempts or a vanished runner without a receipt')
+row('audit.py', 'cwd|writer:auditor',
+    'explicit or scheduled audit sends scrubbed inputs inline and creates an empty private working directory',
+    'temporary directory removed on normal completion or exception; owned external execution cancelled on failure',
+    'audit timeout plus bounded cancellation; no transcript or state input files are written',
+    'strict JSON failure leaves cursor unchanged and doctor red')
+row('audit.py', 'writer:run|writer:_run|writer:handoff_requested|writer:publish|writer:atomic_text|.lock|.status.json|.result.json|.receipt.json|state-gaps-<lane>.md',
+    'audit opts a lane in, serializes its snapshot and retains validated output before publication',
+    'atomic gap replacement and idempotent bus append precede atomic cursor/receipt commit; retry completes prepared output',
+    'one latest status, receipt and prepared result per lane; locks release on death; receipt retained between audits',
+    'doctor reports failed or vanished audit; failures never consume the transcript cursor')
+row('audit_digest.py', '.jsonl|state.db',
+    'audit locates the selected harness session or explicit JSONL override',
+    'read-only transcript observation with a proposed cursor; only successful audit publication consumes it',
+    'bounded newest text and message count; incomplete JSONL suffix is retried',
+    'missing, unreadable or malformed inputs fail the audit instead of reporting no gaps')
