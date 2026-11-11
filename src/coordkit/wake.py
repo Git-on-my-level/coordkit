@@ -237,6 +237,15 @@ def scan(manifest, dry_run=False):
         except Exception as exc:
             import sys
             print(f'WAKE_TIMERS failed: {type(exc).__name__}: {exc}', file=sys.stderr)
+    if not dry_run:
+        from .audit import schedule
+        try:
+            lane = schedule(manifest)
+            if lane:
+                print('WAKE_AUDIT lane=' + lane)
+        except Exception as exc:
+            import sys
+            print('WAKE_AUDIT failed: ' + type(exc).__name__, file=sys.stderr)
     with locked(path.with_suffix('.lock')):
         reader = TailReader(manifest.paths.bus_log)
         mark = read_json(path, {})

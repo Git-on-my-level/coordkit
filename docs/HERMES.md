@@ -127,11 +127,36 @@ A Hermes lane cannot sleep between turns. To come back later it sets a timer:
 [scheduled wakes](V02.md#scheduled-wakes)); the row starts a turn when it is due.
 Work it delegates should end by posting a row to the lane.
 
+## Session rotation
+
+A lane can bound how long it reuses one session:
+
+```toml
+# Inside the lane's [[lanes]] entry:
+state_file = "/path/to/state.md"  # absolute; must exist
+rotate_turns = 20                # optional positive integer; absent disables rotation
+```
+
+After this many successfully completed coordkit turns on the session, the runner
+[audits the state](AUDIT.md), bounded by `[audit] timeout` (default `30m`). Failed
+and skipped turns do not count. Counts and rotation markers use the existing
+turn receipts, rather than a second counter store. The runner then forgets its
+remembered session ID; the next turn starts a fresh session and its prompt names
+the state file and `state-gaps.md` first. State-enabled lanes receive those
+pointers on every turn. Nothing deletes the old Hermes session.
+
+Audit failure is recorded in audit status and the rotation receipt and is
+visible in `doctor`; it does not prevent starting fresh. Remove `rotate_turns`
+to stop future rotations. Upgrade all coordkit executables before adding these
+keys; older manifests do not understand them. Rotation does not install a
+pre-compact hook or audit `lane-move` automatically.
+
 ## Limits
 
 - Rows that arrive mid-turn are handled by the next round, not inside the
   running turn. Hermes has no per-tool-call context hook.
 - Three rounds per wake. Later rows wait for the next addressed row or the
   obligation pickup sweep.
-- The runner does not read the Hermes session store. A turn you run by hand in
+- The ordinary turn path does not read the Hermes session store; optional audits
+  read only the selected session. A turn you run by hand in
   the same session is serialized by Hermes's own turn lease.

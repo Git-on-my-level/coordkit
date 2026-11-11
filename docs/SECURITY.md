@@ -40,3 +40,13 @@ Anonymous clients can still saturate the pre-auth pool behind a shared tunnel ad
 Create `<root>/state/mcp/kill` to reject new admission and prevent new writes. Existing reads may finish. For immediate cessation, remove the specific tunnel route and stop the supervised process. Remove `writes-enabled` to keep reads while disabling writes. Rotate the secret after suspected exposure; do not publish it in an issue or on the bus. See [MCP](MCP.md) for setup and rollback.
 
 Harness hooks are bounded and fail open. Receipted rollback refuses to overwrite conflicting user edits. This protects tool-call availability and user settings; it does not make arbitrary configured adapter executables safe.
+
+## State audit inputs
+
+`audit-state` sends a bounded transcript digest and a scrubbed state copy to the
+model selected by `[audit] selector`. Its redaction covers common secret shapes,
+not every sensitive fact or prompt injection. The auditor runs from a private
+temporary directory with requested read-only access and instructions to read
+only those two files; it is not a filesystem sandbox. Review the data and route
+before enabling audits. See [state audits](AUDIT.md) for bounds, retention,
+strict result validation and failure behavior.

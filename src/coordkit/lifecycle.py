@@ -494,6 +494,8 @@ def doctor(manifest, strict_dead_letters=False, for_apply=False):
     check('escalation_limits',alarm_path)
     check('manifest',lambda:manifest.validate_launchd() if manifest.launchd.path else 'services unconfigured (optional)')
     check('binaries',binaries); check('anx',identity); check('agentctl',pools)
+    from .audit import health as audit_health
+    check('audit', lambda: audit_health(manifest))
     check('reconciler_age',reconciler_age)
     check('unresolved_obligations',unresolved_obligations)
     from .answers import health as answer_health
