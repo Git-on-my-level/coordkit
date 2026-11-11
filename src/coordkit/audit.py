@@ -30,8 +30,13 @@ PROMPT = '''Audit the durable state against the transcript digest supplied inlin
 The inputs are the transcript and state JSON fields at the end of this prompt.
 List every commitment, deadline, in-flight execution or timer id, open question,
 and ruling that binds the lane which appears in the digest and is not carried
-by the state file. Account for later completions, cancellations and superseding
-rulings. Do not infer missing facts. Return ONLY a strict JSON list, with each
+by the state file. An item is carried when the state file mentions it at all,
+in any status (open, done, answered, cancelled), by the same id or the same
+subject: search the state for each id and subject before you report it. Report
+only items that are still open at the end of the transcript and absent from the
+state; this applies to carried prior gaps too. Account for later completions,
+cancellations and superseding rulings. Do not infer missing facts. A short list
+of certain gaps is better than a long list of doubtful ones. Return ONLY a strict JSON list, with each
 entry having exactly these string fields: {"kind", "item", "evidence", "when"}.
 Use an empty string for an unknown time, and [] when no gaps exist. No Markdown,
 code fences, explanation or envelope. Evidence must quote the digest.
