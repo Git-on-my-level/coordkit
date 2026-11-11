@@ -120,6 +120,13 @@ Turns started outside coordkit have no receipt and are not counted.
 `doctor` reports `model_drift` when a turn ran on a model other than the lane's.
 A lane with `model = "default"` follows its profile and never reports drift.
 
+## Waiting
+
+A Hermes lane cannot sleep between turns. To come back later it sets a timer:
+`coordkit wake-at LANE "what to check" --in 2h` (see
+[scheduled wakes](V02.md#scheduled-wakes)); the row starts a turn when it is due.
+Work it delegates should end by posting a row to the lane.
+
 ## Limits
 
 - Rows that arrive mid-turn are handled by the next round, not inside the
