@@ -112,6 +112,8 @@ def _cycle(manifest, name, settings, handle, state):
     failures = int(failures_path.read_text()) if failures_path.exists() else 0
     extracted, checkpoint = None, None
     client = AnxClient(manifest)
+    # True once ANX has accepted this cycle id's terminal outcome.
+    published = False
     try:
         if not pending:
             client.resolve_card(f'card:{handle}')
@@ -148,7 +150,8 @@ def _cycle(manifest, name, settings, handle, state):
         client.note(f'card:{handle}', f'Loop {name} cycle {cycle}: {len(items)} findings',
                     evidence=str(findings), met=True)
         # Best effort: the cycle's work and note are done, so a receipt failure must not replay them.
-        _receipt(client, name, handle, cycle, 'acted' if items else 'no_op', f'Loop {name} cycle {cycle}: {len(items)} findings')
+        published = _receipt(client, name, handle, cycle, 'acted' if items else 'no_op',
+                             f'Loop {name} cycle {cycle}: {len(items)} findings')
         if f'## Cycle {cycle}\n' not in prior.read_text():
             with prior.open('a') as stream:
                 stream.write(f'\n## Cycle {cycle}\n')
@@ -170,17 +173,24 @@ def _cycle(manifest, name, settings, handle, state):
         error_file = run_dir/'err.txt'
         error_file.write_text(str(exc) + '\n')
         record_failure(manifest, name, settings, handle, state, str(exc), cycle, error_file)
-        # Two infra_error runs in a row make ANX report the loop unhealthy.
-        _receipt(AnxClient(manifest), name, handle, cycle, 'infra_error', f'Loop {name} cycle {cycle} failed: {exc}')
+        # pending.json resumes this cycle id. ANX drops a second receipt with the
+        # same run id, so a retryable failure must not spend it on infra_error.
+        # Record the attempt under a new id so last-run time still moves.
+        if not published:
+            run_id = cycle if not pending_path.exists() else f'{cycle}-attempt-{uuid.uuid4().hex[:6]}'
+            _receipt(AnxClient(manifest), name, handle, run_id, 'infra_error',
+                     f'Loop {name} cycle {cycle} failed: {exc}')
         return 1
 
 
-def _receipt(client, name, handle, cycle, outcome, summary):
+def _receipt(client, name, handle, run_id, outcome, summary):
     """ANX loop health counts run receipts, not notes. Never let a receipt failure change the cycle result."""
     try:
-        client.work_receipt(f'card:{handle}', cycle, outcome, summary)
+        client.work_receipt(f'card:{handle}', run_id, outcome, summary)
     except (ToolError, ManifestError, OSError) as exc:
-        print(f'CYCLE_RECEIPT_FAILED {name} {cycle}: {exc}', file=sys.stderr)
+        print(f'CYCLE_RECEIPT_FAILED {name} {run_id}: {exc}', file=sys.stderr)
+        return False
+    return True
 
 
 def record_failure(manifest, name, settings, handle, state, detail, cycle=None, error_file=None):
@@ -304,7 +314,11 @@ def run_cycle(manifest, name):
             directory.mkdir(parents=True, exist_ok=True)
             error_file = directory/'err.txt'
             error_file.write_text(str(exc)+'\n')
-            record_failure(manifest, name, settings, handle, state, str(exc), error_file=error_file)
+            record_failure(manifest, name, settings, handle, state, str(exc), directory.name, error_file)
+            # A fresh id: a pending cycle's id must stay free for acted/no_op,
+            # and each timeout has to count or ANX falls back to past_promise.
+            _receipt(AnxClient(manifest), name, handle, directory.name, 'infra_error',
+                     f'Loop {name} cycle {directory.name} failed: {exc}')
             return 1
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
