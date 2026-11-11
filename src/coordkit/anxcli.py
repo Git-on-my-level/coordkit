@@ -109,6 +109,13 @@ class AnxClient:
             args += ["--next", next_in]
         return self.call(*args, write=True)
 
+    def work_receipt(self, card, run_id, outcome, summary):
+        """Record a loop run. ANX loop health counts run_recorded events only; a note (even --met)
+        is not a run, so a cadence card without receipts reads past_promise. Replays by run id."""
+        summary = " ".join(str(summary).split())[:280] or "loop run"
+        return self.call("work", "receipt", card, "--run-id", str(run_id)[:200], "--outcome", outcome,
+                         "--summary", summary, write=True)
+
     def ask(self, card, brief, *, again=False, supersedes=None):
         """The one path to the operator: files only a brief that passes briefs.validate."""
         from . import briefs

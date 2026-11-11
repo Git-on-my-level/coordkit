@@ -208,8 +208,8 @@ OPENCODE_TAIL = 20000
 def lane_harness(lane):
     """Explicit [lanes].harness, with an OpenCode session id as a safe fallback."""
     explicit = str(getattr(lane, 'harness', '') or '').lower()
-    if explicit in ('opencode',):
-        return 'opencode'
+    if explicit in ('opencode', 'hermes'):
+        return explicit
     if explicit in ('claude', 'claude-code'):
         return 'claude'
     return 'opencode' if str(getattr(lane, 'session_id', '') or '').startswith('ses_') else 'claude'
@@ -475,15 +475,55 @@ def opencode_observed_model(lane):
     return None, None
 
 
+def hermes_usage(lane, since, until):
+    """Sum the per-turn reports of turns that ended in [since, until]. Turns count provider calls.
+
+    Hermes reports usage per run, not per call, so context size is unknown here.
+    Turns started outside coordkit are not in the receipts and are not counted.
+    """
+    from .adapters import hermes
+    rows, invalid, unreadable = hermes.receipts(lane)
+    result = Usage(invalid_rows=invalid, unreadable_files=unreadable)
+    for row in rows:
+        at = datetime.fromtimestamp(row['ended_at'], timezone.utc)
+        if not since <= at <= until:
+            continue
+        usage = row.get('usage') or {}
+        known = type(usage.get('api_calls')) is int and usage['api_calls'] >= 0
+        result.turns += usage['api_calls'] if known else 1  # a run that made no call counts none
+        result.missing_usage += not known
+        for key in TOKEN_FIELDS:
+            setattr(result, key, getattr(result, key) + _count(usage.get(key)))
+        model = row.get('model')
+        if isinstance(model, str) and model:
+            result.latest_model = model
+            if model not in result.models:
+                result.models.append(model)
+    return result
+
+
+def hermes_observed_model(lane):
+    from .adapters import hermes
+    rows, _, _ = hermes.receipts(lane)
+    for row in reversed(rows):
+        if isinstance(row.get('model'), str) and row['model']:
+            return row['model'], datetime.fromtimestamp(row['ended_at'], timezone.utc).isoformat()
+    return None, None
+
+
 def scope_key(lane):
     if lane_harness(lane) == 'opencode':
         return ('opencode', str(opencode_store(lane)), str(lane.cwd))
+    if lane_harness(lane) == 'hermes':
+        return ('hermes', str(lane.config_dir), lane.name)
     return ('claude', str(transcript_dir(lane)))
 
 
 def read_lane(lane, since, until):
     if lane_harness(lane) == 'opencode':
         return opencode_usage(lane, since, until)
+    if lane_harness(lane) == 'hermes':
+        return hermes_usage(lane, since, until)
     return parse_transcripts(transcript_sources(lane), since, until)
 
 
@@ -504,7 +544,14 @@ def model_matches(intended, actual):
     return intended == actual or (intended.isalpha() and actual.startswith(intended + '-'))
 
 
+def follows_profile(lane):
+    """A hermes lane with model = "default" runs whatever its profile configures."""
+    return lane_harness(lane) == 'hermes' and str(lane.model).lower() == 'default'
+
+
 def drift(lane, usage):
+    if follows_profile(lane):
+        return []
     return [model for model in usage.models if not model_matches(lane.model, model)]
 
 
@@ -515,7 +562,7 @@ def collect(lanes, at):
     would otherwise read their transcripts as its own.
     """
     counts = Counter(scope_key(lane) for lane in lanes)
-    return [(lane, None if not lane.session_id and counts[scope_key(lane)] > 1 else
+    return [(lane, None if not lane.session_id and counts[scope_key(lane)] > 1 and lane_harness(lane) != 'hermes' else
              read_lane(lane, at - timedelta(hours=1), at)) for lane in lanes]
 
 
