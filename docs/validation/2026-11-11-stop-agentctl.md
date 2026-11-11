@@ -68,4 +68,5 @@ written; the later heartbeat record was present but verification never refreshed
 its captured output. The same test passed in isolation against `origin/main`.
 This failure does not exercise the new agentctl inventory check. Compile, all
 four relay protocol tests, the leak gate and `git diff --check` passed. The
-focused Stop suite passed all 34 tests. No readiness code was changed here.
+focused Stop suite passed all 35 tests, including executable overrides and
+full-width detached-waiter process snapshots. No readiness code was changed here.

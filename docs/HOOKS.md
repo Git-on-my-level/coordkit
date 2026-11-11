@@ -65,7 +65,9 @@ until collected with `agentctl result <id> --content`. Nonterminal work blocks
 unless a live same-user `agentctl await <id> --content` process is observed; arm
 that command in the background using the harness's normal background facility.
 The reason lists at most five execution IDs with exact commands and `+N more`.
-A bus waiter does not collect agentctl results.
+A bus waiter does not collect agentctl results. The probe honors the `AGENTCTL`
+executable override; recovery commands use that executable. Process snapshots
+include detached processes and full-width command arguments.
 
 Agentctl currently records only the caller harness, not the launching session.
 The fallback uses an exact label, declared at launch with `--label LABEL`:

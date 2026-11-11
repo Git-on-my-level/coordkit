@@ -50,7 +50,7 @@ behaviour. No speculative CLI flags are called today.
 Running work counts as covered only when a same-user, non-zombie, non-stopped
 `agentctl await <id> --content` process is observed. Shell text, a bus waiter,
 `result`, and await without content are insufficient. This is a point-in-time
-snapshot, not a durable receipt; `await-any`, renamed binaries, remote waiters
+snapshot, not a durable receipt; `await-any`, unconfigured binary aliases, remote waiters
 and subscription delivery are not proven by it. Await commands with explicit config/journal/profile overrides cannot prove default-journal
 collection and are excluded. Unknown process visibility fails open. Terminal unreconciled work always requires collection, even if an
 await process still exists. Journal contention, timeouts, malformed data and
