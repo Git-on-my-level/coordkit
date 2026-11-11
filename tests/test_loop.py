@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import signal
 from unittest.mock import patch
 from coordkit import auditor, loop
 from coordkit.extract import clean, commit, extract
@@ -87,6 +88,155 @@ class LoopTests(FakeCase):
         self.respond()
         self.assertEqual(self.invoke()[0],0)
         self.assertEqual(int((self.state/'fails').read_text()),0)
+
+    def receipts(self):
+        return [c['args'] for c in self.calls() if c['tool'] == 'anx' and 'work' in c['args'] and 'receipt' in c['args']]
+
+    def test_cycles_record_anx_run_receipts(self):
+        # ANX loop health counts run_recorded events only; notes alone left a cadence card past_promise.
+        code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        receipts = self.receipts()
+        self.assertEqual(len(receipts),1)
+        args = receipts[0]
+        self.assertEqual(args[args.index('receipt')+1],'card:loop-audit')
+        self.assertEqual(args[args.index('--outcome')+1],'acted')
+        cycle = next(self.state.glob('runs/*')).name
+        self.assertEqual(args[args.index('--run-id')+1],cycle)
+        self.respond({'tool':'agentctl','contains':['delegate','--wait'],'stdout':'MISSED_JSON_START {"items":[]} MISSED_JSON_END'})
+        self.assertEqual(self.invoke()[0],0)
+        self.assertEqual(self.receipts()[-1][self.receipts()[-1].index('--outcome')+1],'no_op')
+        self.respond({'tool':'agentctl','contains':['delegate','--wait'],'exit':11,'stderr':'failed auditor'})
+        self.assertEqual(self.invoke()[0],1)
+        failed = self.receipts()[-1]
+        self.assertEqual(failed[failed.index('--outcome')+1],'infra_error')
+        # No pending resume: this cycle id is terminal, so the receipt may use it.
+        failed_cycle = next(path.name for path in self.state.glob('runs/*') if (path/'err.txt').exists())
+        self.assertEqual(failed[failed.index('--run-id')+1], failed_cycle)
+        self.assertFalse((self.state/'pending.json').exists())
+
+    def test_pending_retry_keeps_cycle_id_for_the_terminal_outcome(self):
+        # A note failure leaves pending.json. ANX dedupes by run id, so that
+        # failure must not spend the cycle id the resume needs for acted/no_op.
+        self.respond({'tool': 'anx', 'contains': ['note'], 'exit': 2, 'stderr': 'note refused'})
+        self.assertEqual(self.invoke()[0], 1)
+        cycle = json.loads((self.state/'pending.json').read_text())['cycle']
+        first = self.receipts()[-1]
+        self.assertEqual(first[first.index('--outcome')+1], 'infra_error')
+        self.assertNotEqual(first[first.index('--run-id')+1], cycle)
+        self.assertEqual(self.invoke()[0], 1)
+        second = self.receipts()[-1]
+        self.assertEqual(second[second.index('--outcome')+1], 'infra_error')
+        self.assertNotEqual(second[second.index('--run-id')+1], cycle)
+        self.assertNotEqual(second[second.index('--run-id')+1], first[first.index('--run-id')+1])
+        self.respond()
+        code, out, err = self.invoke()
+        self.assertEqual(code, 0, err)
+        recovered = self.receipts()[-1]
+        self.assertEqual(recovered[recovered.index('--outcome')+1], 'acted')
+        self.assertEqual(recovered[recovered.index('--run-id')+1], cycle)
+        self.assertFalse((self.state/'pending.json').exists())
+
+    def test_failure_during_finalization_keeps_cycle_id_for_the_success(self):
+        # The success receipt follows finalization; a finalization failure is an infra_error attempt under a
+        # fresh id, and the resumed cycle later records acted under its own id.
+        real_unlink = Path.unlink
+        def unlink(path, missing_ok=False):
+            if path.name == 'pending.json':
+                raise OSError('pending stuck')
+            return real_unlink(path, missing_ok=missing_ok)
+        with patch.object(Path, 'unlink', unlink):
+            self.assertEqual(self.invoke()[0], 1)
+        cycle = json.loads((self.state/'pending.json').read_text())['cycle']
+        receipts = self.receipts()
+        self.assertEqual([args[args.index('--outcome')+1] for args in receipts], ['infra_error'])
+        self.assertTrue(receipts[0][receipts[0].index('--run-id')+1].startswith(cycle + '-attempt-'))
+        self.assertEqual(self.invoke()[0], 0)
+        last = self.receipts()[-1]
+        self.assertEqual((last[last.index('--outcome')+1], last[last.index('--run-id')+1]), ('acted', cycle))
+        notes = [c['args'] for c in self.calls() if c['tool'] == 'anx' and 'note' in c['args'] and '--met' in c['args']]
+        self.assertEqual(len(notes), 1, 'a resumed cycle must not post its note again')
+        attempt = receipts[0][receipts[0].index('--run-id')+1]
+        self.assertEqual(len(attempt.rsplit('-', 1)[1]), 32, 'attempt ids carry a full uuid')
+
+    def test_deadline_records_distinct_infra_error_runs(self):
+        with patch.object(loop, 'snapshot', side_effect=lambda manifest: signal.raise_signal(signal.SIGALRM)):
+            self.assertEqual(self.invoke()[0], 1)
+            self.assertEqual(self.invoke()[0], 1)
+        receipts = self.receipts()
+        self.assertEqual([args[args.index('--outcome')+1] for args in receipts], ['infra_error', 'infra_error'])
+        run_ids = [args[args.index('--run-id')+1] for args in receipts]
+        self.assertEqual(len(set(run_ids)), 2)
+        self.assertTrue(all(run_id.startswith('deadline-') for run_id in run_ids))
+
+    def test_deadline_on_pending_cycle_leaves_its_id_for_recovery(self):
+        self.respond({'tool': 'anx', 'contains': ['note'], 'exit': 2, 'stderr': 'note refused'})
+        self.assertEqual(self.invoke()[0], 1)
+        cycle = json.loads((self.state/'pending.json').read_text())['cycle']
+        with patch.object(loop, '_post', side_effect=lambda *args, **kwargs: signal.raise_signal(signal.SIGALRM)):
+            self.assertEqual(self.invoke()[0], 1)
+        timed_out = self.receipts()[-1]
+        self.assertEqual(timed_out[timed_out.index('--outcome')+1], 'infra_error')
+        self.assertTrue(timed_out[timed_out.index('--run-id')+1].startswith('deadline-'))
+        self.assertNotEqual(timed_out[timed_out.index('--run-id')+1], cycle)
+        self.respond()
+        code, out, err = self.invoke()
+        self.assertEqual(code, 0, err)
+        recovered = self.receipts()[-1]
+        self.assertEqual(recovered[recovered.index('--outcome')+1], 'acted')
+        self.assertEqual(recovered[recovered.index('--run-id')+1], cycle)
+
+    def test_receipt_failure_never_changes_cycle_result(self):
+        self.respond({'tool':'anx','contains':['work','receipt'],'exit':2,'stderr':'receipt refused'})
+        code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        self.assertIn('CYCLE_RECEIPT_FAILED audit',err)
+        self.assertEqual((self.state/'fails').read_text().strip(),'0')
+
+    def test_success_receipt_is_the_last_write_of_a_finalized_cycle(self):
+        code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        anx = [c['args'] for c in self.calls() if c['tool'] == 'anx']
+        writes = [i for i,a in enumerate(anx) if 'note' in a or 'receipt' in a]
+        self.assertIn('receipt', anx[writes[-1]], 'the run receipt follows the note and finalization')
+        self.assertFalse((self.state/'pending.json').exists())
+
+    def test_deadline_inside_success_receipt_keeps_cycle_ok(self):
+        def deadline(*args, **kwargs):
+            raise loop.CycleDeadline('loop max_age exceeded')
+        with patch('coordkit.anxcli.AnxClient.work_receipt', side_effect=deadline):
+            code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        self.assertIn('CYCLE_OK audit',out)
+        self.assertIn('CYCLE_RECEIPT_FAILED audit',err)
+        self.assertEqual((self.state/'fails').read_text().strip(),'0')
+
+    def test_deadline_after_finalization_is_still_cycle_ok(self):
+        def late_deadline(*args, **kwargs):
+            raise loop.CycleDeadline('loop max_age exceeded')
+        # Raised outside the receipt guard (e.g. SIGALRM just after finalization): still a completed cycle.
+        with patch.object(loop, '_receipt', side_effect=late_deadline):
+            code,out,err = self.invoke()
+        self.assertEqual(code,0,err)
+        self.assertIn('deadline after finalization',out)
+        self.assertEqual((self.state/'fails').read_text().strip(),'0')
+        self.assertFalse((self.state/'pending.json').exists())
+
+    def test_lock_held_skip_records_no_receipt(self):
+        import fcntl
+        self.state.mkdir(parents=True)
+        with (self.state/'cycle.lock').open('a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.invoke()
+        self.assertEqual(self.receipts(), [])
+
+    def test_receipt_summary_is_one_bounded_line(self):
+        from coordkit.anxcli import AnxClient
+        AnxClient(self.manifest).work_receipt('card:loop-audit', 'c1', 'infra_error', 'line one\nline two ' + 'x'*400)
+        args = self.receipts()[-1]
+        summary = args[args.index('--summary')+1]
+        self.assertNotIn('\n', summary)
+        self.assertLessEqual(len(summary), 280)
 
     def test_snapshot_failure_no_delegate(self):
         self.respond({'tool':'gh','exit':1,'stderr':'not authenticated'})
