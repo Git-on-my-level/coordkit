@@ -32,6 +32,7 @@ if name == 'anx':
         ('boards', 'get'): (1, set(), set(), set()),
         ('boards', 'create'): (0, {'--title', '--summary'}, set(), set()),
         ('work', 'cadence'): (1, {'--every', '--budget', '--stop-rule'}, set(), set()),
+        ('work', 'receipt'): (1, {'--run-id', '--outcome', '--summary'}, {'--metric', '--ref', '--started-at'}, set()),
         ('orient',): (0, set(), set(), set()),
         ('context',): (1, set(), set(), set()),
         ('note',): (2, set(), {'--next', '--evidence', '--decided-by'}, {'--met'}),
