@@ -407,6 +407,12 @@ def main(argv, manifest):
     from .ops import parser_for
     parser = parser_for('hooks')
     opts = parser.parse_args(argv)
+    if opts.hermes_lane:
+        from .adapters import hermes
+        if opts.settings:
+            parser.error('--hermes-lane names a profile through its lane; --settings is for Claude Code')
+        print('HOOKS ' + hermes.manage_hook(manifest, opts.hermes_lane, opts.action))
+        return 0
     opts.settings = Path(opts.settings).expanduser() if opts.settings else Path.home()/'.claude/settings.json'
     if opts.action == 'install':
         deliver.install(manifest, opts.settings)

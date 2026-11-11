@@ -97,8 +97,22 @@ def recently_woken(manifest, name):
             0 <= time.time() - record['at'] < manifest.bus.wake_debounce_minutes * 60)
 
 
+def on_demand(manifest, name):
+    """The harness module for a lane that has no process between turns, else None."""
+    from .adapters import hermes
+    return hermes if hermes.lane_for(manifest, name) else None
+
+
 def is_listening(manifest, name, rows):
     from . import addressed
+    harness = on_demand(manifest, name)
+    if harness is not None:
+        # Only a running turn can hear a new row: its runner re-reads the cursor when
+        # the turn ends. A recent post or a finished wake proves nothing afterwards.
+        lane = harness.lane_for(manifest, name)
+        record = wake_record(manifest, name)
+        return harness.turn_running(lane) or (
+            recently_woken(manifest, name) and not harness.settled(manifest, name, record))
     if recently_woken(manifest, name):
         return True
     if addressed.listening(manifest, name, rows=rows)[0]:
@@ -140,14 +154,35 @@ def notify(manifest, rows):
                   and row.get('frm') != row.get('to')
                   and not (row.get('kind') in ('reply', 'answer', 'ack')
                            and (row.get('re') or recently_woken(manifest, row.get('frm', ''))))]
-    for name in dict.fromkeys(row['to'] for row in actionable):
+    from .routing import roles as role_members
+    members = role_members(manifest)
+
+    def recipients(row):
+        """The addressee, plus lanes that only a wake can reach: a waiter or hook shows a
+        busy session its role's and its owned rows, but an on-demand lane has neither."""
+        extra = [m for m in members.get(row['to'], ()) if on_demand(manifest, m) is not None]
+        if row.get('owner') and on_demand(manifest, row['owner']) is not None:
+            extra.append(row['owner'])
+        return [row['to'], *[m for m in extra if m != row.get('frm')]]
+
+    # An owned row can be addressed to anyone, `all` included; its on-demand owner still needs a turn.
+    owners = [row['owner'] for row in rows if row.get('owner') and row.get('kind') != 'fyi'
+              and not row.get('digest_only') and row.get('frm') != row['owner']
+              and not (row.get('kind') in ('reply', 'answer', 'ack') and row.get('re'))
+              and on_demand(manifest, row['owner']) is not None]
+    for name in dict.fromkeys([*(name for row in actionable for name in recipients(row)), *owners]):
+        if name in names and not retired(manifest, name) and on_demand(manifest, name) is not None:
+            # Ask before looking: a runner about to release its lock still finds the request.
+            on_demand(manifest, name).request_turn(on_demand(manifest, name).lane_for(manifest, name))
         if name not in names or retired(manifest, name) or is_listening(manifest, name, rows):
             continue
         path = wake_path(manifest, name)
         with locked(path.with_suffix('.lock')):
             at = time.time()
             record = wake_record(manifest, name)
-            if record and at - record['at'] < manifest.bus.wake_debounce_minutes * 60:
+            harness = on_demand(manifest, name)
+            if record and at - record['at'] < manifest.bus.wake_debounce_minutes * 60 and not (
+                    harness is not None and harness.settled(manifest, name, record)):
                 continue
             # A pending attempt may already have launched its continuation. Replay
             # its idempotency key after a crash, even beyond the debounce window.
@@ -156,7 +191,11 @@ def notify(manifest, rows):
             attempts = record.get('attempts', []) if pending else []
             record = dict(at=at, lane=name, key=key, status='pending', ids=[r.get('id') for r in rows if r.get('to') == name], attempts=attempts)
             write_json(path, record)
+            # An on-demand lane belongs to its harness alone; other lanes never try it.
+            owner = 'hermes' if harness is not None else None
             for adapter in wake_adapters(manifest):
+                if (adapter.name == 'hermes') != (owner == 'hermes'):
+                    continue
                 attempt = {'adapter': adapter.name, 'status': 'pending'}
                 record['attempts'].append(attempt)
                 write_json(path, record)
