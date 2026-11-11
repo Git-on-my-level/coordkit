@@ -13,10 +13,10 @@ coordkit audit-state worker --dry-run --json
 
 The lane must explicitly opt in with an absolute `state_file`, even when using
 `--state`. The file must already exist, fit within 256 KiB and use a name other than the
-reserved audit output `state-gaps.md`. Overrides affect
-that invocation, including where `state-gaps.md` is written. Dry run reports the
+reserved audit output `state-gaps-<lane>.md`. Overrides affect
+that invocation, including where `state-gaps-<lane>.md` is written. Dry run reports the
 byte sizes, removal counts, proposed cursor, selector, timeout and fixed auditor
-prompt and the scrubbed contents of both proposed input files; it calls no agent and publishes no result or bus row.
+prompt and the scrubbed inline inputs; it calls no agent and publishes no result or bus row.
 
 ```toml
 [audit]
@@ -58,9 +58,11 @@ A JSONL read covers at most the newest 2 MiB after the last successful audit,
 with only complete records consumed. Replaced, truncated or boundary-rewritten
 files reset the cursor. A SQLite read covers at most 4096 newest messages and
 2 MiB of text in the selected session. The final UTF-8 digest is at most 64 KiB;
-newest content wins. Prior reported gaps are carried into the next digest so an
+newest transcript content wins in the space left after complete carried gaps.
+Prior reported gaps are carried into the next digest so an
 unchanged promise is not forgotten merely because the transcript cursor advanced.
-The auditor reconciles them with the current state and later transcript. Its header reports omitted older content and how many
+If those gaps alone exceed the digest bound, the audit fails without advancing.
+The auditor reconciles them with current state and later transcript. The header reports omitted older content and how many
 secret spans were removed. An omitted item cannot be assessed by that audit. An oversized newest complete
 record that cannot be read within the input bound fails the audit rather than
 producing an empty successful digest.
@@ -74,21 +76,19 @@ Review the state and transcript before opting a lane into external processing.
 
 **The digest and scrubbed state copy are sent to whichever model the configured
 selector resolves to.** Agentctl receives the fixed prompt and runs with a fresh
-mode-0700 temporary working directory and requested read-only access. Its only
-authorized inputs are `digest.txt` and `state.txt`; the prompt treats their
-contents as untrusted evidence and forbids following commands or references.
-This is the trusted local account's tool boundary, not a filesystem sandbox.
-Coordkit removes that directory on completion or ordinary failure; the selected
-harness/provider may retain its own session records.
+mode-0700 empty working directory and requested read-only access. Scrubbed inputs
+are passed inline in the prompt on stdin; no digest or state input files are
+written. The selected harness/provider may retain its own session records.
 
 ## Results and failures
 
 The auditor must return only a JSON list of objects whose `kind`, `item`,
 `evidence` and `when` fields are strings. Non-JSON, extra text, duplicate keys,
 missing/extra fields, empty required fields and oversized responses fail the
-audit. An empty list is the only successful no-gaps answer.
+audit. An empty list is the only successful no-gaps answer. Control characters
+are stripped from returned fields before writing them to the gap file.
 
-A successful result atomically replaces `state-gaps.md` beside the selected state
+A successful result atomically replaces `state-gaps-<lane>.md` beside the selected state
 file, including a dated no-gaps file for an empty result. With gaps, one `handoff`
 row from `coordkit` goes to the lane, with that file as its ref. With no gaps,
 no row is posted. The bus row's deterministic ID is checked under the bus append
@@ -106,7 +106,8 @@ no external error body is copied into the status or detached log.
 
 When `interval` is set, each live `wake-scan` starts at most one due audit and
 only one scheduled audit runs at a time across scans. Retired lanes and lanes
-without state files are skipped. A Hermes turn lock defers an audit; the runner
+without state files are skipped. Harnesses without transcript discovery are
+also skipped; audit them by hand with `--transcript`. A Hermes turn lock defers an audit; the runner
 checks again and holds that lock while taking its snapshot and auditing. Addressed rows arriving during that lock leave the
 normal turn request; after releasing its locks the audit hands that request to
 a turn runner, including after audit failure. Scans

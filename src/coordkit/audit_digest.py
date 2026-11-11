@@ -14,6 +14,7 @@ MAX_READ = 2 * 1024 * 1024
 MAX_MESSAGES = 4096
 ARG_CHARS = 1000
 SECRET_PATTERNS = (
+    r'(?i)\b[a-z][a-z0-9+.-]*://[^\s/<>"\']+@',
     r'-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|\Z)',
     r'(?im)\bAuthorization\s*:[^\r\n]*',
     r'''(?ix)\b[\w.-]*(?:api[_-]?key|key|token|secret|password)["']?\s*[=:]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;}]+)''',
@@ -188,6 +189,8 @@ def build(lane, prior=None, transcript=None, carry=()):
               f'Older content omitted by bounds: {str(truncated).lower()}.\n')
     budget = MAX_DIGEST - len(header.encode())
     room = budget - len(prefix)
-    body = prefix[:budget] if room <= 0 else prefix + tail[-room:]
+    if room < 0:
+        raise ManifestError('audit_carry_too_large: prior gaps must fit whole in the digest')
+    body = prefix + tail[-room:] if room else prefix
     text = header + body.decode('utf-8', errors='ignore')
     return text, cursor, {'digest_bytes': len(text.encode()), 'removed_spans': removed, 'truncated': truncated}

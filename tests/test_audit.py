@@ -29,8 +29,10 @@ if args[0] == 'delegate':
     record['prompt'] = sys.stdin.read()
     record['cwd'] = os.getcwd()
     record['mode'] = Path.cwd().stat().st_mode & 0o777
-    record['digest'] = Path('digest.txt').read_text()
-    record['state'] = Path('state.txt').read_text()
+    record['files'] = sorted(p.name for p in Path.cwd().iterdir())
+    payload = json.loads(record['prompt'].split('Inputs (JSON):\\n', 1)[1])
+    record['digest'] = payload['transcript']
+    record['state'] = payload['state']
     record['request'] = json.loads(Path(args[args.index('--request-file') + 1]).read_text())
 with open(cfg['log'], 'a') as stream:
     stream.write(json.dumps(record) + '\\n')
@@ -59,6 +61,20 @@ class ScrubTests(unittest.TestCase):
         self.assertEqual(audit_digest.scrub('A commitment with no secrets'), ('A commitment with no secrets', 0))
         clean, count = audit_digest.scrub('-----BEGIN PRIVATE KEY-----\nunfinished')
         self.assertEqual((clean, count), ('[REDACTED]', 1))
+
+    def test_url_userinfo_is_redacted_without_changing_ordinary_urls(self):
+        for url in ('postgres://app:secret@db.example/data',
+                    'https://user:password@host.example/path',
+                    'redis://:secret@cache.example/0',
+                    'mysql://app:p%40ss@db.example/data'):
+            with self.subTest(url=url):
+                clean, count = audit_digest.scrub(url)
+                self.assertEqual(count, 1)
+                self.assertNotIn('@', clean)
+                self.assertIn('[REDACTED]', clean)
+                self.assertNotIn(url.split('@')[0], clean)
+        url = 'https://host.example/plain/path'
+        self.assertEqual(audit_digest.scrub(url), (url, 0))
 
 
 class AuditCase(HermesCase):
@@ -122,12 +138,13 @@ class AuditTests(AuditCase):
         self.assertEqual(receipt['removed_spans'], 1)
         self.assertEqual(receipt['state_removed_spans'], 1)
         self.assertEqual(self.bus_rows(), [])
-        self.assertIn('no gaps', self.state.with_name('state-gaps.md').read_text())
+        self.assertIn('no gaps', self.state.with_name('state-gaps-ops.md').read_text())
         delegate, waited = self.calls_for_audit()
         self.assertEqual(delegate['mode'], 0o700)
         self.assertNotIn('hidden', delegate['digest'] + delegate['state'])
         self.assertEqual(delegate['request']['selector'], {'pool': 'plan', 'settings': {'access': 'read_only'}})
-        self.assertEqual(delegate['prompt'], audit.PROMPT)
+        self.assertTrue(delegate['prompt'].startswith(audit.PROMPT))
+        self.assertEqual(delegate['files'], [])
         self.assertFalse(Path(delegate['cwd']).exists())
         self.assertEqual(waited['args'][0], 'await')
         self.assertEqual(read_json(audit.path_for(self.manifest, self.lane, '.receipt.json')), receipt)
@@ -148,10 +165,76 @@ class AuditTests(AuditCase):
         posted, = self.bus_rows()
         self.assertEqual((posted['kind'], posted['frm'], posted['to']), ('handoff', 'coordkit', 'ops'))
         self.assertEqual(posted['text'], '1 open items in your transcript are not in your state file')
-        self.assertEqual(posted['ref'], str(self.state.with_name('state-gaps.md')))
+        self.assertEqual(posted['ref'], str(self.state.with_name('state-gaps-ops.md')))
         self.assertEqual(receipt['gap_count'], 1)
         self.assertEqual(len(self.calls_for_audit()), 2)  # retry publishes its persisted result
         self.assertEqual(audit.health(self.manifest), 'audits healthy (scheduling off)')
+
+    def test_auditor_fields_lose_control_characters(self):
+        gap = dict(kind='commit\nment', item='first\x00second\x1b[31m',
+                   evidence='a\tb\r\nc\x7f', when='tomorrow\u202e')
+        self.reply(json.dumps([gap]))
+        receipt = self.run_audit()
+        clean, = receipt['open_items']
+        self.assertEqual(clean, dict(kind='commitment', item='firstsecond[31m', evidence='abc', when='tomorrow'))
+        text = self.state.with_name('state-gaps-ops.md').read_text()
+        self.assertIn('firstsecond[31m', text)
+        for control in ('\x00', '\x1b', '\r', '\t', '\x7f', '\u202e'):
+            self.assertNotIn(control, text)
+
+    def test_carried_gaps_over_the_bound_fail_without_consuming_input(self):
+        self.reply(json.dumps([dict(GAP, evidence='e' * 5000)]))
+        before = self.run_audit()
+        gap_before = self.state.with_name('state-gaps-ops.md').read_text()
+        self.messages('A later commitment')
+        self.reply('[]')
+        with patch.object(audit_digest, 'MAX_DIGEST', 1024), self.assertRaisesRegex(ManifestError, 'audit_carry_too_large'):
+            self.run_audit()
+        self.assertEqual(read_json(audit.path_for(self.manifest, self.lane, '.receipt.json')), before)
+        self.assertEqual(self.state.with_name('state-gaps-ops.md').read_text(), gap_before)
+        self.assertEqual(len(self.bus_rows()), 1)
+        self.assertEqual(len(self.calls_for_audit()), 2)
+
+    def test_pending_publication_obeys_the_turn_lock(self):
+        self.reply(json.dumps([GAP]))
+        with patch.object(audit, 'publish', side_effect=OSError('interrupted')), self.assertRaises(OSError):
+            self.run_audit()
+        pending = audit.path_for(self.manifest, self.lane, '.result.json')
+        before = pending.read_text()
+        with hermes.turn_lock(self.lane), self.assertRaisesRegex(ManifestError, 'audit_turn_busy'):
+            self.run_audit()
+        self.assertEqual(pending.read_text(), before)
+        self.assertFalse(self.state.with_name('state-gaps-ops.md').exists())
+        real = audit.publish
+        def locked_publish(*args):
+            self.assertTrue(hermes.turn_running(self.lane))
+            return real(*args)
+        with patch.object(audit, 'publish', side_effect=locked_publish):
+            self.run_audit()
+        self.assertEqual(len(self.calls_for_audit()), 2)
+        self.assertEqual(len(self.bus_rows()), 1)
+
+    def test_lanes_sharing_a_directory_and_cli_overrides_have_separate_gap_files(self):
+        other_state = self.root/'other-state.md'
+        other_state.write_text('Other state')
+        other = replace(self.lane, name='other', profile='other', state_file=str(other_state))
+        self.manifest.lanes.append(other)
+        self.reply(json.dumps([GAP]))
+        self.run_audit()
+        first = self.state.with_name('state-gaps-ops.md').read_text()
+        audit.run(self.manifest, 'other', transcript=self.transcript)
+        self.assertEqual(self.state.with_name('state-gaps-ops.md').read_text(), first)
+        self.assertTrue(self.state.with_name('state-gaps-other.md').is_file())
+        refs = {row['ref'] for row in self.bus_rows()}
+        self.assertEqual(len(refs), 2)
+        override = self.root/'override'
+        override.mkdir()
+        selected = override/'state.md'
+        selected.write_text('Override state')
+        self.run_audit(state=selected)
+        audit.run(self.manifest, 'other', transcript=self.transcript, state=selected)
+        self.assertTrue((override/'state-gaps-ops.md').is_file())
+        self.assertTrue((override/'state-gaps-other.md').is_file())
 
     def test_rows_arriving_during_audit_are_handed_to_a_turn_after_locks_close(self):
         self.messages('will do')
@@ -179,12 +262,12 @@ class AuditTests(AuditCase):
         self.assertIn('Prior audit gaps', self.calls_for_audit()[2]['digest'])
         self.assertIn(GAP['item'], self.calls_for_audit()[2]['digest'])
         self.assertEqual(len(self.bus_rows()), 1)
-        self.assertIn('no gaps', self.state.with_name('state-gaps.md').read_text())
+        self.assertIn('no gaps', self.state.with_name('state-gaps-ops.md').read_text())
 
     def test_contract_failure_changes_no_cursor_gap_file_or_rows_and_is_red(self):
         self.messages('I will check the build')
         prior = self.run_audit()
-        gap_before = self.state.with_name('state-gaps.md').read_text()
+        gap_before = self.state.with_name('state-gaps-ops.md').read_text()
         self.messages('A new commitment')
         invalid = ['No gaps.', '```json\n[]\n```', '{}', '[null]', '[{"kind":"commitment"}]',
                    '[{"kind":"a","kind":"b","item":"x","evidence":"x","when":""}]',
@@ -195,7 +278,7 @@ class AuditTests(AuditCase):
                 with self.assertRaisesRegex(ManifestError, 'audit_contract_failed'):
                     self.run_audit()
                 self.assertEqual(read_json(audit.path_for(self.manifest, self.lane, '.receipt.json')), prior)
-                self.assertEqual(self.state.with_name('state-gaps.md').read_text(), gap_before)
+                self.assertEqual(self.state.with_name('state-gaps-ops.md').read_text(), gap_before)
                 self.assertEqual(self.bus_rows(), [])
                 with self.assertRaisesRegex(ManifestError, 'audit_failed'):
                     audit.health(self.manifest)
@@ -214,7 +297,7 @@ class AuditTests(AuditCase):
         self.assertEqual(result['state'], self.state.read_text())
         self.assertEqual(self.calls_for_audit(), [])
         self.assertFalse(audit.path_for(self.manifest, self.lane, '.receipt.json').exists())
-        self.assertFalse(self.state.with_name('state-gaps.md').exists())
+        self.assertFalse(self.state.with_name('state-gaps-ops.md').exists())
         self.lane.state_file = ''
         with self.assertRaisesRegex(ManifestError, 'state_file_missing'):
             self.run_audit(state=self.state)
@@ -253,7 +336,7 @@ class AuditTests(AuditCase):
         self.assertEqual(self.calls_for_audit()[0]['request']['selector']['pool'], 'review')
 
     def test_state_cannot_be_the_gap_output_file(self):
-        reserved = self.state.with_name('state-gaps.md')
+        reserved = self.state.with_name('state-gaps-ops.md')
         reserved.write_text('Keep durable state')
         with self.assertRaisesRegex(ManifestError, 'state_file_reserved'):
             self.run_audit(state=reserved)
@@ -302,13 +385,9 @@ class DigestTests(AuditCase):
 
     def test_a_carry_larger_than_the_digest_is_kept_ahead_of_transcript(self):
         self.messages('newest item')
-        with patch.object(audit_digest, 'MAX_DIGEST', 1024):
-            digest, _, stats = audit_digest.build(self.lane, transcript=self.transcript,
-                                                  carry=[dict(GAP, evidence='e' * 5000)])
-        self.assertLessEqual(len(digest.encode()), 1024)
-        self.assertTrue(stats['truncated'])
-        self.assertIn('Prior audit gaps', digest)
-        self.assertNotIn('newest item', digest)
+        with patch.object(audit_digest, 'MAX_DIGEST', 1024), self.assertRaisesRegex(ManifestError, 'audit_carry_too_large'):
+            audit_digest.build(self.lane, transcript=self.transcript,
+                               carry=[dict(GAP, evidence='e' * 5000)])
 
     def test_an_oversized_newest_complete_record_fails_instead_of_being_empty(self):
         self.messages('x' * 8000)
@@ -402,6 +481,15 @@ class SchedulingTests(AuditCase):
         self.assertIsNone(audit.schedule(self.manifest))
         with patch.object(audit, 'due', return_value=True), patch('coordkit.wake.retired', return_value=True):
             self.assertIsNone(audit.schedule(self.manifest))
+
+    def test_scheduled_audits_skip_harnesses_without_transcript_discovery(self):
+        self.manifest.audit.interval = '24h'
+        self.lane.harness = 'opencode'
+        with patch.object(audit.subprocess, 'Popen') as launch:
+            self.assertIsNone(audit.schedule(self.manifest))
+            launch.assert_not_called()
+        self.assertFalse(audit.path_for(self.manifest, self.lane, '.status.json').exists())
+        self.assertIn('healthy', audit.health(self.manifest))
 
     def test_detached_claim_survives_parent_close_and_two_scans_start_one(self):
         self.store()
@@ -509,7 +597,7 @@ class RotationTests(AuditCase):
         self.assertNotIn('--resume', argv)
         prompt = argv[argv.index('-z') + 1]
         self.assertTrue(prompt.startswith('Read your durable state first: ' + str(self.state)))
-        self.assertIn(str(self.state.with_name('state-gaps.md')), prompt)
+        self.assertIn(str(self.state.with_name('state-gaps-ops.md')), prompt)
         self.assertEqual(len(self.calls_for_audit()), 2)
 
     def test_failed_audit_still_rotates_and_doctor_reports_failure(self):

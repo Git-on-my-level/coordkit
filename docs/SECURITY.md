@@ -43,10 +43,4 @@ Harness hooks are bounded and fail open. Receipted rollback refuses to overwrite
 
 ## State audit inputs
 
-`audit-state` sends a bounded transcript digest and a scrubbed state copy to the
-model selected by `[audit] selector`. Its redaction covers common secret shapes,
-not every sensitive fact or prompt injection. The auditor runs from a private
-temporary directory with requested read-only access and instructions to read
-only those two files; it is not a filesystem sandbox. Review the data and route
-before enabling audits. See [state audits](AUDIT.md) for bounds, retention,
-strict result validation and failure behavior.
+The auditor is an ordinary agent, and the scrubbed digest and state text go to the model resolved by `[audit] selector`.

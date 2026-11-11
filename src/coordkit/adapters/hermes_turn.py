@@ -109,7 +109,7 @@ def prompt(manifest, name, lines, round_number):
     lane = hermes.lane_for(manifest, name)
     if lane and lane.state_file:
         head = (f'Read your durable state first: {lane.state_file}\n'
-                f'Then read state audit gaps: {Path(lane.state_file).with_name("state-gaps.md")} (if present).\n' + head)
+                f'Then read state audit gaps: {Path(lane.state_file).with_name(f"state-gaps-{name}.md")} (if present).\n' + head)
     if round_number:
         head += ' More addressed work arrived while your last turn ran.'
     rows = ('\nAddressed rows since your last turn:\n' + '\n'.join(lines) + '\n') if lines else '\n'

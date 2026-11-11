@@ -142,7 +142,7 @@ After this many successfully completed coordkit turns on the session, the runner
 and skipped turns do not count. Counts and rotation markers use the existing
 turn receipts, rather than a second counter store. The runner then forgets its
 remembered session ID; the next turn starts a fresh session and its prompt names
-the state file and `state-gaps.md` first. State-enabled lanes receive those
+the state file and `state-gaps-<lane>.md` first. State-enabled lanes receive those
 pointers on every turn. Nothing deletes the old Hermes session.
 
 Audit failure is recorded in audit status and the rotation receipt and is
