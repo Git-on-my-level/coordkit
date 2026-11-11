@@ -45,7 +45,8 @@ with log.open('a') as stream:
                                  home=os.environ.get('HERMES_HOME'))) + '\\n')
 resumed = argv[argv.index('--resume') + 1] if '--resume' in argv else ''
 if resumed and resumed == cfg.get('GONE') and not cfg.get('GONE_NO_REPORT'):
-    Path(argv[argv.index('--usage-file') + 1]).write_text(json.dumps(dict(api_calls=None, model=None)))
+    Path(argv[argv.index('--usage-file') + 1]).write_text(json.dumps(dict(
+        api_calls=None, model=None, input_tokens=cfg.get('GONE_TOKENS'))))
 if resumed and resumed == cfg.get('GONE'):
     message = 'Session not found: ' + ('some-other-session' if cfg.get('GONE_OTHER') else resumed)
     if cfg.get('GONE_STDERR'):
@@ -111,6 +112,9 @@ class HermesCase(FakeCase):
         env.start(); self.addCleanup(env.stop)
         probe = patch.object(addressed, 'PROBE', lambda: set())
         probe.start(); self.addCleanup(probe.stop)
+        self.waits = []  # a failed runner waits out the debounce; tests record the wait instead
+        wait = patch.object(hermes_turn, 'failure_wait', side_effect=lambda manifest: self.waits.append(1) or 0)
+        wait.start(); self.addCleanup(wait.stop)
 
     def steer(self, **behavior):
         """The fake reads a file beside itself: a turn's environment carries nothing from the test."""
@@ -197,7 +201,7 @@ class TurnTests(HermesCase):
         self.assertEqual((receipt['rows'], receipt['session_id'], receipt['model']), (1, 'sess-1', 'vendor-model'))
         self.assertEqual(receipt['usage'], {'input_tokens': 100, 'output_tokens': 7, 'cache_read_input_tokens': 30,
                                             'cache_creation_input_tokens': 5, 'reasoning_tokens': 2, 'api_calls': 3,
-                                            'reported': True})
+                                            'reported': True, 'idle': False})
         # Rows handed over in the prompt are delivered: an in-turn hook must not repeat them.
         self.assertEqual(read_json(deliver.cursor_path(self.manifest, 'ops'))['offset'],
                          self.manifest.paths.bus_log.stat().st_size)
@@ -226,6 +230,9 @@ class TurnTests(HermesCase):
         receipt = hermes.last_receipt(self.lane)
         self.assertFalse(receipt['ok'])
         self.assertEqual(receipt['error'], 'provider said no')
+        # No request existed when it failed, yet it still waited: a sender in that window
+        # is told the lane is listening and starts nothing.
+        self.assertEqual(self.waits, [1])
         self.assertEqual(addressed.listening(self.manifest, 'ops'), (False, 'hermes turn failed: provider said no'))
 
     def test_a_session_that_no_longer_resumes_is_replaced_once(self):
@@ -380,7 +387,6 @@ class TurnTests(HermesCase):
         """Contract: a failed turn does not strand the row whose sender saw the lock held."""
         self.attach()
         self.post(row('f1'))
-        self.file.write_text(self.file.read_text().replace('live_check = false', 'live_check = false\nwake_debounce_minutes = 0'))
         real = hermes_turn.run_turn
         attempts = []
         def run_turn(manifest, lane, text, timeout, session=''):
@@ -395,12 +401,14 @@ class TurnTests(HermesCase):
         with patch.object(hermes_turn, 'run_turn', side_effect=run_turn):
             self.assertEqual(self.turn(), 0)
         self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.waits, [1])  # it waited the debounce out before looking
         self.assertIn('--re during1', attempts[1])
         self.assertEqual([r['ok'] for r in hermes.receipts(self.lane)[0]], [False, True])
 
     def test_only_the_resumed_sessions_own_missing_report_is_retried(self):
         hermes.remember_session(self.lane, 'live-2')
         for behavior in (dict(GONE_OTHER='1'),        # the error names some other session
+                         dict(GONE_TOKENS=40),        # the report shows tokens: a turn did run
                          dict(GONE_NO_REPORT='1')):   # no usage report: unknown, may have done work
             self.calls.unlink(missing_ok=True)
             self.post(row('g-' + next(iter(behavior)).lower()))

@@ -149,6 +149,9 @@ def read_usage(usage_file, record):
              # None when Hermes reported no count: unknown is not the same as no call made.
              'api_calls': count('api_calls') if type(report.get('api_calls')) is int else None,
              'reported': reported}
+    # Hermes wrote its report and it shows no activity of any kind: the run ended before a turn began.
+    usage['idle'] = reported and not any(usage[key] for key in (
+        'api_calls', 'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
     def text(key):
         value = report.get(key) or record.get(key)
         return value if isinstance(value, str) else ''
@@ -259,6 +262,10 @@ def run_turn(manifest, lane, text, timeout, session=''):
     return proc.returncode, timed_out, record, usage, model, provider, session
 
 
+def failure_wait(manifest):
+    return manifest.bus.wake_debounce_minutes * 60 + 1
+
+
 def main(argv=None):
     from ..manifest import duration, load
     parser = argparse.ArgumentParser(prog='coordkit.adapters.hermes_turn')
@@ -306,12 +313,13 @@ def main(argv=None):
                 text = prompt(manifest, lane.name, lines, round_number)
                 known = hermes.session_id(lane)
                 code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout, known)
-                if (known and code and not timed_out and usage['reported'] and not usage['api_calls']
+                if (known and code and not timed_out and usage['idle']
                         and 'session not found' in str(record.get('error', '')).lower()
                         and known in str(record.get('error', ''))):
-                    # Hermes names the very session this run tried to resume as gone, and its
-                    # own usage report shows no provider call: the resume never started. A run
-                    # with no report at all is unknown, may have done work, and is never repeated.
+                    # Hermes names the very session this run tried to resume as gone, and its own
+                    # usage report shows no call and no token in or out: the resume never started.
+                    # (Hermes reports nulls there, never an explicit zero.) A run with no report,
+                    # or with any activity in it, may have done work and is never repeated.
                     print(f'HERMES_TURN lane={lane.name} session {known} did not resume (exit {code}); starting a new one',
                           file=sys.stderr, flush=True)
                     hermes.remember_session(lane, '')
@@ -334,22 +342,20 @@ def main(argv=None):
                 if not ok:
                     failure = 1 if round_number else (code or 1)
                     break
+        if failure and retried < FAILURE_RETRIES and rounds < MAX_ROUNDS:
+            # A failed wake keeps its debounce, so for that window senders start nothing and
+            # only leave a request. This runner is the one thing that will read it: it waits
+            # the window out before looking, whether or not a request exists yet. A sender
+            # arriving after that look finds the window over and wakes the lane itself.
+            retried += 1
+            time.sleep(failure_wait(manifest))
+            if hermes.turn_requested(lane):
+                continue
+            return failure
         # A sender that saw the lock held just before it was released has left a request
         # and started nothing. It is checked only after the release, so none is missed.
-        if rounds >= MAX_ROUNDS or not hermes.turn_requested(lane):
+        if failure or rounds >= MAX_ROUNDS or not hermes.turn_requested(lane):
             return failure
-        if failure:
-            # A row arrived during the turn that failed. Its sender started nothing, and the
-            # failure debounce keeps later senders from waking the lane, so this runner comes
-            # back once after that window instead of leaving the row to chance.
-            if retried >= FAILURE_RETRIES:
-                return failure
-            retried += 1
-            # Past the whole window: a sender arriving after this check finds the debounce
-            # over and wakes the lane itself; one arriving before it has left a request.
-            time.sleep(manifest.bus.wake_debounce_minutes * 60 + 1)
-            if not hermes.turn_requested(lane):
-                return failure  # another runner has taken it since
 
 
 if __name__ == '__main__':
