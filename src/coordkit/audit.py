@@ -17,6 +17,7 @@ from .actl import AgentctlClient, AGENTCTL_SCHEMA_VERSION
 from .audit_digest import build, scrub
 from .duration import duration
 from .errors import ManifestError
+from .process import ToolError
 from .process import is_schema
 from .state import name_key, read_json, write_json
 from .timers import stamp
@@ -158,7 +159,7 @@ def auditor(manifest, lane, digest, state, started):
         key = f'{manifest.agentctl.request_key_prefix}-audit-{uuid.uuid4().hex}'
         try:
             raw = client.delegate(prompt, scratch, key=key, selector=manifest.audit.selector,
-                                  detach=True, timeout_override=manifest.audit.timeout, cwd=cwd,
+                                  detach=True, timeout_override=manifest.audit.timeout, cwd=cwd, access='coding',
                                   call_timeout=max(.001, deadline - time.monotonic()))
             doc = json.loads(raw)
             result = doc.get('result', {}) if isinstance(doc, dict) else {}
@@ -360,6 +361,8 @@ def main(argv, manifest):
         # CLI and detached logs expose a category, not potentially secret external output.
         code = str(exc).split(':', 1)[0] if isinstance(exc, ManifestError) else type(exc).__name__
         detail = ('; set an absolute lanes.state_file for this lane' if code == 'audit_state_file_missing' else '')
+        if isinstance(exc, ToolError):  # agentctl's own refusal text says what to fix; keep one bounded line
+            detail = f'; {exc.category}: ' + ' '.join(str(exc.detail).split())[:300]
         print(json.dumps({'ok': False, 'error': code, 'detail': detail}) if opts.json else 'AUDIT_FAILED ' + code + detail, file=sys.stderr)
         return 1
     print(json.dumps(result) if opts.json else ('AUDIT_DRY_RUN ' if opts.dry_run else 'AUDIT_OK ') + json.dumps(result))

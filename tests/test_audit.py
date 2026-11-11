@@ -142,7 +142,7 @@ class AuditTests(AuditCase):
         delegate, waited = self.calls_for_audit()
         self.assertEqual(delegate['mode'], 0o700)
         self.assertNotIn('hidden', delegate['digest'] + delegate['state'])
-        self.assertEqual(delegate['request']['selector'], {'pool': 'plan', 'settings': {'access': 'read_only'}})
+        self.assertEqual(delegate['request']['selector'], {'pool': 'plan', 'settings': {'access': 'coding'}})
         self.assertTrue(delegate['prompt'].startswith(audit.PROMPT))
         self.assertEqual(delegate['files'], [])
         self.assertFalse(Path(delegate['cwd']).exists())

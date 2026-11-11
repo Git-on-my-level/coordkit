@@ -76,7 +76,9 @@ Review the state and transcript before opting a lane into external processing.
 
 **The digest and scrubbed state copy are sent to whichever model the configured
 selector resolves to.** Agentctl receives the fixed prompt and runs with a fresh
-mode-0700 empty working directory and requested read-only access. Scrubbed inputs
+mode-0700 empty working directory. It asks for ordinary (coding) access, because
+some harnesses refuse read-only launches; the directory is empty and the auditor is
+asked for JSON only. Scrubbed inputs
 are passed inline in the prompt on stdin; no digest or state input files are
 written. The selected harness/provider may retain its own session records.
 
