@@ -102,10 +102,14 @@ def stop_counter_path(manifest, name, session, transcript=None):
     return cursor_path(manifest, name).with_name(f'{name_key(name)}.{tag}.stop.json')
 
 
-def requires_waiter(manifest, name):
+def lane_setting(manifest, name, key):
     lane = next((lane for lane in manifest.lanes if lane.name == name), None)
-    override = getattr(lane, 'stop_requires_waiter', None)
-    return manifest.deliver.stop_requires_waiter if override is None else override
+    override = getattr(lane, key, None)
+    return getattr(manifest.deliver, key) if override is None else override
+
+
+def requires_waiter(manifest, name):
+    return lane_setting(manifest, name, 'stop_requires_waiter')
 
 
 def stop_hook(manifest, payload, out=None):
@@ -134,6 +138,9 @@ def stop_hook(manifest, payload, out=None):
                 manifest, name, waiter_only=True)[0]:
             reason = (f'arm a background `bus wait --to {name}` (your usual waiter) before ending the turn '
                       'so addressed work wakes you')
+        if reason is None and lane_setting(manifest, name, 'stop_requires_agentctl_collection'):
+            from .stop_agentctl import block_reason
+            reason = block_reason(payload.get('session_id'))
         if reason is None:
             counter.unlink(missing_ok=True)
             return

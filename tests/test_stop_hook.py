@@ -2,14 +2,16 @@
 import builtins
 import contextlib
 import copy
+import datetime as dt
 import io
 import json
 import os
 import signal
+import subprocess
 import time
 from unittest.mock import patch
 
-from coordkit import addressed, deliver, hooks, hook_runtime, wake
+from coordkit import addressed, deliver, hooks, hook_runtime, stop_agentctl, wake
 from coordkit.adapters.claude_hook import load as hook_manifest
 from coordkit.cli import main
 from coordkit.manifest import ManifestError, load
@@ -18,6 +20,155 @@ from tests.test_deliver import DeliveryCase
 
 
 class StopGuardTests(DeliveryCase):
+    def setUp(self):
+        super().setUp()
+        # Never inspect the developer's journal, including tests using the CLI projection.
+        inventory = patch.object(stop_agentctl.process, 'call_json', return_value={'executions': []})
+        self.inventory = inventory.start()
+        self.addCleanup(inventory.stop)
+
+    def execution(self, state='completed'):
+        return dict(id='exec-one-two-three-four-five-six', state=state,
+                    labels=[stop_agentctl.session_label('s1')], unreconciled=True,
+                    created_at=dt.datetime.now(dt.timezone.utc).isoformat())
+
+    def work(self, *items):
+        self.manifest.deliver.stop_requires_waiter = False
+        self.inventory.return_value = {'executions': list(items)}
+
+    def test_uncollected_terminal_work_blocks_and_collection_clears(self):
+        for state in stop_agentctl.TERMINAL:
+            with self.subTest(state=state):
+                self.counter().unlink(missing_ok=True)
+                item = self.execution(state)
+                self.work(item)
+                self.assertIn('agentctl result ' + item['id'] + ' --content', self.decision()['reason'])
+                item['unreconciled'] = False
+                self.assertIsNone(self.decision())
+        argv = self.inventory.call_args.args[0]
+        self.assertEqual(argv[:2], ['agentctl', 'recent'])
+        self.assertIn(stop_agentctl.session_label('s1'), argv)
+        self.assertIn('--since', argv)
+        self.assertEqual(self.inventory.call_args.kwargs['retries'], 0)
+        self.assertLessEqual(self.inventory.call_args.kwargs['timeout'], stop_agentctl.TIMEOUT)
+
+    def test_running_work_requires_live_content_waiter_for_exact_execution(self):
+        item = self.execution('running')
+        self.work(item)
+        with patch.object(stop_agentctl.process, 'run') as probe:
+            probe.return_value = subprocess.CompletedProcess([], 0,
+                f"S agentctl await {item['id']} --content\n", '')
+            self.assertIsNone(self.decision())
+            probe.return_value.stdout = f"S sh -c 'agentctl await {item['id']} --content'\n"
+            self.assertIn('agentctl await ' + item['id'] + ' --content', self.decision()['reason'])
+            probe.return_value.stdout = f"S agentctl await {item['id']}\n"
+            self.assertIsNotNone(self.decision())
+            self.assertIsNone(self.decision(), 'work uses the existing two-block budget')
+
+    def test_waiter_snapshot_rejects_stopped_zombie_and_unrelated_commands(self):
+        key = self.execution()['id']
+        lines = [f'Z agentctl await {key} --content', f'T agentctl await {key} --content',
+                 f'S agentctl result {key} --content', f'S agentctl delegate --label await {key} --content',
+                 f'S agentctl await {key} --content --no-acknowledge',
+                 f'S agentctl --journal alternate.db await {key} --content']
+        with patch.object(stop_agentctl.process, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, '\n'.join(lines), '')):
+            self.assertEqual(stop_agentctl.live_waiters(.1), set())
+        with patch.object(stop_agentctl.process, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, f'S agentctl --output json await {key} --content', '')):
+            self.assertEqual(stop_agentctl.live_waiters(.1), {key})
+
+    def test_agentctl_timeout_busy_missing_malformed_and_probe_errors_fail_open(self):
+        self.work(self.execution())
+        for error in (stop_agentctl.process.ToolError('agentctl', 6, 'timeout', 'tool_timeout'),
+                      stop_agentctl.process.ToolError('agentctl', 6, 'journal_busy'),
+                      FileNotFoundError(), TimeoutError()):
+            with self.subTest(error=error):
+                self.inventory.side_effect = error
+                self.assertIsNone(self.decision())
+        self.inventory.side_effect = None
+        for malformed in ({}, {'executions': None}, {'executions': [None]}):
+            self.inventory.return_value = malformed
+            self.assertIsNone(self.decision())
+        self.work(self.execution('running'))
+        with patch.object(stop_agentctl.process, 'run', side_effect=OSError('ps unavailable')):
+            self.assertIsNone(self.decision())
+        # Inventory errors never disable unread-bus enforcement.
+        self.incumbent_row('pending', 'x', 'lead-a')
+        self.assertIn('addressed bus rows', self.decision()['reason'])
+
+    def test_outer_deadline_interrupts_slow_inventory_and_suppresses_output(self):
+        self.work(self.execution())
+        finished = []
+        def slow_inventory(*args, **kwargs):
+            time.sleep(1)
+            finished.append(True)
+        self.inventory.side_effect = slow_inventory
+        with patch.object(deliver, 'HOOK_TIMEOUT', .03):
+            self.assertIsNone(self.decision())
+        self.assertEqual(finished, [])
+
+    def test_agentctl_and_bus_reasons_share_budget(self):
+        self.incumbent_row('pending', 'x', 'lead-a')
+        self.assertIn('addressed bus rows', self.decision()['reason'])
+        self.run_hook()
+        self.assertIn('bus wait', self.decision()['reason'])
+        self.work(self.execution())
+        self.assertIsNone(self.decision())
+        self.assertEqual(read_json(self.counter())['blocks'], 2)
+
+    def test_agentctl_scope_never_uses_cwd_harness_or_child_session(self):
+        item = self.execution()
+        self.work(item)
+        item['labels'] = ['coordkit.lane.lead-a']
+        self.assertIsNone(self.decision())
+        item['labels'] = [stop_agentctl.session_label('other-session')]
+        self.assertIsNone(self.decision())
+        item['labels'] = [stop_agentctl.session_label('s1')]
+        item['created_at'] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
+        self.assertIsNone(self.decision())
+        self.inventory.reset_mock()
+        self.assertIsNone(stop_agentctl.block_reason(None))
+        self.inventory.assert_not_called()
+
+    def test_agentctl_reason_caps_ids_and_inventory_pages(self):
+        items = [self.execution() for _ in range(7)]
+        for word, item in zip(('one', 'two', 'three', 'four', 'five', 'six', 'seven'), items):
+            item['id'] = f'exec-{word}-two-three-four-five-six'
+        self.work(*items)
+        reason = self.decision()['reason']
+        self.assertEqual(reason.count('agentctl result'), 5)
+        self.assertIn('+2 more', reason)
+        self.inventory.return_value = {'executions': [], 'has_more': True, 'next_cursor': 'next'}
+        self.inventory.reset_mock()
+        self.assertIsNone(self.decision())
+        self.assertEqual(self.inventory.call_count, stop_agentctl.MAX_PAGES)
+        self.assertEqual(self.inventory.call_args.args[0][-2:], ['--cursor', 'next'])
+
+    def test_collection_kill_switch_defaults_overrides_and_validation(self):
+        key = 'stop_requires_agentctl_collection'
+        self.assertTrue(getattr(self.manifest.deliver, key))
+        self.assertTrue(getattr(hook_manifest(self.file).deliver, key))
+        self.work(self.execution())
+        setattr(self.manifest.deliver, key, False)
+        self.assertIsNone(self.decision())
+        self.inventory.assert_not_called()
+        self.incumbent_row('pending', 'x', 'lead-a')
+        self.assertIsNotNone(self.decision())
+        base = self.file.read_text()
+        lane = '\n[[lanes]]\nname="lead-a"\nconfig_dir="identity"\ncwd="."\nmodel="test"\neffort="test"\n'
+        for global_value, override in (('true', 'false'), ('false', 'true')):
+            self.file.write_text(base + '\n[deliver]\n' + key + '=' + global_value + '\n' + lane + key + '=' + override + '\n')
+            for manifest in (load(self.file), hook_manifest(self.file)):
+                self.assertEqual(deliver.lane_setting(manifest, 'lead-a', key), override == 'true')
+                self.assertEqual(deliver.lane_setting(manifest, 'worker-ui', key), global_value == 'true')
+        for bad in ('"false"', '1'):
+            for data in (base + '\n[deliver]\n' + key + '=' + bad, base + lane + key + '=' + bad):
+                self.file.write_text(data + '\n')
+                for loader in (load, hook_manifest):
+                    with self.assertRaises(ManifestError):
+                        loader(self.file)
+
     def decision(self, **payload):
         out = io.StringIO()
         self.assertEqual(deliver.run_stop_hook(self.manifest, json.dumps(dict(

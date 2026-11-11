@@ -67,6 +67,7 @@ class Handoffs:
 @dataclass
 class Deliver:
     stop_requires_waiter: bool = True
+    stop_requires_agentctl_collection: bool = True
     waiter_fresh_seconds: int = 180
 
 
@@ -94,6 +95,7 @@ class UsageLane:
     resume: str = ""      # only "headless" permits Claude Code resume
     harness: str = ""     # "" / "claude" read Claude transcripts; "opencode" reads its local store
     stop_requires_waiter: bool | None = None  # absent inherits [deliver]
+    stop_requires_agentctl_collection: bool | None = None
 
 
 @dataclass
@@ -356,7 +358,7 @@ def _table(cls, data, section, required=()):
     # Dataclass annotations are postponed; these schema field names carry uniform types.
     lists = {"failure_realert_intervals", "directories", "flag_sources", "alert_command", "shared_git_dirs", "mirror_kinds", "capacity_fallback", "required_checks", "path", "ci", "review_exempt_paths", "result_globs", "config_dirs", "guarded_patterns", "exclude_sessions", "human_sessions", "ref_roots", "internal_senders", "post_as", "observed_labels"}
     maps = {"aliases", "pools", "loops", "roles", "agents", "projects", "repos", "selector"}
-    booleans = {"required", "stop_requires_waiter", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
+    booleans = {"required", "stop_requires_waiter", "stop_requires_agentctl_collection", "live_check", "mirror", "require_card", "anx_answers", "allow_workflow_edits", "enabled", "bridge_answers", "incumbent_waiters", "require_review_ship", "lead_escalations"}
     integers = {"orphan_batch_lines", "orphan_ask_cap", "fetch_timeout_seconds", "max_bytes", "auto_default_reasks", "waiter_fresh_seconds", "heartbeat_seconds", "text_cap", "capacity_relaunch_max", "fail_report_after", "interval_seconds", "max_gap_seconds", "sweep_interval", "end_within_minutes", "roster_unenrolled_posts", "roster_sink_received"} | {f.name for f in fields(Limits)}
     numbers = {"wake_debounce_minutes", "idle_hours", "max_run_hours", "autocontinue_hours", "timeout_minutes", "min_timeout_minutes", "backoff", "settle", "debounce", "ride_max", "poll", "ci_poll", "anx_poll", "max_minutes", "poll_seconds", "window_hours", "transcript_window_hours"}
     for key, value in data.items():
