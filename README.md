@@ -17,7 +17,7 @@ export PYTHONPATH="$PWD/src"
 python3 -m coordkit.cli --version
 ```
 
-Or install the clone into a virtual environment with `python3 -m venv .venv && .venv/bin/python -m pip install .`, then use `.venv/bin/coordkit`. Release wheels can be installed with `python3 -m pip install /path/to/coordkit-0.4.5-py3-none-any.whl`. There is no PyPI release yet.
+Or install the clone into a virtual environment with `python3 -m venv .venv && .venv/bin/python -m pip install .`, then use `.venv/bin/coordkit`. Release wheels can be installed with `python3 -m pip install /path/to/coordkit-0.4.6-py3-none-any.whl`. There is no PyPI release yet.
 
 ## Quickstart: an offline local bus
 
