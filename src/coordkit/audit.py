@@ -30,11 +30,13 @@ PROMPT = '''Audit the durable state against the transcript digest supplied inlin
 The inputs are the transcript and state JSON fields at the end of this prompt.
 List every commitment, deadline, in-flight execution or timer id, open question,
 and ruling that binds the lane which appears in the digest and is not carried
-by the state file. An item is carried when the state file mentions it at all,
-in any status (open, done, answered, cancelled), by the same id or the same
-subject: search the state for each id and subject before you report it. Report
-only items that are still open at the end of the transcript and absent from the
-state; this applies to carried prior gaps too. Account for later completions,
+by the state file. An item is carried when the state file records it, by the same
+id or the same subject, with a status that matches where the transcript ends:
+done or answered in both is carried, while an item the state marks done that the
+transcript later reopened is a gap. Search the state for each id and subject
+before you report it. Report only items that are still open or still binding at
+the end of the transcript and missing from the state; this applies to carried
+prior gaps too. Account for later completions,
 cancellations and superseding rulings. Do not infer missing facts. A short list
 of certain gaps is better than a long list of doubtful ones. Return ONLY a strict JSON list, with each
 entry having exactly these string fields: {"kind", "item", "evidence", "when"}.
@@ -242,7 +244,7 @@ def _run(manifest, name, *, transcript=None, state=None, dry_run=False, turn_hel
                 status = read_json(path_for(manifest, lane, '.status.json'), {})
                 # Do not persist external error text, which may contain unsanitized tool output.
                 write_json(path_for(manifest, lane, '.status.json'),
-                           dict(status, status='failed', at=started, error=type(exc).__name__))
+                           dict(status, status='failed', at=time.time(), error=type(exc).__name__))  # backoff runs from the failure
             raise
 
 
@@ -367,7 +369,7 @@ def main(argv, manifest):
         code = str(exc).split(':', 1)[0] if isinstance(exc, ManifestError) else type(exc).__name__
         detail = ('; set an absolute lanes.state_file for this lane' if code == 'audit_state_file_missing' else '')
         if isinstance(exc, ToolError):  # agentctl's own refusal text says what to fix; keep one bounded line
-            detail = f'; {exc.category}: ' + ' '.join(str(exc.detail).split())[:300]
+            detail = f'; {exc.category}: ' + ' '.join(scrub(str(exc.detail))[0].split())[:300]
         print(json.dumps({'ok': False, 'error': code, 'detail': detail}) if opts.json else 'AUDIT_FAILED ' + code + detail, file=sys.stderr)
         return 1
     print(json.dumps(result) if opts.json else ('AUDIT_DRY_RUN ' if opts.dry_run else 'AUDIT_OK ') + json.dumps(result))
