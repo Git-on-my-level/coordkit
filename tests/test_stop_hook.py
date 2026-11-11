@@ -24,18 +24,26 @@ class StopGuardTests(DeliveryCase):
     def setUp(self):
         super().setUp()
         # Never inspect the developer's journal, including tests using the CLI projection.
-        inventory = patch.object(stop_agentctl.process, 'call_json', return_value={'executions': []})
+        inventory = patch.object(stop_agentctl.process, 'call_json', return_value=self.page())
         self.inventory = inventory.start()
         self.addCleanup(inventory.stop)
+        support = patch.object(stop_agentctl, 'children_supported', return_value=True)
+        support.start()
+        self.addCleanup(support.stop)
 
     def execution(self, state='completed'):
         return dict(id='exec-one-two-three-four-five-six', state=state,
-                    labels=[stop_agentctl.session_label('s1')], unreconciled=True,
+                    reason='terminal_uncollected' if state in stop_agentctl.TERMINAL else 'running_without_known_waiter',
                     created_at=dt.datetime.now(dt.timezone.utc).isoformat())
+
+    @staticmethod
+    def page(*items, **values):
+        return dict(schema_version=1, complete=True, provider='claude', parent_execution_id=None,
+                    count=len(items), executions=list(items), **values)
 
     def work(self, *items):
         self.manifest.deliver.stop_requires_waiter = False
-        self.inventory.return_value = {'executions': list(items)}
+        self.inventory.return_value = self.page(*items)
 
     def test_uncollected_terminal_work_blocks_and_collection_clears(self):
         for state in stop_agentctl.TERMINAL:
@@ -44,12 +52,12 @@ class StopGuardTests(DeliveryCase):
                 item = self.execution(state)
                 self.work(item)
                 self.assertIn('agentctl result ' + item['id'] + ' --content', self.decision()['reason'])
-                item['unreconciled'] = False
+                self.inventory.return_value = self.page()
                 self.assertIsNone(self.decision())
         argv = self.inventory.call_args.args[0]
-        self.assertEqual(argv[:2], [os.environ['AGENTCTL'], 'recent'])
-        self.assertIn(stop_agentctl.session_label('s1'), argv)
-        self.assertIn('--since', argv)
+        self.assertEqual(argv[:2], [os.environ['AGENTCTL'], 'children'])
+        self.assertEqual(argv[-4:], ['--provider', 'claude', '--native-session-id', 's1'])
+        self.assertNotIn('--execution', argv)
         self.assertEqual(self.inventory.call_args.kwargs['retries'], 0)
         self.assertLessEqual(self.inventory.call_args.kwargs['timeout'], stop_agentctl.TIMEOUT)
 
@@ -76,7 +84,7 @@ class StopGuardTests(DeliveryCase):
             self.assertEqual(self.inventory.call_args.args[0][0], '/tools/custom-agentctl')
             self.assertIn('-ww', probe.call_args.args[0])
             self.assertIn('-x', probe.call_args.args[0])
-            item['state'] = 'completed'
+            item.update(state='completed', reason='terminal_uncollected')
             self.assertIn('/tools/custom-agentctl result', self.decision()['reason'])
 
     def test_waiter_snapshot_rejects_stopped_zombie_and_unrelated_commands(self):
@@ -132,21 +140,32 @@ class StopGuardTests(DeliveryCase):
         self.assertIsNone(self.decision())
         self.assertEqual(read_json(self.counter())['blocks'], 2)
 
-    def test_agentctl_scope_never_uses_cwd_harness_or_child_session(self):
+    def test_agentctl_scope_and_age_never_use_ambient_parent_or_labels(self):
+        self.work(self.execution())
+        with patch.dict(os.environ, AGENTCTL_EXECUTION_ID='inherited-parent', CODEX_THREAD_ID='other-session'):
+            self.assertIsNotNone(self.decision())
+        argv = self.inventory.call_args.args[0]
+        self.assertEqual(argv[-4:], ['--provider', 'claude', '--native-session-id', 's1'])
+        self.assertNotIn('--label', argv)
+        self.counter().unlink()
         item = self.execution()
-        self.work(item)
-        item['labels'] = ['coordkit.lane.lead-a']
-        self.assertIsNone(self.decision())
-        item['labels'] = [stop_agentctl.session_label('other-session')]
-        self.assertIsNone(self.decision())
-        item['labels'] = [stop_agentctl.session_label('s1')]
         item['created_at'] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
+        self.work(item)
         self.assertIsNone(self.decision())
         self.inventory.reset_mock()
         self.assertIsNone(stop_agentctl.block_reason(None))
         self.inventory.assert_not_called()
 
-    def test_agentctl_reason_caps_ids_and_inventory_pages(self):
+    def test_incomplete_wrong_scope_schema_and_summary_fail_open(self):
+        self.work(self.execution())
+        for key, value in (('complete', False), ('complete', 1), ('schema_version', 2),
+                           ('provider', 'codex'), ('parent_execution_id', 'inherited-parent'), ('count', 2)):
+            page = self.page(self.execution())
+            page[key] = value
+            self.inventory.return_value = page
+            self.assertIsNone(self.decision())
+
+    def test_agentctl_reason_caps_ids_without_inventory_scan_or_paging(self):
         items = [self.execution() for _ in range(7)]
         for word, item in zip(('one', 'two', 'three', 'four', 'five', 'six', 'seven'), items):
             item['id'] = f'exec-{word}-two-three-four-five-six'
@@ -154,11 +173,8 @@ class StopGuardTests(DeliveryCase):
         reason = self.decision()['reason']
         self.assertEqual(reason.count('agentctl result'), 5)
         self.assertIn('+2 more', reason)
-        self.inventory.return_value = {'executions': [], 'has_more': True, 'next_cursor': 'next'}
-        self.inventory.reset_mock()
-        self.assertIsNone(self.decision())
-        self.assertEqual(self.inventory.call_count, stop_agentctl.MAX_PAGES)
-        self.assertEqual(self.inventory.call_args.args[0][-2:], ['--cursor', 'next'])
+        self.assertEqual(self.inventory.call_count, 1)
+        self.assertEqual(self.inventory.call_args.args[0][1], 'children')
 
     def test_collection_kill_switch_defaults_overrides_and_validation(self):
         key = 'stop_requires_agentctl_collection'
@@ -574,3 +590,56 @@ class StopInstallTests(DeliveryCase):
         self.assertEqual(target.stat().st_mode & 0o777, 0o640)
         deliver.uninstall(self.manifest, target)
         self.assertEqual(read_json(target), before)
+
+
+class ChildrenCapabilityTests(DeliveryCase):
+    def setUp(self):
+        super().setUp()
+        self.cache = self.root/'agentctl-children.json'
+        self.executable = os.environ['AGENTCTL']
+        probe = patch.object(stop_agentctl.process, 'call_json', return_value={
+            'name': 'children', 'side_effect_class': 'read_only'})
+        self.probe = probe.start()
+        self.addCleanup(probe.stop)
+
+    def test_old_binary_is_detected_once_without_journal_or_children_reads(self):
+        self.probe.side_effect = stop_agentctl.process.ToolError('agentctl', 3, json.dumps(
+            {'error': {'code': 'not_found', 'details': {'topic': 'children'}}}), 'not_found')
+        for _ in range(2):
+            self.assertIsNone(stop_agentctl.block_reason('s1', self.cache))
+        self.assertEqual(self.probe.call_count, 1)
+        self.assertEqual(self.probe.call_args.args[0][1:3], ['help', 'children'])
+        self.assertLessEqual(self.probe.call_args.kwargs['timeout'], stop_agentctl.CAPABILITY_TIMEOUT)
+        self.assertFalse(read_json(self.cache)['supported'])
+
+    def test_cache_reuses_positive_answer_and_invalidates_upgrade_and_expiry(self):
+        self.assertTrue(stop_agentctl.children_supported(self.executable, self.cache, .2))
+        self.assertTrue(stop_agentctl.children_supported(self.executable, self.cache, .2))
+        self.assertEqual(self.probe.call_count, 1)
+        Path(self.executable).write_text(Path(self.executable).read_text() + '\n# replaced binary\n')
+        self.assertTrue(stop_agentctl.children_supported(self.executable, self.cache, .2))
+        self.assertEqual(self.probe.call_count, 2)
+        record = read_json(self.cache)
+        with patch.object(stop_agentctl.time, 'time', return_value=record['at'] + stop_agentctl.CAPABILITY_TTL + 1):
+            self.assertTrue(stop_agentctl.children_supported(self.executable, self.cache, .2))
+        self.assertEqual(self.probe.call_count, 3)
+
+    def test_negative_cache_reprobes_replacement_and_different_binary(self):
+        self.probe.side_effect = stop_agentctl.process.ToolError('agentctl', 3, json.dumps(
+            {'error': {'code': 'not_found', 'details': {'topic': 'children'}}}), 'not_found')
+        self.assertFalse(stop_agentctl.children_supported(self.executable, self.cache, .2))
+        self.probe.side_effect = None
+        Path(self.executable).write_text(Path(self.executable).read_text() + '\n# upgrade\n')
+        self.assertTrue(stop_agentctl.children_supported(self.executable, self.cache, .2))
+        replacement = self.root/'alternate-agentctl'
+        replacement.write_text('stub')
+        replacement.chmod(0o700)
+        self.assertTrue(stop_agentctl.children_supported(str(replacement), self.cache, .2))
+        self.assertEqual(self.probe.call_count, 3)
+
+    def test_transient_errors_never_poison_capability_cache(self):
+        for category in ('tool_timeout', 'journal_busy', 'protocol_error', 'not_found'):
+            self.probe.side_effect = stop_agentctl.process.ToolError('agentctl', 6, 'unavailable', category)
+            self.assertIsNone(stop_agentctl.block_reason('s1', self.cache))
+            self.assertFalse(self.cache.exists())
+        self.assertEqual(self.probe.call_count, 4)

@@ -412,3 +412,14 @@ row('questions.py', 'writer:accept_anx_delivery',
     'waiting question becomes answered before acknowledgement; settled questions remain unchanged',
     'pending runtime delivery follows the existing question delivery ladder',
     'bus or store failure leaves the requester response unread and retained')
+
+row('stop_agentctl.py', 'agentctl-children.json|writer:children_supported',
+    'Stop probes journal-free children help for the configured executable',
+    'binary path/stat replacement invalidates immediately; positive and negative entries expire after one hour; manual removal reprobes',
+    'one bounded metadata-only entry per manifest; no query results or session IDs cached',
+    'missing topic skips collection checks; transient failures are never cached; bus guards remain active')
+row('deliver.py', 'agentctl-children.json',
+    'Stop passes a manifest-local capability cache to the child probe',
+    'stop_agentctl.children_supported owns atomic replacement; remove to reprobe',
+    'one metadata-only entry; expires after one hour or executable replacement',
+    'unsupported or failed probes preserve existing bus enforcement')

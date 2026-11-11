@@ -1,4 +1,7 @@
-# Stop collection guard validation
+# Superseded: original Stop collection guard validation
+
+This records the original label-based prototype. The implementation now uses
+agentctl `children`; see [current validation](2026-11-11-stop-children.md).
 
 Measured at 2026-11-11T03:50:55.515042+00:00 against the local development host's real
 agentctl journal. Source inspection used agentctl commit `60d2d04` and the

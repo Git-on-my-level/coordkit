@@ -1,27 +1,75 @@
-"""Read-only, best-effort collection guard for explicitly session-labelled work."""
+"""Read-only, best-effort collection guard for caller-attributed child work."""
 import datetime as dt
-import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import time
 
 from . import process
 
-TIMEOUT = .75  # shared by inventory pages and the live process snapshot
-MAX_PAGES = 3
-PAGE_SIZE = 200
+TIMEOUT = .75  # shared by help, child query and the live process snapshot
+CAPABILITY_TTL = 3600
+CAPABILITY_TIMEOUT = .15
+MAX_CHILDREN = 200
 TERMINAL = {'completed', 'failed', 'cancelled', 'orphaned'}
 NONTERMINAL = {'created', 'starting', 'running', 'waiting', 'attention'}
 EXECUTION = re.compile(r'exec-[a-z]+(?:-[a-z]+){5}')
 
 
-def session_label(session):
-    """Explicit caller label, never a cwd or delegated child's native session."""
-    if not isinstance(session, str) or not session.strip() or len(session) > 256:
-        return None
-    return 'coordkit.caller.' + hashlib.sha256(('claude-code\0' + session).encode()).hexdigest()
+def children_supported(executable, cache_path, timeout):
+    """Help is journal-free; cache both answers across cold hook processes.
+
+    Binary metadata invalidates the cache immediately on replacement. The TTL
+    also catches a wrapper whose target changed without replacing the wrapper.
+    Failures other than a missing help topic never become negative cache entries.
+    """
+    resolved = shutil.which(executable)
+    if resolved is None:
+        raise FileNotFoundError(executable)
+    stat = os.stat(resolved)
+    binary = [str(Path(resolved).resolve()), stat.st_dev, stat.st_ino,
+              stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+    at = time.time()
+    cached = None
+    if cache_path is not None:
+        try:
+            with cache_path.open('rb') as stream:
+                raw = stream.read(4097)
+            if len(raw) <= 4096:
+                cached = json.loads(raw)
+        except TimeoutError:
+            raise
+        except (OSError, ValueError):
+            pass
+    if (isinstance(cached, dict) and cached.get('version') == 1
+            and cached.get('binary') == binary and type(cached.get('supported')) is bool
+            and type(cached.get('at')) in (int, float)
+            and 0 <= at - cached['at'] < CAPABILITY_TTL):
+        return cached['supported']
+    try:
+        help_doc = process.call_json([executable, 'help', 'children', '--output', 'json'],
+                                     timeout=min(timeout, CAPABILITY_TIMEOUT), retries=0, schema_version=1)
+        if help_doc.get('name') != 'children' or help_doc.get('side_effect_class') != 'read_only':
+            raise ValueError('unsupported children help contract')
+        supported = True
+    except process.ToolError as exc:
+        if exc.category != 'not_found':
+            raise
+        try:
+            error = json.loads(exc.detail)['error']
+            missing_topic = error.get('code') == 'not_found' and error.get('details', {}).get('topic') == 'children'
+        except (ValueError, KeyError, TypeError, AttributeError):
+            missing_topic = False
+        if not missing_topic:
+            raise
+        supported = False
+    if cache_path is not None:
+        from .state import write_json
+        write_json(cache_path, dict(version=1, binary=binary, at=at, supported=supported))
+    return supported
 
 
 def live_waiters(timeout):
@@ -62,10 +110,9 @@ def live_waiters(timeout):
     return waiting
 
 
-def block_reason(session):
+def block_reason(session, cache_path=None):
     """On any inventory/probe error leave the existing Stop behaviour intact."""
-    label = session_label(session)
-    if label is None:
+    if not isinstance(session, str) or not session.strip() or len(session) > 256:
         return None
     deadline = time.monotonic() + TIMEOUT
     def remaining():
@@ -78,23 +125,26 @@ def block_reason(session):
         since = now - dt.timedelta(hours=24)
         executable = os.environ.get('AGENTCTL', 'agentctl')
         command = shlex.quote(executable)
-        argv = [executable, 'recent', '--output', 'json', '--limit', str(PAGE_SIZE),
-                '--label', label, '--since', since.isoformat()]
-        items, cursor = {}, None
-        for _ in range(MAX_PAGES):
-            page = process.call_json(argv + (['--cursor', cursor] if cursor else []),
-                                     timeout=remaining(), retries=0, schema_version=1)
-            for item in page['executions']:
-                # Recheck scope locally as well as asking the owning CLI to filter.
-                if (label not in item['labels'] or not EXECUTION.fullmatch(item['id'])
-                        or not since <= process.parse_ts(item['created_at']) <= now):
-                    continue
-                state = item['state']
-                if (state in TERMINAL and item.get('unreconciled') is True) or state in NONTERMINAL:
-                    items[item['id']] = state
-            if not page.get('has_more'):
-                break
-            cursor = page['next_cursor']
+        if not children_supported(executable, cache_path, remaining()):
+            return None
+        page = process.call_json([executable, 'children', '--output', 'json',
+                                  '--provider', 'claude', '--native-session-id', session],
+                                 timeout=remaining(), retries=0, schema_version=1)
+        if (not process.is_schema(page, 1) or page.get('complete') is not True
+                or page.get('provider') != 'claude' or page.get('parent_execution_id') is not None
+                or not isinstance(page.get('executions'), list)
+                or type(page.get('count')) is not int
+                or page['count'] != len(page['executions']) or page['count'] > MAX_CHILDREN):
+            raise ValueError('incomplete or incompatible children response')
+        items = {}
+        for item in page['executions']:
+            if (not EXECUTION.fullmatch(item['id'])
+                    or not since <= process.parse_ts(item['created_at']) <= now):
+                continue
+            state, reason = item['state'], item['reason']
+            if ((state in TERMINAL and reason == 'terminal_uncollected')
+                    or (state in NONTERMINAL and reason == 'running_without_known_waiter')):
+                items[item['id']] = state
         waiting = live_waiters(remaining()) if any(s in NONTERMINAL for s in items.values()) else set()
         pending = [(key, state) for key, state in items.items() if state in TERMINAL or key not in waiting]
         if not pending:

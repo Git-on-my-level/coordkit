@@ -59,24 +59,42 @@ An existing `[[lanes]]` entry can set `stop_requires_waiter = false` to opt out
 for that lane only. An absent lane value inherits `[deliver] stop_requires_waiter`.
 These settings affect only the bus waiter requirement; unread work still blocks.
 
-Stop also checks agentctl executions created in the last 24 hours that explicitly
-carry this launching session's caller label. Terminal `unreconciled` work blocks
-until collected with `agentctl result <id> --content`. Nonterminal work blocks
-unless a live same-user `agentctl await <id> --content` process is observed; arm
-that command in the background using the harness's normal background facility.
+Stop also checks agentctl child executions created in the last 24 hours using
+`agentctl children --provider claude --native-session-id SESSION`. The session
+comes from the Stop payload, so an inherited managed parent or another harness
+cannot select this lane's child set. Agentctl owns the immutable launch-time
+`caller_identity` and indexed query; no labels, cwd inference, journal scans or
+result reads are used by the hook.
+
+Terminal `terminal_uncollected` work blocks until collected with
+`agentctl result <id> --content`. Nonterminal `running_without_known_waiter` work
+blocks unless a live same-user `agentctl await <id> --content` process is observed;
+arm that command with the harness's background facility. The query already
+excludes local running work covered by supported durable terminal subscriptions.
 The reason lists at most five execution IDs with exact commands and `+N more`.
 A bus waiter does not collect agentctl results. The probe honors the `AGENTCTL`
-executable override; recovery commands use that executable. Process snapshots
-include detached processes and full-width command arguments.
+executable override; recovery commands use it. Process snapshots include
+detached processes and full-width arguments. Explicit alternate journal/config
+awaits cannot prove collection in the queried scope and are excluded.
 
-Agentctl currently records only the caller harness, not the launching session.
-The fallback uses an exact label, declared at launch with `--label LABEL`:
-`coordkit.stop_agentctl.session_label(session_id)` returns `coordkit.caller.` plus
-SHA-256 of `claude-code`, a NUL byte and the exact Claude Stop session ID. Use
-this helper with the launching session's ID for every delegated execution.
-Unlabelled work is invisible to this check; cwd, lane execution labels and the
-delegated child's session cannot prove ownership. See [the integration gap](../AGENTCTL_GAP.md)
-for the missing agentctl contract and waiter coverage limits.
+This requires the unreleased `children` v1 contract from
+[agentctl #147](https://github.com/Git-on-my-level/agentctl/pull/147), validated
+with build `v0.21.9-pr147.85c10f6` (commit `85c10f686667ad70ecd83c8ea0f498ebd871e935`).
+Released `v0.21.10` lacks this command; keep the integration draft until a release
+containing #147 exists and its version is pinned. See [the release gate and coverage limits](../AGENTCTL_GAP.md).
+Managed launches record their caller automatically. Unmanaged Claude launches
+must declare the actual current session on each launch using agentctl's
+`AGENTCTL_CALLER_PROVIDER=claude` and `AGENTCTL_CALLER_NATIVE_SESSION_ID` contract.
+These declarations are stripped before child launch. Old or unattributed rows
+are not backfilled or guessed.
+
+A journal-free `agentctl help children` probe takes at most 150 ms. Its supported
+or unsupported answer is cached at `state/hooks/agentctl-children.json` under the
+manifest root for one hour. Resolved executable path and file metadata invalidate
+it immediately on replacement; expiry also catches unchanged wrapper targets.
+Only a missing help topic is cached as unsupported. Transient errors are not
+cached, and child query results or session IDs are never cached. Older agentctl
+binaries skip this guard while bus enforcement remains active.
 
 The guard is on by default. To disable only agentctl collection enforcement:
 
@@ -87,9 +105,10 @@ stop_requires_agentctl_collection = false
 
 An existing `[[lanes]]` entry can override `stop_requires_agentctl_collection`
 with a boolean; absence inherits `[deliver]`. This leaves unread bus and bus
-waiter enforcement active. The read-only inventory and process probe share a
-750 ms allowance with no retries, at most three pages of 200 executions, inside
-the existing hook deadline. Timeout, `journal_busy`, missing CLI, invalid data
+waiter enforcement active. The help probe, bounded children query and process probe share a
+750 ms allowance with no retries inside the existing hook deadline. Only a v1
+`complete: true` response with consistent counts and at most 200 children is
+accepted; there is no partial-success or full-inventory fallback. Timeout, `journal_busy`, missing CLI, invalid data
 or a failed process probe fall through to the existing bus behaviour.
 
 Unread actionable rows still block. Stop never blocks when `stop_hook_active` is

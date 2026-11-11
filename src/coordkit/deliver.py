@@ -140,7 +140,8 @@ def stop_hook(manifest, payload, out=None):
                       'so addressed work wakes you')
         if reason is None and lane_setting(manifest, name, 'stop_requires_agentctl_collection'):
             from .stop_agentctl import block_reason
-            reason = block_reason(payload.get('session_id'))
+            reason = block_reason(payload.get('session_id'),
+                                  manifest.paths.root/'state'/'hooks'/'agentctl-children.json')
         if reason is None:
             counter.unlink(missing_ok=True)
             return
