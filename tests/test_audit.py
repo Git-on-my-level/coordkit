@@ -354,8 +354,9 @@ class AuditTests(AuditCase):
 class DigestTests(AuditCase):
     def test_bound_newest_wins_and_cursor_only_consumes_complete_records(self):
         self.messages('old item', *('x' * 2000 for _ in range(60)), 'newest item')
-        digest, cursor, stats = audit_digest.build(self.lane, transcript=self.transcript)
-        self.assertLessEqual(len(digest.encode()), audit_digest.MAX_DIGEST)
+        with patch.object(audit_digest, 'MAX_DIGEST', 64 * 1024):
+            digest, cursor, stats = audit_digest.build(self.lane, transcript=self.transcript)
+        self.assertLessEqual(len(digest.encode()), 64 * 1024)
         self.assertTrue(stats['truncated'])
         self.assertNotIn('old item', digest)
         self.assertIn('newest item', digest)
@@ -373,8 +374,9 @@ class DigestTests(AuditCase):
 
     def test_prior_gaps_survive_when_new_transcript_fills_the_digest(self):
         self.messages('old item', *('x' * 2000 for _ in range(60)), 'newest item')
-        digest, _, stats = audit_digest.build(self.lane, transcript=self.transcript, carry=[GAP])
-        self.assertLessEqual(len(digest.encode()), audit_digest.MAX_DIGEST)
+        with patch.object(audit_digest, 'MAX_DIGEST', 64 * 1024):
+            digest, _, stats = audit_digest.build(self.lane, transcript=self.transcript, carry=[GAP])
+        self.assertLessEqual(len(digest.encode()), 64 * 1024)
         self.assertTrue(stats['truncated'])
         self.assertIn('Prior audit gaps', digest)
         self.assertIn(GAP['item'], digest)

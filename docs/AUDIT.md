@@ -57,7 +57,7 @@ arguments truncated to 1000 characters. It excludes tool results and reasoning.
 A JSONL read covers at most the newest 2 MiB after the last successful audit,
 with only complete records consumed. Replaced, truncated or boundary-rewritten
 files reset the cursor. A SQLite read covers at most 4096 newest messages and
-2 MiB of text in the selected session. The final UTF-8 digest is at most 64 KiB;
+2 MiB of text in the selected session. The final UTF-8 digest is at most 1 MiB;
 newest transcript content wins in the space left after complete carried gaps.
 Prior reported gaps are carried into the next digest so an
 unchanged promise is not forgotten merely because the transcript cursor advanced.

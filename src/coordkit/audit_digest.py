@@ -9,7 +9,7 @@ import sqlite3
 
 from .errors import ManifestError
 
-MAX_DIGEST = 64 * 1024
+MAX_DIGEST = 1024 * 1024  # about a quarter of a million tokens: one audit covers a long session
 MAX_READ = 2 * 1024 * 1024
 MAX_MESSAGES = 4096
 ARG_CHARS = 1000
