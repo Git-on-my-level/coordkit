@@ -47,7 +47,7 @@ class StopGuardTests(DeliveryCase):
                 item['unreconciled'] = False
                 self.assertIsNone(self.decision())
         argv = self.inventory.call_args.args[0]
-        self.assertEqual(argv[:2], ['agentctl', 'recent'])
+        self.assertEqual(argv[:2], [os.environ['AGENTCTL'], 'recent'])
         self.assertIn(stop_agentctl.session_label('s1'), argv)
         self.assertIn('--since', argv)
         self.assertEqual(self.inventory.call_args.kwargs['retries'], 0)
@@ -65,6 +65,19 @@ class StopGuardTests(DeliveryCase):
             probe.return_value.stdout = f"S agentctl await {item['id']}\n"
             self.assertIsNotNone(self.decision())
             self.assertIsNone(self.decision(), 'work uses the existing two-block budget')
+
+    def test_executable_override_and_detached_full_width_process_snapshot(self):
+        item = self.execution('running')
+        self.work(item)
+        with patch.dict(os.environ, AGENTCTL='/tools/custom-agentctl'), patch.object(
+                stop_agentctl.process, 'run', return_value=subprocess.CompletedProcess(
+                    [], 0, f"S /tools/custom-agentctl await {item['id']} --content", '')) as probe:
+            self.assertIsNone(self.decision())
+            self.assertEqual(self.inventory.call_args.args[0][0], '/tools/custom-agentctl')
+            self.assertIn('-ww', probe.call_args.args[0])
+            self.assertIn('-x', probe.call_args.args[0])
+            item['state'] = 'completed'
+            self.assertIn('/tools/custom-agentctl result', self.decision()['reason'])
 
     def test_waiter_snapshot_rejects_stopped_zombie_and_unrelated_commands(self):
         key = self.execution()['id']

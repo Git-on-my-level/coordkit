@@ -26,7 +26,7 @@ def session_label(session):
 
 def live_waiters(timeout):
     """Only an actual per-execution await process with content collection counts."""
-    result = process.run(['ps', '-U', str(os.getuid()), '-o', 'stat=,args='], timeout=timeout)
+    result = process.run(['ps', '-ww', '-x', '-U', str(os.getuid()), '-o', 'stat=,args='], timeout=timeout)
     if result.returncode:
         raise ValueError('process snapshot unavailable')
     waiting = set()
@@ -40,7 +40,8 @@ def live_waiters(timeout):
             continue
         # Do not match shell command strings, ps itself, result reads, or an
         # execution ID mentioned in a delegate prompt. Common flags may precede await.
-        if not args or Path(args[0]).name != 'agentctl' or '--content' not in args:
+        executables = {'agentctl', Path(os.environ.get('AGENTCTL', 'agentctl')).name}
+        if not args or Path(args[0]).name not in executables or '--content' not in args:
             continue
         # The inventory uses the default journal. An explicit alternate scope
         # cannot prove collection of that inventory, even with the same ID.
@@ -75,7 +76,9 @@ def block_reason(session):
     try:
         now = dt.datetime.now(dt.timezone.utc)
         since = now - dt.timedelta(hours=24)
-        argv = ['agentctl', 'recent', '--output', 'json', '--limit', str(PAGE_SIZE),
+        executable = os.environ.get('AGENTCTL', 'agentctl')
+        command = shlex.quote(executable)
+        argv = [executable, 'recent', '--output', 'json', '--limit', str(PAGE_SIZE),
                 '--label', label, '--since', since.isoformat()]
         items, cursor = {}, None
         for _ in range(MAX_PAGES):
@@ -99,9 +102,9 @@ def block_reason(session):
         actions = []
         for key, state in pending[:5]:
             if state in TERMINAL:
-                actions.append(f'collect: `agentctl result {key} --content`')
+                actions.append(f'collect: `{command} result {key} --content`')
             else:
-                actions.append(f'arm a background waiter: `agentctl await {key} --content`')
+                actions.append(f'arm a background waiter: `{command} await {key} --content`')
         more = f'; +{len(pending) - 5} more' if len(pending) > 5 else ''
         return 'agentctl work needs collection: ' + '; '.join(actions) + more
     except TimeoutError:
