@@ -23,12 +23,15 @@ MAX_ROUNDS = 3
 ENV_ALLOW = ('HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR',
              'XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME')
 MAX_LINES = 20
+MAX_BATCHES = 64  # of deliver.MAX_READ each: the most unread log one scan walks
 MAX_RECORD = 1024 * 1024
 KILL_GRACE = 10
 
 
-def wants_turn(row, name, targets):
+def wants_turn(row, name, targets, resolved=None):
     """Every row that would have woken the lane, plus what delivery shows a busy session.
+
+    `resolved` holds the row's recipients after alias resolution.
 
     While a turn runs, the wake path treats the lane as listening and starts nothing.
     The re-check must therefore cover the same rows the wake path would have acted on,
@@ -37,24 +40,48 @@ def wants_turn(row, name, targets):
     from .. import deliver
     if deliver.addressed_row(row, name, targets):
         return True
-    return (row.get('to') == name and row.get('frm') != name and row.get('kind') != 'fyi'
+    if resolved is None:
+        resolved = {row.get('to')}
+    to_lane = name in resolved  # the wake path resolves aliases before it compares
+    return (to_lane and row.get('frm') != name and row.get('kind') != 'fyi'
             and not row.get('digest_only')
             and not (row.get('kind') in ('reply', 'answer', 'ack') and row.get('re'))
             and all(isinstance(row.get(key), str) for key in ('id', 'frm', 'kind')))
 
 
+def recipients(row, book):
+    from ..bus import resolve
+    out = set()
+    for part in str(row.get('to', '')).split(','):
+        try:
+            out.add(resolve(part.strip(), book))
+        except ValueError:
+            out.add(part.strip())
+    return out
+
+
 def pending(manifest, name):
-    """Rows for the lane after the shared delivery cursor, and the offset that consumes them."""
+    """Rows for the lane after the shared delivery cursor, and the offset that consumes them.
+
+    One read covers a bounded batch. A full batch with nothing for the lane says nothing
+    about what follows it, so the scan moves the cursor past it and reads on to the end.
+    """
     from .. import deliver
-    identity, start, data = deliver.unread_batch(manifest, name)
+    from ..bus import aliases
     targets = deliver.targets_for(manifest, name)
-    lines, offset = [], start
-    for size, row in deliver.parsed_rows(data):
-        if row is not None and wants_turn(row, name, targets):
-            if len(lines) >= MAX_LINES:
-                break
-            lines.append(deliver.row_line(row, name))
-        offset += size
+    book = aliases(manifest)
+    for _ in range(MAX_BATCHES):
+        identity, start, data = deliver.unread_batch(manifest, name)
+        lines, offset = [], start
+        for size, row in deliver.parsed_rows(data):
+            if row is not None and wants_turn(row, name, targets, recipients(row, book)):
+                if len(lines) >= MAX_LINES:
+                    break
+                lines.append(deliver.row_line(row, name))
+            offset += size
+        if lines or len(data) < deliver.MAX_READ or offset == start:
+            break
+        advance(manifest, name, identity, offset)
     return identity, offset, lines
 
 
@@ -84,11 +111,11 @@ def prompt(manifest, name, lines, round_number):
             'turn needs (lane state file or profile memory), because no process of yours keeps running.\n')
 
 
-def argv_for(lane, text, usage_file, session):
+def argv_for(binary, lane, text, usage_file, session):
     """One gateway-free turn. A one-shot run cannot create a titled session, so the first
     turn starts a new one and later turns resume the id it reported."""
     # The profile's hooks are the operator's own config; without consent Hermes skips them.
-    argv = [hermes.binary(), '-p', lane.profile, '--in', lane.cwd, '--no-restore-cwd', '--accept-hooks']
+    argv = [binary, '-p', lane.profile, '--in', lane.cwd, '--no-restore-cwd', '--accept-hooks']
     if session:
         argv += ['--resume', session]
     argv += ['--output-format', 'json', '--usage-file', str(usage_file)]
@@ -119,10 +146,11 @@ def read_usage(usage_file, record):
     return usage, text('model'), text('provider'), text('session_id')
 
 
-def title_session(lane, session):
+def title_session(manifest, lane, session):
     """Best effort: a human looking at the profile finds the lane's session by name."""
     try:
-        subprocess.run([hermes.binary(), '-p', lane.profile, 'sessions', 'rename', session, lane.name],
+        subprocess.run([hermes.binary_path(manifest) or hermes.binary(), '-p', lane.profile,
+                        'sessions', 'rename', session, lane.name], env=turn_env(manifest, lane),
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -130,8 +158,7 @@ def title_session(lane, session):
 
 def turn_env(manifest, lane):
     env = {key: os.environ[key] for key in ENV_ALLOW if key in os.environ}
-    if manifest.launchd.path:
-        env['PATH'] = os.pathsep.join(str(Path(part).expanduser()) for part in manifest.launchd.path)
+    env['PATH'] = hermes.turn_path(manifest)
     env.update(COORDKIT_AS=lane.name, HERMES_ACCEPT_HOOKS='1')
     return env
 
@@ -144,10 +171,18 @@ def run_turn(manifest, lane, text, timeout, session=''):
         # Output goes to a file, not a pipe: a tool the turn left running may keep the
         # descriptor open, and a pipe would then hold this runner (and the lane lock) with it.
         out_file = Path(scratch)/'result.json'
-        with out_file.open('wb') as sink:
-            proc = subprocess.Popen(argv_for(lane, text, usage_file, session), stdin=subprocess.DEVNULL,
-                                    stdout=sink, stderr=sys.stderr, env=env, cwd=lane.cwd,
-                                    start_new_session=True)
+        binary = hermes.binary_path(manifest)
+        try:
+            if not binary:
+                raise FileNotFoundError('hermes binary unavailable on the turn PATH')
+            with out_file.open('wb') as sink:
+                proc = subprocess.Popen(argv_for(binary, lane, text, usage_file, session),
+                                        stdin=subprocess.DEVNULL, stdout=sink, stderr=sys.stderr,
+                                        env=env, cwd=lane.cwd, start_new_session=True)
+        except OSError as exc:
+            # The failure still gets a receipt, so the lane reads as unreachable with a reason.
+            usage, model, provider, known = read_usage(usage_file, {})
+            return 127, False, {'error': f'launch failed: {exc}'}, usage, model, provider, known
         timed_out = False
         try:
             proc.wait(timeout=timeout)
@@ -210,7 +245,7 @@ def main(argv=None):
                 known = hermes.session_id(lane)
                 code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout, known)
                 if (known and code and not timed_out and not usage['api_calls']
-                        and str(record.get('error', '')).startswith('session not found')):
+                        and 'session not found' in str(record.get('error', '')).lower()):
                     # Hermes says the session is gone and made no provider call, so nothing
                     # ran. Any other failure may have done work and is never repeated here.
                     print(f'HERMES_TURN lane={lane.name} session {known} did not resume (exit {code}); starting a new one',
@@ -221,7 +256,7 @@ def main(argv=None):
                 if session and session != known:
                     hermes.remember_session(lane, session)
                     if not known:
-                        title_session(lane, session)
+                        title_session(manifest, lane, session)
                 ok = code == 0 and not timed_out and record.get('status') == 'success'
                 error = '' if ok else ('turn_timeout' if timed_out else
                                        ' '.join(str(record.get('error') or f'exit {code}').split())[:300])

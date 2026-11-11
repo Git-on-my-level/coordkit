@@ -30,6 +30,16 @@ def binary():
     return os.environ.get('HERMES', 'hermes')
 
 
+def turn_path(manifest):
+    """The PATH a turn runs with. Discovery uses it too, so a wake never accepts a binary the turn cannot find."""
+    parts = getattr(getattr(manifest, 'launchd', None), 'path', None)
+    return os.pathsep.join(str(Path(part).expanduser()) for part in parts) if parts else os.environ.get('PATH', '')
+
+
+def binary_path(manifest):
+    return shutil.which(binary(), path=turn_path(manifest))
+
+
 def lane_for(manifest, name):
     return next((lane for lane in getattr(manifest, 'lanes', ())
                  if lane.name == name and getattr(lane, 'harness', '') == 'hermes'), None)
@@ -176,7 +186,7 @@ def reachable(manifest, name):
     lane = lane_for(manifest, name)
     if turn_running(lane):
         return True, 'hermes turn running'
-    if not shutil.which(binary()):
+    if not binary_path(manifest):
         return False, 'hermes binary unavailable'
     record = wake_record(manifest, name)
     if record.get('status') in FAILED:
@@ -238,6 +248,8 @@ def manage_hook(manifest, name, action):
         owned = start >= 0 and end > start
         block = text[start:end + len(HOOK_END)] + '\n' if owned else ''
         record = read_json(receipt, {}) or {}
+        if owned and not record and block == hook_block(manifest):
+            record = {'block': block}  # exactly what install writes, with its receipt lost: still ours
         if action == 'status':
             return ('drift' if owned and block != record.get('block') else 'installed coordkit-owned' if owned else
                     'installed by hand' if HOOK_MARKER in text else 'absent')
@@ -286,7 +298,7 @@ class Hermes:
 
     def status(self):
         lanes = self.lanes()
-        found = shutil.which(binary())
+        found = binary_path(self.manifest)
         if not lanes:
             return 'no hermes lanes; binary ' + ('found' if found else 'absent (optional)')
         if not found:
@@ -311,7 +323,7 @@ class Hermes:
             return {'status': 'unresumable', 'reason': 'no hermes lane'}
         if turn_running(lane):
             return {'status': 'listening', 'evidence': 'hermes turn running'}
-        if not shutil.which(binary()):
+        if not binary_path(manifest):
             return {'status': 'unresumable', 'reason': 'hermes binary unavailable'}
         log = wake_path(manifest, name).with_suffix('.hermes.log')
         log.parent.mkdir(parents=True, exist_ok=True)

@@ -274,6 +274,29 @@ class TurnTests(HermesCase):
         self.assertIn('--re race1', calls[1]['argv'][-1])
         self.assertFalse(hermes.turn_requested(self.lane))
 
+    def test_scan_walks_past_full_batches_of_other_lanes_rows_and_resolves_aliases(self):
+        """Contract: an empty bounded batch is not an empty inbox, and an alias names the lane."""
+        self.attach()
+        write_json(self.manifest.paths.bus_log.parent/'aliases.json', {'operator': 'ops'})
+        filler = json.dumps(dict(json.loads(row('x', to='someone-else')), text='y' * 900))
+        self.post(*[filler] * (2 * deliver.MAX_READ // len(filler) + 50))
+        self.post(row('far1', kind='msg', to='operator'))
+        self.assertGreater(self.manifest.paths.bus_log.stat().st_size, 2 * deliver.MAX_READ)
+        _, offset, lines = hermes_turn.pending(self.manifest, 'ops')
+        self.assertEqual(len(lines), 1)
+        self.assertIn('BUS msg far1', lines[0])
+        self.assertEqual(offset, self.manifest.paths.bus_log.stat().st_size)
+
+    def test_a_binary_missing_from_the_turn_path_is_refused_and_a_failed_launch_is_receipted(self):
+        with patch.object(hermes, 'turn_path', return_value=str(self.root/'empty')), \
+                patch.dict(os.environ, HERMES='hermes'):
+            self.assertEqual(Hermes(self.manifest).wake(self.manifest, 'ops', [], 'k'),
+                             {'status': 'unresumable', 'reason': 'hermes binary unavailable'})
+            self.assertEqual(self.turn(), 127)
+        receipt = hermes.last_receipt(self.lane)
+        self.assertFalse(receipt['ok'])
+        self.assertIn('launch failed', receipt['error'])
+
     def test_a_second_runner_yields_to_the_lock_holder(self):
         with hermes.turn_lock(self.lane) as held:
             self.assertIsNotNone(held)
@@ -414,6 +437,11 @@ class UsageAndDeliveryTests(HermesCase):
         self.assertIn(' deliver --hook', text)
         self.assertTrue(hermes.hook_installed(self.lane))
         self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'status'), 'installed coordkit-owned')
+        receipt = next(self.manifest.paths.root.glob('hook-hermes-*.json'))
+        kept = receipt.read_text()
+        receipt.unlink()  # a lost receipt with an untouched block is still coordkit's
+        self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'status'), 'installed coordkit-owned')
+        receipt.write_text(kept)
         config.write_text(text.replace('timeout: 10', 'timeout: 30'))  # someone edits the managed block
         self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'status'), 'drift')
         for action in ('uninstall', 'install'):

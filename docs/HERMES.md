@@ -38,10 +38,13 @@ row posted just as a turn ends is not missed. The runner:
    prompt, and advances the cursor. These are the rows a wake acts on (anything
    addressed to the lane except `fyi`, digests and referenced replies) plus the
    rows delivery shows a busy session (asks, rulings, handoffs, blockers and
-   urgent messages for its roles, `all`, or with the lane as owner).
+   urgent messages for its roles, `all`, or with the lane as owner). Aliases
+   are resolved, and the scan reads to the end of the log rather than stopping
+   at one bounded batch.
 3. Runs one gateway-free turn:
    `hermes -p PROFILE --in CWD --no-restore-cwd --accept-hooks [--resume SESSION] --output-format json --usage-file F [-m MODEL] -z PROMPT`,
-   with `COORDKIT_AS=LANE` in its environment. The turn does not inherit the
+   with `COORDKIT_AS=LANE` in its environment. `hermes` is found on the turn's
+   own `PATH`, the same one the wake checks. The turn does not inherit the
    environment of whoever posted the row: it gets `HOME`, `USER`, `SHELL`,
    locale, temp and XDG variables, and `PATH` (the manifest's `[launchd] path`
    when set). Credentials come from the profile. The first turn starts a new
