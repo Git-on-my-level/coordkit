@@ -40,9 +40,12 @@ if 'sessions' in argv:
 calls = len(log.read_text().splitlines()) if log.exists() else 0
 with log.open('a') as stream:
     stream.write(json.dumps(dict(argv=argv, cwd=os.getcwd(), as_=os.environ.get('COORDKIT_AS'))) + '\\n')
-if '--resume' in argv and argv[argv.index('--resume') + 1] == os.environ.get('CK_HERMES_GONE'):
-    print('No session found', file=sys.stderr)
+resumed = argv[argv.index('--resume') + 1] if '--resume' in argv else ''
+if resumed and resumed == os.environ.get('CK_HERMES_GONE'):
+    print(json.dumps(dict(type='result', status='failed', error='session not found: ' + resumed)))
     sys.exit(1)
+if resumed and resumed == os.environ.get('CK_HERMES_CRASH'):
+    sys.exit(1)  # died after possibly doing work: no terminal record
 usage = argv[argv.index('--usage-file') + 1]
 fail = os.environ.get('CK_HERMES_FAIL')
 Path(usage).write_text(json.dumps(dict(input_tokens=100, output_tokens=7, cache_read_tokens=30,
@@ -204,6 +207,28 @@ class TurnTests(HermesCase):
         self.assertEqual(hermes.session_id(self.lane), 'sess-1')
         self.assertEqual(len(hermes.receipts(self.lane)[0]), 1)
 
+    def test_a_resumed_turn_that_dies_is_never_repeated(self):
+        """Contract: only a session Hermes reports missing is replaced; a crash may have done work."""
+        hermes.remember_session(self.lane, 'live-1')
+        with patch.dict(os.environ, CK_HERMES_CRASH='live-1'):
+            self.assertEqual(self.turn(), 1)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertEqual(hermes.session_id(self.lane), 'live-1')
+        self.assertFalse(hermes.last_receipt(self.lane)['ok'])
+
+    def test_a_plain_message_posted_mid_turn_still_gets_a_round(self):
+        """Contract: the re-check covers every row the wake path would have acted on."""
+        self.attach()
+        with patch.dict(os.environ, CK_HERMES_LATE_ROW=row('m1', kind='msg')):
+            self.assertEqual(self.turn(), 0)
+        calls = self.invocations()
+        self.assertEqual(len(calls), 2)
+        self.assertIn('BUS msg m1', calls[1]['argv'][-1])
+        targets = deliver.targets_for(self.manifest, 'ops')
+        for quiet in (row('f', kind='fyi'), row('mine', frm='ops'), row('elsewhere', to='other', kind='msg'),
+                      json.dumps(dict(json.loads(row('ack1', kind='ack')), re='x'))):
+            self.assertFalse(hermes_turn.wants_turn(json.loads(quiet), 'ops', targets), quiet)
+
     def test_a_second_runner_yields_to_the_lock_holder(self):
         with hermes.turn_lock(self.lane) as held:
             self.assertIsNotNone(held)
@@ -296,6 +321,8 @@ class UsageAndDeliveryTests(HermesCase):
         self.assertEqual(usage.doctor_warnings(self.manifest), [])
         hermes.append_receipt(self.lane, {'at': now - 5, 'ended_at': now - 1, 'ok': True, 'model': 'surprise', 'usage': {}})
         self.assertEqual(usage.doctor_warnings(self.manifest), ['lane=ops intended=vendor-model actual=surprise'])
+        self.lane.model = 'default'  # the profile chooses; whatever it ran is not drift
+        self.assertEqual(usage.doctor_warnings(self.manifest), [])
 
     def test_hook_block_is_owned_reversible_and_never_edits_a_foreign_hooks_map(self):
         config = Path(self.lane.config_dir)/'config.yaml'
@@ -308,8 +335,16 @@ class UsageAndDeliveryTests(HermesCase):
         self.assertIn(' deliver --hook', text)
         self.assertTrue(hermes.hook_installed(self.lane))
         self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'status'), 'installed coordkit-owned')
+        config.write_text(text.replace('timeout: 10', 'timeout: 30'))  # someone edits the managed block
+        self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'status'), 'drift')
+        for action in ('uninstall', 'install'):
+            with self.assertRaisesRegex(ManifestError, 'hermes_hook_conflict'):
+                hermes.manage_hook(self.manifest, 'ops', action)
+        self.assertIn('timeout: 30', config.read_text())
+        config.write_text(text)
         self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'uninstall'), 'OK uninstall')
         self.assertEqual(config.read_text(), 'model:\n  provider: vendor\n')
+        self.assertEqual(hermes.manage_hook(self.manifest, 'ops', 'uninstall'), 'absent')
         config.write_text('hooks:\n  pre_tool_call: []\n')
         with self.assertRaisesRegex(ManifestError, 'hermes_hooks_present'):
             hermes.manage_hook(self.manifest, 'ops', 'install')
@@ -322,14 +357,19 @@ class UsageAndDeliveryTests(HermesCase):
         self.post(row('h1'))
         out = io.StringIO()
         payload = {'hook_event_name': 'pre_llm_call', 'session_id': 'sess-1', 'profile': 'ops'}
-        # No COORDKIT_AS: a turn started by hand in the profile is identified by the payload.
-        self.assertEqual(deliver.run_hook(self.manifest, json.dumps(payload), out), 0)
-        self.assertIn('--from ops --re h1', json.loads(out.getvalue())['context'])
-        again = io.StringIO()
-        deliver.run_hook(self.manifest, json.dumps(payload), again)
-        self.assertEqual(again.getvalue(), '')
-        self.post(row('h2'))
-        stranger = io.StringIO()
-        deliver.run_hook(self.manifest, json.dumps(dict(payload, profile='someone-else')), stranger)
-        self.assertEqual(stranger.getvalue(), '')
+        # No COORDKIT_AS: a turn started by hand in the profile is identified by the payload
+        # together with the profile home Hermes exports. The payload alone names nobody.
+        with patch.dict(os.environ, HERMES_HOME=str(self.root/'another-home')):
+            deliver.run_hook(self.manifest, json.dumps(payload), out)
+        self.assertEqual(out.getvalue(), '')
+        with patch.dict(os.environ, HERMES_HOME=self.lane.config_dir):
+            self.assertEqual(deliver.run_hook(self.manifest, json.dumps(payload), out), 0)
+            self.assertIn('--from ops --re h1', json.loads(out.getvalue())['context'])
+            again = io.StringIO()
+            deliver.run_hook(self.manifest, json.dumps(payload), again)
+            self.assertEqual(again.getvalue(), '')
+            self.post(row('h2'))
+            stranger = io.StringIO()
+            deliver.run_hook(self.manifest, json.dumps(dict(payload, profile='someone-else')), stranger)
+            self.assertEqual(stranger.getvalue(), '')
         self.assertEqual(len(hermes_turn.pending(self.manifest, 'ops')[2]), 1)  # h2 stays for the lane

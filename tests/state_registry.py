@@ -320,7 +320,7 @@ row('wake.py', '.json|.wait.lock|state|attempts.jsonl|lanes.json|state/cursors|s
 row('adapters/hermes.py', 'coordkit/hermes|.turn.lock|.turns.jsonl|.session.json|writer:append_receipt|writer:remember_session',
     'a hermes lane wake starts its turn runner', 'kernel releases the lock when the runner exits; receipts are append-only; the session record follows the last turn',
     'lanes.turn_timeout per turn, three rounds per wake', 'a failed wake or turn makes the lane read as not listening, so its fallback is told')
-row('adapters/hermes.py', '.hermes.log|config.yaml|.coordkit.tmp|writer:manage_hook', 'wake launch or explicit hooks install --hermes-lane',
+row('adapters/hermes.py', '.hermes.log|config.yaml|.coordkit.tmp|hook-hermes-|writer:manage_hook', 'wake launch or explicit hooks install --hermes-lane',
     'log is append-only diagnostics; the marked config block is removed by hooks uninstall --hermes-lane', 'no latch',
     'install refuses an existing hooks map instead of editing it')
 row('wake.py', 'state/wakes/scan.json|writer:scan', 'scan of rows written outside bus.append', 'checkpoint advances past complete rows; replaced or truncated log restarts at end', 'one scan interval', 'missed rows are only those written before the first scan')

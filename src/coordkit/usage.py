@@ -544,7 +544,14 @@ def model_matches(intended, actual):
     return intended == actual or (intended.isalpha() and actual.startswith(intended + '-'))
 
 
+def follows_profile(lane):
+    """A hermes lane with model = "default" runs whatever its profile configures."""
+    return lane_harness(lane) == 'hermes' and str(lane.model).lower() == 'default'
+
+
 def drift(lane, usage):
+    if follows_profile(lane):
+        return []
     return [model for model in usage.models if not model_matches(lane.model, model)]
 
 

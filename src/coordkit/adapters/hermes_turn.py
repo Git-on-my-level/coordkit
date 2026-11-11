@@ -23,14 +23,30 @@ MAX_RECORD = 1024 * 1024
 KILL_GRACE = 10
 
 
+def wants_turn(row, name, targets):
+    """Every row that would have woken the lane, plus what delivery shows a busy session.
+
+    While a turn runs, the wake path treats the lane as listening and starts nothing.
+    The re-check must therefore cover the same rows the wake path would have acted on,
+    or a plain message posted mid-turn is never read.
+    """
+    from .. import deliver
+    if deliver.addressed_row(row, name, targets):
+        return True
+    return (row.get('to') == name and row.get('frm') != name and row.get('kind') != 'fyi'
+            and not row.get('digest_only')
+            and not (row.get('kind') in ('reply', 'answer', 'ack') and row.get('re'))
+            and all(isinstance(row.get(key), str) for key in ('id', 'frm', 'kind')))
+
+
 def pending(manifest, name):
-    """Addressed rows after the shared delivery cursor, and the offset that consumes them."""
+    """Rows for the lane after the shared delivery cursor, and the offset that consumes them."""
     from .. import deliver
     identity, start, data = deliver.unread_batch(manifest, name)
     targets = deliver.targets_for(manifest, name)
     lines, offset = [], start
     for size, row in deliver.parsed_rows(data):
-        if row is not None and deliver.addressed_row(row, name, targets):
+        if row is not None and wants_turn(row, name, targets):
             if len(lines) >= MAX_LINES:
                 break
             lines.append(deliver.row_line(row, name))
@@ -172,9 +188,10 @@ def main(argv=None):
             text = prompt(manifest, lane.name, lines, round_number)
             known = hermes.session_id(lane)
             code, timed_out, record, usage, model, provider, session = run_turn(lane, text, timeout, known)
-            if known and code and not timed_out and not record:
-                # No terminal record means the run never started a turn, which is what a
-                # deleted or pruned session looks like. Start a new session once.
+            if (known and code and not timed_out and not usage['api_calls']
+                    and str(record.get('error', '')).startswith('session not found')):
+                # Hermes says the session is gone and made no provider call, so nothing
+                # ran. Any other failure may have done work and is never repeated here.
                 print(f'HERMES_TURN lane={lane.name} session {known} did not resume (exit {code}); starting a new one',
                       file=sys.stderr, flush=True)
                 hermes.remember_session(lane, '')

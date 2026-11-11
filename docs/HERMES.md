@@ -32,13 +32,17 @@ An addressed row for the lane starts a detached runner
 1. Takes the lane's turn lock. A second runner exits at once; the first one will
    see the new rows.
 2. Reads the rows after the lane's delivery cursor, puts up to 20 of them in the
-   prompt, and advances the cursor.
+   prompt, and advances the cursor. These are the rows a wake acts on (anything
+   addressed to the lane except `fyi`, digests and referenced replies) plus the
+   rows delivery shows a busy session (asks, rulings, handoffs, blockers and
+   urgent messages for its roles, `all`, or with the lane as owner).
 3. Runs one gateway-free turn:
    `hermes -p PROFILE --in CWD --no-restore-cwd --accept-hooks [--resume SESSION] --output-format json --usage-file F [-m MODEL] -z PROMPT`,
    with `COORDKIT_AS=LANE` in its environment. The first turn starts a new
    session, which the runner titles with the lane name; later turns resume the
-   session id the last turn reported. A session that no longer resumes is
-   replaced once.
+   session id the last turn reported. A session Hermes reports as not found,
+   before any provider call, is replaced once. No other failure is retried: the
+   turn may already have done work.
 4. Appends a receipt (result, session, model, token counts).
 5. Looks at the cursor again. If addressed rows arrived during the turn it runs
    another round, at most three per wake. This is the lane's stop guard: a
@@ -72,8 +76,13 @@ unread addressed rows to the user message. Coordkit-started turns already carry
 their rows in the prompt, so the hook matters for turns you start in the profile
 yourself. It shares the delivery cursor with the runner; a row is shown once.
 
+The hook answers only when it runs with that profile's home (`HERMES_HOME`,
+which Hermes exports to its hooks) and the payload names the lane's profile.
+
 Coordkit has no YAML parser. If the profile already has a `hooks:` map, install
-refuses and prints the entry to add by hand. The runner passes `--accept-hooks`,
+refuses and prints the entry to add by hand. A receipt records the block as
+written; if the block is edited afterwards, `status` reports `drift` and install
+and uninstall refuse until you remove it by hand. The runner passes `--accept-hooks`,
 so every hook in that profile's config runs without a consent prompt: keep the
 profile's config under your own control.
 
@@ -84,6 +93,7 @@ Usage comes from the receipts, one per turn, under
 provider calls. Context size is not reported by a one-shot run and stays zero.
 Turns started outside coordkit have no receipt and are not counted.
 `doctor` reports `model_drift` when a turn ran on a model other than the lane's.
+A lane with `model = "default"` follows its profile and never reports drift.
 
 ## Limits
 

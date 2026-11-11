@@ -196,6 +196,7 @@ def manage_hook(manifest, name, action):
     """
     import re
     from ..errors import ManifestError
+    from ..state import read_json, write_json
     lane = lane_for(manifest, name)
     if lane is None:
         raise ManifestError('not_a_hermes_lane: ' + name)
@@ -203,16 +204,25 @@ def manage_hook(manifest, name, action):
     text = config.read_text() if config.exists() else ''
     start, end = text.find(HOOK_BEGIN), text.find(HOOK_END)
     owned = start >= 0 and end > start
+    block = text[start:end + len(HOOK_END)] + '\n' if owned else ''
+    receipt = manifest.paths.root/f'hook-hermes-{lane_key(lane)}.json'
+    written = (read_json(receipt, {}) or {}).get('block')
     if action == 'status':
-        return ('installed coordkit-owned' if owned else
+        return ('drift' if owned and block != written else 'installed coordkit-owned' if owned else
                 'installed by hand' if HOOK_MARKER in text else 'absent')
     manifest.writable()
+    if owned and block != written:
+        # The receipt holds exactly what coordkit wrote. A block that differs was edited
+        # by someone else, and replacing or removing it would lose their change.
+        raise ManifestError('hermes_hook_conflict: the marked block in ' + str(config)
+                            + ' was changed after install; inspect and remove it by hand')
     rest = (text[:start] + text[end + len(HOOK_END):].lstrip('\n')) if owned else text
     if action == 'install':
         if rest.lstrip().startswith('{') or re.search(r'^hooks\s*:', rest, re.M):
             raise ManifestError('hermes_hooks_present: add this under hooks.pre_llm_call in ' + str(config)
                                 + ' yourself:\n' + hook_block(manifest))
         rest = rest + ('' if not rest or rest.endswith('\n') else '\n') + hook_block(manifest)
+        write_json(receipt, {'target': str(config), 'block': hook_block(manifest)})  # receipt first
     elif not owned:
         return 'absent'
     temporary = config.with_name(config.name + '.coordkit.tmp')
@@ -222,6 +232,8 @@ def manage_hook(manifest, name, action):
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, config)
+    if action == 'uninstall':
+        receipt.unlink(missing_ok=True)
     return 'OK ' + action
 
 

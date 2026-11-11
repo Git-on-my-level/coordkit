@@ -177,8 +177,13 @@ def deliver(manifest, payload, out=None):
     profile_lane = None
     if event == HERMES_EVENT and not os.environ.get('COORDKIT_AS'):
         # Hermes names the profile in every hook payload, and a profile holds one lane.
+        # The payload alone is not identity: the hook must also run with that profile's
+        # home, which Hermes exports to its hooks, as COORDKIT_AS is for other sessions.
+        home = os.environ.get('HERMES_HOME')
         profile_lane = next((lane for lane in manifest.lanes if getattr(lane, 'harness', '') == 'hermes'
-                             and getattr(lane, 'profile', '') == payload.get('profile')), None)
+                             and getattr(lane, 'profile', '') == payload.get('profile') and home
+                             and Path(home).expanduser().resolve() == Path(lane.config_dir).expanduser().resolve()),
+                            None)
     if profile_lane is not None:
         name, how = profile_lane.name, 'profile'
     else:
