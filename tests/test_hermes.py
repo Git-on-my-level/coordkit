@@ -32,30 +32,32 @@ profile = "ops"
 FAKE = '''import json, os, sys, time
 from pathlib import Path
 argv = sys.argv[1:]
-log = Path(os.environ['CK_HERMES_LOG'])
+cfg = json.loads(Path(sys.argv[0] + '.json').read_text())
+log = Path(cfg['LOG'])
 if 'sessions' in argv:
-    with open(os.environ['CK_HERMES_LOG'] + '.admin', 'a') as stream:
+    with open(cfg['LOG'] + '.admin', 'a') as stream:
         stream.write(json.dumps(argv) + '\\n')
     sys.exit(0)
 calls = len(log.read_text().splitlines()) if log.exists() else 0
 with log.open('a') as stream:
-    stream.write(json.dumps(dict(argv=argv, cwd=os.getcwd(), as_=os.environ.get('COORDKIT_AS'))) + '\\n')
+    stream.write(json.dumps(dict(argv=argv, cwd=os.getcwd(), as_=os.environ.get('COORDKIT_AS'),
+                                 leaked=os.environ.get('SENDER_SECRET'), accept=os.environ.get('HERMES_ACCEPT_HOOKS'))) + '\\n')
 resumed = argv[argv.index('--resume') + 1] if '--resume' in argv else ''
-if resumed and resumed == os.environ.get('CK_HERMES_GONE'):
+if resumed and resumed == cfg.get('GONE'):
     print(json.dumps(dict(type='result', status='failed', error='session not found: ' + resumed)))
     sys.exit(1)
-if resumed and resumed == os.environ.get('CK_HERMES_CRASH'):
+if resumed and resumed == cfg.get('CRASH'):
     sys.exit(1)  # died after possibly doing work: no terminal record
 usage = argv[argv.index('--usage-file') + 1]
-fail = os.environ.get('CK_HERMES_FAIL')
+fail = cfg.get('FAIL')
 Path(usage).write_text(json.dumps(dict(input_tokens=100, output_tokens=7, cache_read_tokens=30,
     cache_write_tokens=5, reasoning_tokens=2, api_calls=3, model='vendor-model', provider='vendor',
     session_id='sess-1', failed=bool(fail))))
-late = os.environ.get('CK_HERMES_LATE_ROW')
+late = cfg.get('LATE_ROW')
 if late and calls == 0:
-    with open(os.environ['CK_HERMES_BUS'], 'a') as stream:
+    with open(cfg['BUS'], 'a') as stream:
         stream.write(late + '\\n')
-release = os.environ.get('CK_HERMES_RELEASE')
+release = cfg.get('RELEASE')
 deadline = time.monotonic() + 30
 while release and not Path(release).exists() and time.monotonic() < deadline:
     time.sleep(.02)
@@ -86,11 +88,17 @@ class HermesCase(FakeCase):
         binary = self.root/'fakes'/'hermes'
         binary.write_text('#!' + sys.executable + ' -S\n' + FAKE)
         binary.chmod(0o755)
-        env = patch.dict(os.environ, HERMES=str(binary), CK_HERMES_LOG=str(self.calls),
-                         CK_HERMES_BUS=str(self.manifest.paths.bus_log), COORDKIT_AS='')
+        self.binary = binary
+        self.steer()
+        env = patch.dict(os.environ, HERMES=str(binary), COORDKIT_AS='')
         env.start(); self.addCleanup(env.stop)
         probe = patch.object(addressed, 'PROBE', lambda: set())
         probe.start(); self.addCleanup(probe.stop)
+
+    def steer(self, **behavior):
+        """The fake reads a file beside itself: a turn's environment carries nothing from the test."""
+        Path(str(self.binary) + '.json').write_text(json.dumps(dict(
+            LOG=str(self.calls), BUS=str(self.manifest.paths.bus_log), **behavior)))
 
     def attach(self):
         stat = self.manifest.paths.bus_log.stat()
@@ -144,7 +152,8 @@ class TurnTests(HermesCase):
     def test_turn_runs_in_the_profile_session_with_rows_and_records_usage(self):
         self.attach()
         self.post(row('a1'), row('other', to='someone-else'), row('fyi1', kind='fyi'))
-        self.assertEqual(self.turn(), 0)
+        with patch.dict(os.environ, SENDER_SECRET='cloud-credential-of-the-poster'):
+            self.assertEqual(self.turn(), 0)
         calls = self.invocations()
         self.assertEqual(len(calls), 1)
         argv = calls[0]['argv']
@@ -160,7 +169,8 @@ class TurnTests(HermesCase):
         self.assertIn('Your bus name is ops', argv[-1])
         self.assertIn('--re a1', argv[-1])
         self.assertNotIn('other', argv[-1])
-        self.assertEqual(calls[0]['as_'], 'ops')
+        self.assertEqual((calls[0]['as_'], calls[0]['accept']), ('ops', '1'))
+        self.assertIsNone(calls[0]['leaked'])  # the poster's environment stays with the poster
         self.assertEqual(calls[0]['cwd'], self.lane.cwd)
         receipt = hermes.last_receipt(self.lane)
         self.assertTrue(receipt['ok'])
@@ -174,8 +184,8 @@ class TurnTests(HermesCase):
     def test_rows_that_arrive_during_a_turn_start_the_next_round(self):
         """Contract: a lane with no waiter must not end while addressed work is unread."""
         self.attach()
-        with patch.dict(os.environ, CK_HERMES_LATE_ROW=row('late1')):
-            self.assertEqual(self.turn(), 0)
+        self.steer(LATE_ROW=row('late1'))
+        self.assertEqual(self.turn(), 0)
         calls = self.invocations()
         self.assertEqual(len(calls), 2)
         self.assertNotIn('late1', calls[0]['argv'][-1])
@@ -186,8 +196,8 @@ class TurnTests(HermesCase):
 
     def test_first_attachment_skips_history_and_a_failed_turn_stops_the_rounds(self):
         self.post(row('old'))
-        with patch.dict(os.environ, CK_HERMES_FAIL='1', CK_HERMES_LATE_ROW=row('late2')):
-            self.assertEqual(self.turn(), 2)
+        self.steer(FAIL='1', LATE_ROW=row('late2'))
+        self.assertEqual(self.turn(), 2)
         calls = self.invocations()
         self.assertEqual(len(calls), 1)
         self.assertNotIn('--re old', calls[0]['argv'][-1])
@@ -198,8 +208,8 @@ class TurnTests(HermesCase):
 
     def test_a_session_that_no_longer_resumes_is_replaced_once(self):
         hermes.remember_session(self.lane, 'gone-1')
-        with patch.dict(os.environ, CK_HERMES_GONE='gone-1'):
-            self.assertEqual(self.turn(), 0)
+        self.steer(GONE='gone-1')
+        self.assertEqual(self.turn(), 0)
         calls = self.invocations()
         self.assertEqual(len(calls), 2)
         self.assertIn('gone-1', calls[0]['argv'])
@@ -210,8 +220,8 @@ class TurnTests(HermesCase):
     def test_a_resumed_turn_that_dies_is_never_repeated(self):
         """Contract: only a session Hermes reports missing is replaced; a crash may have done work."""
         hermes.remember_session(self.lane, 'live-1')
-        with patch.dict(os.environ, CK_HERMES_CRASH='live-1'):
-            self.assertEqual(self.turn(), 1)
+        self.steer(CRASH='live-1')
+        self.assertEqual(self.turn(), 1)
         self.assertEqual(len(self.invocations()), 1)
         self.assertEqual(hermes.session_id(self.lane), 'live-1')
         self.assertFalse(hermes.last_receipt(self.lane)['ok'])
@@ -219,8 +229,8 @@ class TurnTests(HermesCase):
     def test_a_plain_message_posted_mid_turn_still_gets_a_round(self):
         """Contract: the re-check covers every row the wake path would have acted on."""
         self.attach()
-        with patch.dict(os.environ, CK_HERMES_LATE_ROW=row('m1', kind='msg')):
-            self.assertEqual(self.turn(), 0)
+        self.steer(LATE_ROW=row('m1', kind='msg'))
+        self.assertEqual(self.turn(), 0)
         calls = self.invocations()
         self.assertEqual(len(calls), 2)
         self.assertIn('BUS msg m1', calls[1]['argv'][-1])
@@ -255,16 +265,16 @@ class WakeTests(HermesCase):
     def test_wake_detaches_a_runner_and_listening_follows_its_lock(self):
         self.attach()
         self.post(row('w1'))
-        with patch.dict(os.environ, CK_HERMES_RELEASE=str(self.release)):
-            result = self.adapter.wake(self.manifest, 'ops', [], 'key-1')
-            self.assertEqual((result['status'], result['profile']), ('woken', 'ops'))
-            self.wait_until(lambda: hermes.turn_running(self.lane))
-            self.assertTrue(self.adapter.listening(self.manifest, 'ops', []))
-            self.assertTrue(wake.is_listening(self.manifest, 'ops', []))
-            self.assertEqual(addressed.listening(self.manifest, 'ops'), (True, 'hermes turn running'))
-            self.assertEqual(self.adapter.wake(self.manifest, 'ops', [], 'key-2')['status'], 'listening')
-            self.release.touch()
-            self.wait_until(lambda: not hermes.turn_running(self.lane))
+        self.steer(RELEASE=str(self.release))
+        result = self.adapter.wake(self.manifest, 'ops', [], 'key-1')
+        self.assertEqual((result['status'], result['profile']), ('woken', 'ops'))
+        self.wait_until(lambda: hermes.turn_running(self.lane))
+        self.assertTrue(self.adapter.listening(self.manifest, 'ops', []))
+        self.assertTrue(wake.is_listening(self.manifest, 'ops', []))
+        self.assertEqual(addressed.listening(self.manifest, 'ops'), (True, 'hermes turn running'))
+        self.assertEqual(self.adapter.wake(self.manifest, 'ops', [], 'key-2')['status'], 'listening')
+        self.release.touch()
+        self.wait_until(lambda: not hermes.turn_running(self.lane))
         self.assertEqual(len(self.invocations()), 1)
         self.assertEqual(hermes.last_receipt(self.lane)['key'], 'key-1')
         self.assertFalse(self.adapter.listening(self.manifest, 'ops', []))

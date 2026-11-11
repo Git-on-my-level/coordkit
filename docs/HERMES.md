@@ -38,7 +38,10 @@ An addressed row for the lane starts a detached runner
    urgent messages for its roles, `all`, or with the lane as owner).
 3. Runs one gateway-free turn:
    `hermes -p PROFILE --in CWD --no-restore-cwd --accept-hooks [--resume SESSION] --output-format json --usage-file F [-m MODEL] -z PROMPT`,
-   with `COORDKIT_AS=LANE` in its environment. The first turn starts a new
+   with `COORDKIT_AS=LANE` in its environment. The turn does not inherit the
+   environment of whoever posted the row: it gets `HOME`, `USER`, `SHELL`,
+   locale, temp and XDG variables, and `PATH` (the manifest's `[launchd] path`
+   when set). Credentials come from the profile. The first turn starts a new
    session, which the runner titles with the lane name; later turns resume the
    session id the last turn reported. A session Hermes reports as not found,
    before any provider call, is replaced once. No other failure is retried: the

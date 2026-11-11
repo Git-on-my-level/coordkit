@@ -18,6 +18,10 @@ import time
 from . import hermes
 
 MAX_ROUNDS = 3
+# A wake runs in the process of whoever posted the row. The lane's turn must not
+# inherit that sender's credentials or agent identity, so it gets these and nothing else.
+ENV_ALLOW = ('HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR',
+             'XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME')
 MAX_LINES = 20
 MAX_RECORD = 1024 * 1024
 KILL_GRACE = 10
@@ -124,11 +128,19 @@ def title_session(lane, session):
         pass
 
 
-def run_turn(lane, text, timeout, session=''):
+def turn_env(manifest, lane):
+    env = {key: os.environ[key] for key in ENV_ALLOW if key in os.environ}
+    if manifest.launchd.path:
+        env['PATH'] = os.pathsep.join(str(Path(part).expanduser()) for part in manifest.launchd.path)
+    env.update(COORDKIT_AS=lane.name, HERMES_ACCEPT_HOOKS='1')
+    return env
+
+
+def run_turn(manifest, lane, text, timeout, session=''):
     """(exit code, terminal record, usage report fields). The child gets its own group so a timeout can end it."""
     with tempfile.TemporaryDirectory(prefix='coordkit-hermes-') as scratch:
         usage_file = Path(scratch)/'usage.json'
-        env = dict(os.environ, COORDKIT_AS=lane.name, HERMES_ACCEPT_HOOKS='1')
+        env = turn_env(manifest, lane)
         proc = subprocess.Popen(argv_for(lane, text, usage_file, session), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=sys.stderr, env=env, cwd=lane.cwd,
                                 start_new_session=True)
@@ -187,7 +199,7 @@ def main(argv=None):
             started = time.time()
             text = prompt(manifest, lane.name, lines, round_number)
             known = hermes.session_id(lane)
-            code, timed_out, record, usage, model, provider, session = run_turn(lane, text, timeout, known)
+            code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout, known)
             if (known and code and not timed_out and not usage['api_calls']
                     and str(record.get('error', '')).startswith('session not found')):
                 # Hermes says the session is gone and made no provider call, so nothing
@@ -196,7 +208,7 @@ def main(argv=None):
                       file=sys.stderr, flush=True)
                 hermes.remember_session(lane, '')
                 known = ''
-                code, timed_out, record, usage, model, provider, session = run_turn(lane, text, timeout)
+                code, timed_out, record, usage, model, provider, session = run_turn(manifest, lane, text, timeout)
             if session and session != known:
                 hermes.remember_session(lane, session)
                 if not known:
