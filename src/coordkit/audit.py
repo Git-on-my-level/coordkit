@@ -162,7 +162,11 @@ def auditor(manifest, lane, digest, state, started):
         scratch = Path(scratch)
         cwd = scratch/'cwd'
         cwd.mkdir(mode=0o700)
-        prompt = PROMPT + '\nInputs (JSON):\n' + json.dumps({'transcript': digest, 'state': state})
+        # Control characters would each serialize to six bytes; without them, and without ASCII
+        # escaping, the prompt stays within about twice the bounded inputs.
+        plain = lambda text: ''.join(ch for ch in text if ch in '\n\t' or unicodedata.category(ch) not in ('Cc', 'Cs'))
+        prompt = PROMPT + '\nInputs (JSON):\n' + json.dumps({'transcript': plain(digest), 'state': plain(state)},
+                                                           ensure_ascii=False)
         key = f'{manifest.agentctl.request_key_prefix}-audit-{uuid.uuid4().hex}'
         try:
             raw = client.delegate(prompt, scratch, key=key, selector=manifest.audit.selector,
