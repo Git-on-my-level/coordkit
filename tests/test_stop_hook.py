@@ -61,46 +61,40 @@ class StopGuardTests(DeliveryCase):
         self.assertEqual(self.inventory.call_args.kwargs['retries'], 0)
         self.assertLessEqual(self.inventory.call_args.kwargs['timeout'], stop_agentctl.TIMEOUT)
 
-    def test_running_work_requires_live_content_waiter_for_exact_execution(self):
+    def test_running_child_returned_by_authority_blocks_despite_visible_await(self):
+        # The query deliberately returns integrity-conflicted running work even
+        # with an exact waiter. No additional row field exposes that conflict.
         item = self.execution('running')
         self.work(item)
-        with patch.object(stop_agentctl.process, 'run') as probe:
-            probe.return_value = subprocess.CompletedProcess([], 0,
-                f"S agentctl await {item['id']} --content\n", '')
-            self.assertIsNone(self.decision())
-            probe.return_value.stdout = f"S sh -c 'agentctl await {item['id']} --content'\n"
-            self.assertIn('agentctl await ' + item['id'] + ' --content', self.decision()['reason'])
-            probe.return_value.stdout = f"S agentctl await {item['id']}\n"
-            self.assertIsNotNone(self.decision())
-            self.assertIsNone(self.decision(), 'work uses the existing two-block budget')
+        with patch.object(stop_agentctl.process, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, f"S agentctl await {item['id']} --content\n", '')) as probe:
+            self.assertIn(item['id'], self.decision()['reason'])
+            probe.assert_not_called()
+        # A covered ordinary child is omitted by the authoritative query.
+        self.inventory.return_value = self.page()
+        self.assertIsNone(self.decision())
 
-    def test_executable_override_and_detached_full_width_process_snapshot(self):
+    def test_attention_child_returned_by_authority_blocks_despite_visible_await(self):
+        item = self.execution('attention')
+        self.work(item)
+        with patch.object(stop_agentctl.process, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, f"S agentctl await {item['id']} --content\n", '')) as probe:
+            self.assertEqual(self.decision()['decision'], 'block')
+            self.assertIn(item['id'], self.decision()['reason'])
+            probe.assert_not_called()
+
+    def test_executable_override_preserves_authoritative_running_and_terminal_rows(self):
         item = self.execution('running')
         self.work(item)
         with patch.dict(os.environ, AGENTCTL='/tools/custom-agentctl'), patch.object(
-                stop_agentctl.process, 'run', return_value=subprocess.CompletedProcess(
-                    [], 0, f"S /tools/custom-agentctl await {item['id']} --content", '')) as probe:
-            self.assertIsNone(self.decision())
+                stop_agentctl.process, 'run', side_effect=OSError('ps unavailable')) as probe:
+            self.assertIn('/tools/custom-agentctl await', self.decision()['reason'])
             self.assertEqual(self.inventory.call_args.args[0][0], '/tools/custom-agentctl')
-            self.assertIn('-ww', probe.call_args.args[0])
-            self.assertIn('-x', probe.call_args.args[0])
+            probe.assert_not_called()
             item.update(state='completed', reason='terminal_uncollected')
             self.assertIn('/tools/custom-agentctl result', self.decision()['reason'])
 
-    def test_waiter_snapshot_rejects_stopped_zombie_and_unrelated_commands(self):
-        key = self.execution()['id']
-        lines = [f'Z agentctl await {key} --content', f'T agentctl await {key} --content',
-                 f'S agentctl result {key} --content', f'S agentctl delegate --label await {key} --content',
-                 f'S agentctl await {key} --content --no-acknowledge',
-                 f'S agentctl --journal alternate.db await {key} --content']
-        with patch.object(stop_agentctl.process, 'run', return_value=subprocess.CompletedProcess(
-                [], 0, '\n'.join(lines), '')):
-            self.assertEqual(stop_agentctl.live_waiters(.1), set())
-        with patch.object(stop_agentctl.process, 'run', return_value=subprocess.CompletedProcess(
-                [], 0, f'S agentctl --output json await {key} --content', '')):
-            self.assertEqual(stop_agentctl.live_waiters(.1), {key})
-
-    def test_agentctl_timeout_busy_missing_malformed_and_probe_errors_fail_open(self):
+    def test_agentctl_timeout_busy_missing_and_malformed_errors_fail_open(self):
         self.work(self.execution())
         for error in (stop_agentctl.process.ToolError('agentctl', 6, 'timeout', 'tool_timeout'),
                       stop_agentctl.process.ToolError('agentctl', 6, 'journal_busy'),
@@ -111,9 +105,6 @@ class StopGuardTests(DeliveryCase):
         self.inventory.side_effect = None
         for malformed in ({}, {'executions': None}, {'executions': [None]}):
             self.inventory.return_value = malformed
-            self.assertIsNone(self.decision())
-        self.work(self.execution('running'))
-        with patch.object(stop_agentctl.process, 'run', side_effect=OSError('ps unavailable')):
             self.assertIsNone(self.decision())
         # Inventory errors never disable unread-bus enforcement.
         self.incumbent_row('pending', 'x', 'lead-a')
@@ -159,11 +150,15 @@ class StopGuardTests(DeliveryCase):
     def test_incomplete_wrong_scope_schema_and_summary_fail_open(self):
         self.work(self.execution())
         for key, value in (('complete', False), ('complete', 1), ('schema_version', 2),
-                           ('provider', 'codex'), ('parent_execution_id', 'inherited-parent'), ('count', 2)):
+                           ('provider', 'codex'), ('parent_execution_id', 'inherited-parent'), ('count', 2), ('count', True)):
             page = self.page(self.execution())
             page[key] = value
             self.inventory.return_value = page
             self.assertIsNone(self.decision())
+
+    def test_children_bound_rejects_an_otherwise_complete_oversized_response(self):
+        self.work(*(self.execution() for _ in range(stop_agentctl.MAX_CHILDREN + 1)))
+        self.assertIsNone(self.decision())
 
     def test_agentctl_reason_caps_ids_without_inventory_scan_or_paging(self):
         items = [self.execution() for _ in range(7)]

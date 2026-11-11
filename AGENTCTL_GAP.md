@@ -1,13 +1,23 @@
 # Agentctl release dependency and remaining coverage limits
 
-The attribution and query gaps are implemented by
-[agentctl PR #147](https://github.com/Git-on-my-level/agentctl/pull/147), which is
-not yet merged or released. Coordkit PR #23 must remain draft until that change
-is released. This integration needs the `children-result` v1 API. The exact
-validated binary version is **`v0.21.9-pr147.85c10f6`**, built without installation
-from commit `85c10f686667ad70ecd83c8ea0f498ebd871e935`. Released **`v0.21.10` does
-not contain the command**. No official release version containing #147 has been
-assigned yet; pin that release here and in the PR before removing draft status.
+Source preparation is authorized, but coordkit PR #23 remains draft. The parent
+owns the shipping sequence after the official release containing
+[agentctl PR #147](https://github.com/Git-on-my-level/agentctl/pull/147) is
+installed. This integration requires `children-result` v1 and its authoritative
+waiter handling; see the query's reviewed contract at
+[`9799439`](https://github.com/Git-on-my-level/agentctl/blob/9799439e7f837d82ae75dbf17abd2b8033873388/internal/store/children.go#L163-L166).
+The earlier `v0.21.9-pr147.85c10f6` measurements are historical prerelease evidence,
+not installed-binary or live acceptance for the current source.
+
+No coordkit release version is selected during this source preparation. After
+the dependency is installed, the parent must fetch current main and tags, select
+the next free version consistently, and pin the exact official dependency.
+Outstanding gates are 20 read-only real-journal measurements; fresh throwaway
+full-hook error/fail-open, two-block budget, collection, timeout and kill-switch
+probes; final unit/lint/full checks; an independent review of the exact final
+head; and hosted green checks with verified threads resolved. Only then may the
+parent mark ready and handle merge, tag, release and any live update. Rollback
+version and installed baseline must also be freshly verified by the parent.
 
 ## Contract now used
 
@@ -38,17 +48,18 @@ the five-second Stop deadline and the existing shared block budget.
 - Legacy rows are not backfilled. Attribution is correlation evidence, not
   authentication. A managed caller with conflicting inherited markers can stay
   unknown; an unmanaged caller must make the correct per-invocation assertion.
-- Durable terminal subscriptions are the query's only waiter evidence; it does
-  not prove supervisor health or actual result consumption. Coordkit refines
-  unknown running rows with a live same-user collecting `await` process snapshot.
-  This cannot prove remote waiters, `await-any`, alternate config/journal scope,
-  stopped processes, or unconfigured binary aliases. A bus waiter is insufficient.
+- Agentctl alone proves journal-scoped exact waiters and supported durable
+  terminal subscriptions. Coordkit does not second-guess that decision with
+  process snapshots. Attention and integrity-conflicted children returned as
+  actionable always stay blocking; a visible await or bus waiter cannot hide them.
+  Waiter coverage does not itself prove eventual result consumption.
 - Remote forwarding rows can remain stale until observed or collected, and a
   lost receipt needs identical-key recovery before a local row becomes visible.
 - Only the last 24 hours by execution creation time are considered by coordkit.
   An oversized/incomplete query or journal contention fails open. Wrapper target
   changes without metadata changes can retain a capability answer until expiry.
 
-The dated [validation record](docs/validation/2026-11-11-stop-children.md) and
-[measurement script](scripts/measure-stop-children.py) cover the real journal,
-successful queries, and a synthetic child that blocks Stop until collection.
+The dated [prerelease validation record](docs/validation/2026-11-11-stop-children.md)
+is historical evidence only. The parent will use the
+[measurement script](scripts/measure-stop-children.py) and final full-hook probes
+after the official dependency is installed; those gates are still outstanding.

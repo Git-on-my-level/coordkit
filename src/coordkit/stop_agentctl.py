@@ -10,7 +10,7 @@ import time
 
 from . import process
 
-TIMEOUT = .75  # shared by help, child query and the live process snapshot
+TIMEOUT = .75  # shared by help and the authoritative child query
 CAPABILITY_TTL = 3600
 CAPABILITY_TIMEOUT = .15
 MAX_CHILDREN = 200
@@ -72,44 +72,6 @@ def children_supported(executable, cache_path, timeout):
     return supported
 
 
-def live_waiters(timeout):
-    """Only an actual per-execution await process with content collection counts."""
-    result = process.run(['ps', '-ww', '-x', '-U', str(os.getuid()), '-o', 'stat=,args='], timeout=timeout)
-    if result.returncode:
-        raise ValueError('process snapshot unavailable')
-    waiting = set()
-    for line in result.stdout.splitlines():
-        fields = line.strip().split(None, 1)
-        if len(fields) != 2 or 'Z' in fields[0] or 'T' in fields[0]:
-            continue
-        try:
-            args = shlex.split(fields[1])
-        except ValueError:
-            continue
-        # Do not match shell command strings, ps itself, result reads, or an
-        # execution ID mentioned in a delegate prompt. Common flags may precede await.
-        executables = {'agentctl', Path(os.environ.get('AGENTCTL', 'agentctl')).name}
-        if not args or Path(args[0]).name not in executables or '--content' not in args:
-            continue
-        # The inventory uses the default journal. An explicit alternate scope
-        # cannot prove collection of that inventory, even with the same ID.
-        if any(arg.split('=', 1)[0] in ('--journal', '--config', '--config-bundle', '--profile')
-               for arg in args):
-            continue
-        index = 1
-        while index < len(args) and args[index].startswith('--'):
-            if args[index] in ('--output',):
-                index += 2
-            elif args[index] == '--json':
-                index += 1
-            else:
-                break
-        if (index + 1 < len(args) and args[index] == 'await'
-                and EXECUTION.fullmatch(args[index + 1]) and '--no-acknowledge' not in args):
-            waiting.add(args[index + 1])
-    return waiting
-
-
 def block_reason(session, cache_path=None):
     """On any inventory/probe error leave the existing Stop behaviour intact."""
     if not isinstance(session, str) or not session.strip() or len(session) > 256:
@@ -145,8 +107,10 @@ def block_reason(session, cache_path=None):
             if ((state in TERMINAL and reason == 'terminal_uncollected')
                     or (state in NONTERMINAL and reason == 'running_without_known_waiter')):
                 items[item['id']] = state
-        waiting = live_waiters(remaining()) if any(s in NONTERMINAL for s in items.values()) else set()
-        pending = [(key, state) for key, state in items.items() if state in TERMINAL or key not in waiting]
+        # Children already accounts for exact process-held waiters and durable
+        # subscriptions. Returned attention or integrity-conflicted work stays
+        # actionable even when an await is visible; never second-guess it via ps.
+        pending = list(items.items())
         if not pending:
             return None
         actions = []

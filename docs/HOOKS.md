@@ -67,21 +67,23 @@ cannot select this lane's child set. Agentctl owns the immutable launch-time
 result reads are used by the hook.
 
 Terminal `terminal_uncollected` work blocks until collected with
-`agentctl result <id> --content`. Nonterminal `running_without_known_waiter` work
-blocks unless a live same-user `agentctl await <id> --content` process is observed;
-arm that command with the harness's background facility. The query already
-excludes local running work covered by supported durable terminal subscriptions.
+`agentctl result <id> --content`. Returned nonterminal
+`running_without_known_waiter` work also blocks. Agentctl's authoritative query
+owns waiter eligibility, including journal-scoped exact await proofs and durable
+terminal subscriptions. Attention and integrity-conflicted children returned by
+that query remain actionable even when an await process is visible. Coordkit
+never filters returned children with `ps` or infers journal scope from argv.
 The reason lists at most five execution IDs with exact commands and `+N more`.
 A bus waiter does not collect agentctl results. The probe honors the `AGENTCTL`
-executable override; recovery commands use it. Process snapshots include
-detached processes and full-width arguments. Explicit alternate journal/config
-awaits cannot prove collection in the queried scope and are excluded.
+executable override; recovery commands use it.
 
-This requires the unreleased `children` v1 contract from
-[agentctl #147](https://github.com/Git-on-my-level/agentctl/pull/147), validated
-with build `v0.21.9-pr147.85c10f6` (commit `85c10f686667ad70ecd83c8ea0f498ebd871e935`).
-Released `v0.21.10` lacks this command; keep the integration draft until a release
-containing #147 exists and its version is pinned. See [the release gate and coverage limits](../AGENTCTL_GAP.md).
+This requires the `children` v1 contract from
+[agentctl #147](https://github.com/Git-on-my-level/agentctl/pull/147), including
+its authoritative waiter handling. The prior build `v0.21.9-pr147.85c10f6` was
+prerelease source validation only. It does not satisfy the official installed
+binary gates for the prepared source. Keep this PR draft until the official
+release containing #147 is installed, remeasured and gated; then pin that exact
+version. See [the release gate and coverage limits](../AGENTCTL_GAP.md).
 Managed launches record their caller automatically. Unmanaged Claude launches
 must declare the actual current session on each launch using agentctl's
 `AGENTCTL_CALLER_PROVIDER=claude` and `AGENTCTL_CALLER_NATIVE_SESSION_ID` contract.
@@ -105,11 +107,11 @@ stop_requires_agentctl_collection = false
 
 An existing `[[lanes]]` entry can override `stop_requires_agentctl_collection`
 with a boolean; absence inherits `[deliver]`. This leaves unread bus and bus
-waiter enforcement active. The help probe, bounded children query and process probe share a
+waiter enforcement active. The help probe and bounded children query share a
 750 ms allowance with no retries inside the existing hook deadline. Only a v1
 `complete: true` response with consistent counts and at most 200 children is
 accepted; there is no partial-success or full-inventory fallback. Timeout, `journal_busy`, missing CLI, invalid data
-or a failed process probe fall through to the existing bus behaviour.
+fall through to the existing bus behaviour.
 
 Unread actionable rows still block. Stop never blocks when `stop_hook_active` is
 true, and permits at most two consecutive blocks per session within ten minutes, shared
