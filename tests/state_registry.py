@@ -323,7 +323,7 @@ row('adapters/hermes.py', 'coordkit/hermes|.turn.lock|.turns.jsonl|.session.json
 row('adapters/hermes.py', '.hermes.log|config.yaml|.coordkit.tmp|hook-hermes-|writer:manage_hook', 'wake launch or explicit hooks install --hermes-lane',
     'log is append-only diagnostics; the marked config block is removed by hooks uninstall --hermes-lane', 'no latch',
     'install refuses an existing hooks map instead of editing it')
-row('timers.py', 'state/wakes/timers|timers.lock|.json|.firing|writer:schedule|writer:cancel|writer:fire',
+row('timers.py', 'state/wakes/timers|timers.lock|.json|.firing|.failed|writer:schedule|writer:cancel|writer:fire',
     'wake-at schedules a row for a lane', 'the wake scan appends the row when due and removes the file; cancel removes it',
     'at most seven days ahead and 64 per lane', 'a claimed timer whose append failed fires again on the next scan')
 row('wake.py', 'state/wakes/scan.json|writer:scan', 'scan of rows written outside bus.append', 'checkpoint advances past complete rows; replaced or truncated log restarts at end', 'one scan interval', 'missed rows are only those written before the first scan')

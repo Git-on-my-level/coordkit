@@ -19,6 +19,8 @@ from .state import read_json, write_json
 MAX_AHEAD = 7 * 86400
 MAX_PER_LANE = 64
 MAX_FIRE = 32  # per scan; the rest fire on the next one
+CLAIM_STALE = 300  # seconds before a claim that did not finish is tried again
+MAX_ATTEMPTS = 12
 
 
 def directory(manifest):
@@ -93,11 +95,13 @@ def cancel(manifest, ident):
     if not re.fullmatch(r'[0-9a-f]{12}', ident or ''):
         raise ManifestError('invalid_timer_id')
     with _locked(manifest):
-        path = directory(manifest)/f'{ident}.json'
-        if not path.exists():
-            return False
-        path.unlink()
-    return True
+        found = False
+        for suffix in ('.json', '.firing', '.failed'):  # a stuck or failed claim can be cancelled too
+            path = directory(manifest)/f'{ident}{suffix}'
+            if path.exists():
+                path.unlink()
+                found = True
+    return found
 
 
 def stamp(value):
@@ -107,34 +111,62 @@ def stamp(value):
 def fire(manifest, now=None):
     """Append the row of every due timer. Called by the wake scan; returns the ids fired.
 
-    A timer is renamed before its row is appended and removed after. A crash in
-    between leaves the renamed file, and the next call appends that row again.
+    A timer is claimed by rename under the timers lock, and its row is appended after
+    the lock is released, because an append runs the wake path and that can take
+    seconds per lane. A claim that is still there after CLAIM_STALE seconds (a crash,
+    or an append that failed) is claimed again; after MAX_ATTEMPTS it is set aside as
+    `.failed` for inspection. One timer's failure never stops the others.
     """
     from . import bus
     from .wake import retired
-    if not directory(manifest).is_dir():
-        return []
+    if manifest.mode != 'live' or not directory(manifest).is_dir():
+        return []  # a shadow reader must not claim the live bus's timers
     now = time.time() if now is None else now
-    fired = []
+    claimed = []
     with _locked(manifest):
-        claimed = [(path, read_json(path, None)) for path in sorted(directory(manifest).glob('*.firing'))]
+        for path in sorted(directory(manifest).glob('*.firing')):
+            try:
+                abandoned = now - path.stat().st_mtime >= CLAIM_STALE
+            except OSError:
+                continue
+            if abandoned and len(claimed) < MAX_FIRE:
+                os.utime(path, (now, now))
+                claimed.append(path)
         for path, row in pending(manifest):
             if row['due'] <= now and len(claimed) < MAX_FIRE:
                 target = path.with_suffix('.firing')
                 os.replace(path, target)
-                claimed.append((target, row))
-        if not claimed:
-            return []
-        bus.configure(manifest)
-        for path, row in claimed:
-            if isinstance(row, dict) and not retired(manifest, row.get('lane', '')):
+                os.utime(target, (now, now))
+                claimed.append(target)
+    if not claimed:
+        return []
+    bus.configure(manifest)
+    fired = []
+    for path in claimed:
+        try:
+            row = read_json(path, None)
+            if not isinstance(row, dict) or not isinstance(row.get('lane'), str) or not isinstance(row.get('id'), str):
+                raise ValueError('unreadable timer')
+            if not retired(manifest, row['lane']):
                 bus.append([dict(ts=dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(timespec='seconds'),
                                  id='wake-at-' + row['id'], origin='coordkit', frm='coordkit', to=row['lane'],
                                  topic='coordkit-timer', kind='handoff',
                                  text=f"Timer set by {row.get('frm') or row['lane']} at {stamp(row.get('created', now))}: "
-                                      f"{row['text']}"[:manifest.bus.text_cap])], project=False)
+                                      f"{row.get('text', '')}"[:manifest.bus.text_cap])], project=False)
                 fired.append(row['id'])
             path.unlink(missing_ok=True)
+        except Exception as exc:
+            import sys
+            attempts = (row.get('attempts', 0) if isinstance(row, dict) else MAX_ATTEMPTS) + 1
+            print(f'WAKE_TIMER_FAILED {path.stem} attempt={attempts} {type(exc).__name__}: {exc}', file=sys.stderr)
+            try:
+                if attempts >= MAX_ATTEMPTS:
+                    os.replace(path, path.with_suffix('.failed'))
+                else:
+                    write_json(path, dict(row, attempts=attempts))
+                    os.utime(path, (now, now))
+            except OSError:
+                pass
     return fired
 
 
@@ -155,6 +187,9 @@ def main(argv, manifest):
         for _, row in sorted(pending(manifest), key=lambda item: item[1]['due']):
             if not opts.lane or row['lane'] == opts.lane:
                 print(f"TIMER {row['id']} {stamp(row['due'])} to={row['lane']} from={row.get('frm', '')} {json.dumps(row['text'])}")
+        for suffix, label in (('.firing', 'TIMER_FIRING'), ('.failed', 'TIMER_FAILED')):
+            for path in sorted(directory(manifest).glob('*' + suffix)):
+                print(f'{label} {path.stem}')
         return 0
     if not opts.lane or not opts.text:
         parser.error('give a lane and the row text, or --list, or --cancel ID')

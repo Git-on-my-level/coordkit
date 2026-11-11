@@ -40,11 +40,38 @@ class TimerTests(AddressedCase):
         """Contract: at least once. A claimed timer is never silently dropped."""
         now = time.time()
         ident, _ = timers.schedule(self.manifest, 'lead-a', 'do not lose me', after='1m', now=now)
-        with patch.object(bus, 'append', side_effect=RuntimeError('crash')), self.assertRaises(RuntimeError):
+        other, _ = timers.schedule(self.manifest, 'coordinator', 'unaffected', after='1m', now=now)
+        real = bus.append
+        def append(recs, **kwargs):
+            if recs[0]['to'] == 'lead-a':
+                raise RuntimeError('crash')
+            return real(recs, **kwargs)
+        with patch.object(bus, 'append', side_effect=append), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(timers.fire(self.manifest, now=now + 61), [other])  # one failure does not stop the rest
+        self.assertIn('WAKE_TIMER_FAILED ' + ident, err.getvalue())
+        self.assertEqual([r['id'] for r in self.rows()], ['wake-at-' + other])
+        self.assertEqual(timers.fire(self.manifest, now=now + 62), [])  # the claim is not stale yet
+        self.assertEqual(timers.fire(self.manifest, now=now + 61 + timers.CLAIM_STALE), [ident])
+        self.assertEqual([r['id'] for r in self.rows()], ['wake-at-' + other, 'wake-at-' + ident])
+
+    def test_a_timer_that_keeps_failing_is_set_aside_and_can_be_cancelled(self):
+        now = time.time()
+        ident, _ = timers.schedule(self.manifest, 'lead-a', 'never lands', after='1m', now=now)
+        with patch.object(bus, 'append', side_effect=RuntimeError('still broken')), \
+                patch.object(timers, 'MAX_ATTEMPTS', 2), contextlib.redirect_stderr(io.StringIO()):
             timers.fire(self.manifest, now=now + 61)
-        self.assertEqual(self.rows(), [])
-        self.assertEqual(timers.fire(self.manifest, now=now + 62), [ident])
-        self.assertEqual([r['id'] for r in self.rows()], ['wake-at-' + ident])
+            timers.fire(self.manifest, now=now + 61 + timers.CLAIM_STALE)
+        self.assertTrue((timers.directory(self.manifest)/f'{ident}.failed').exists())
+        self.assertEqual(timers.fire(self.manifest, now=now + 61 + 3 * timers.CLAIM_STALE), [])
+        self.assertTrue(timers.cancel(self.manifest, ident))
+        self.assertFalse(timers.cancel(self.manifest, ident))
+
+    def test_a_shadow_reader_claims_nothing(self):
+        now = time.time()
+        ident, _ = timers.schedule(self.manifest, 'lead-a', 'live only', after='1m', now=now)
+        self.manifest.mode = 'shadow'
+        self.assertEqual(timers.fire(self.manifest, now=now + 61), [])
+        self.assertEqual([r['id'] for _, r in timers.pending(self.manifest)], [ident])
 
     def test_refusals_limits_list_and_cancel(self):
         now = time.time()
