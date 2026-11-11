@@ -22,6 +22,9 @@ from .extract import clean, commit, extract
 from .manifest import ManifestError, duration
 from .process import ToolError, run
 
+_FINALIZED = None  # cycle id finalized by the current run_cycle invocation
+
+
 class CycleDeadline(BaseException):
     """Not swallowed by nested tool retry/failure handlers."""
 
@@ -144,9 +147,14 @@ def _cycle(manifest, name, settings, handle, state):
         findings.write_text(auditor.report(cycle, items))
         if items:
             _post(manifest, handle, auditor.message(items, findings), findings, publication_id="loop-" + cycle)
-        # A receipt is required even when the auditor correctly raises zero findings.
-        client.note(f'card:{handle}', f'Loop {name} cycle {cycle}: {len(items)} findings',
-                    evidence=str(findings), met=True)
+        # A receipt is required even when the auditor correctly raises zero findings. Notes are not keyed,
+        # so remember the sent note in pending.json and skip it on resume. Delivery is still at-least-once:
+        # a failure after ANX accepts the note (including client retries of a timed-out call) can repeat it.
+        if not pending.get('noted'):
+            client.note(f'card:{handle}', f'Loop {name} cycle {cycle}: {len(items)} findings',
+                        evidence=str(findings), met=True)
+            pending['noted'] = True
+            write_json(pending_path, pending)
         if f'## Cycle {cycle}\n' not in prior.read_text():
             with prior.open('a') as stream:
                 stream.write(f'\n## Cycle {cycle}\n')
@@ -162,13 +170,38 @@ def _cycle(manifest, name, settings, handle, state):
             fcntl.flock(lock, fcntl.LOCK_EX)
             (state/'escalation.json').unlink(missing_ok=True)
             failures_path.write_text('0\n')
+        # Finalized: max_age stays armed (finalization itself is bounded), but a deadline from here on must
+        # not turn this completed cycle into a failure; run_cycle checks this marker.
+        global _FINALIZED
+        _FINALIZED = cycle
+        # Only after the cycle is finalized, so a success receipt never precedes a local failure of the same run.
+        _receipt(client, name, handle, cycle, 'acted' if items else 'no_op',
+                 f'Loop {name} cycle {cycle}: {len(items)} findings', finalized=True)
         print(f'CYCLE_OK {name} {cycle} findings={findings} items={len(items)}')
         return 0
     except (ToolError, ManifestError, OSError, ValueError) as exc:
         error_file = run_dir/'err.txt'
         error_file.write_text(str(exc) + '\n')
         record_failure(manifest, name, settings, handle, state, str(exc), cycle, error_file)
+        # pending.json resumes this cycle id. ANX drops a second receipt with the
+        # same run id, so a retryable failure must not spend it on infra_error.
+        # Record the attempt under a new id so last-run time still moves.
+        run_id = cycle if not pending_path.exists() else f'{cycle}-attempt-{uuid.uuid4().hex}'
+        _receipt(AnxClient(manifest), name, handle, run_id, 'infra_error',
+                 f'Loop {name} cycle {cycle} failed: {exc}')
         return 1
+
+
+def _receipt(client, name, handle, run_id, outcome, summary, finalized=False):
+    """ANX loop health counts run receipts, not notes. Never let a receipt failure change the cycle result.
+    After finalization the deadline alarm can still fire inside this call; the cycle already completed, so absorb it."""
+    absorbed = (ToolError, ManifestError, OSError) + ((CycleDeadline,) if finalized else ())
+    try:
+        client.work_receipt(f'card:{handle}', run_id, outcome, summary)
+    except absorbed as exc:
+        print(f'CYCLE_RECEIPT_FAILED {name} {run_id}: {exc}', file=sys.stderr)
+        return False
+    return True
 
 
 def record_failure(manifest, name, settings, handle, state, detail, cycle=None, error_file=None):
@@ -259,6 +292,8 @@ def _retry_escalation(manifest, name, handle, state):
 
 
 def run_cycle(manifest, name):
+    global _FINALIZED
+    _FINALIZED = None
     manifest.writable()
     settings, handle = config(manifest, name)
     state = manifest.paths.root/'loops'/name
@@ -288,11 +323,19 @@ def run_cycle(manifest, name):
             retry_escalation(manifest, name, handle, state)
             return _cycle(manifest, name, settings, handle, state)
         except CycleDeadline as exc:
+            if _FINALIZED:
+                # The deadline landed after this cycle was finalized: it completed; only the receipt may be missing.
+                print(f'CYCLE_OK {name} {_FINALIZED} (deadline after finalization: {exc})')
+                return 0
             directory = state/'runs'/('deadline-'+uuid.uuid4().hex)
             directory.mkdir(parents=True, exist_ok=True)
             error_file = directory/'err.txt'
             error_file.write_text(str(exc)+'\n')
-            record_failure(manifest, name, settings, handle, state, str(exc), error_file=error_file)
+            record_failure(manifest, name, settings, handle, state, str(exc), directory.name, error_file)
+            # A fresh id: a pending cycle's id must stay free for acted/no_op,
+            # and each timeout has to count or ANX falls back to past_promise.
+            _receipt(AnxClient(manifest), name, handle, directory.name, 'infra_error',
+                     f'Loop {name} cycle {directory.name} failed: {exc}')
             return 1
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
