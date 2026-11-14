@@ -24,8 +24,8 @@ class LoopAnswersTests(FakeCase):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return fn(*args, **kwargs)
 
-    def record_failure(self):
-        self.quiet(loop.record_failure, self.manifest, 'audit', self.manifest.loop, 'loop-audit', self.state, 'runner failed')
+    def record_failure(self, detail='runner failed'):
+        self.quiet(loop.record_failure, self.manifest, 'audit', self.manifest.loop, 'loop-audit', self.state, detail)
         return read_json(self.state/'escalation.json')
 
     def rows(self):
@@ -43,7 +43,7 @@ class LoopAnswersTests(FakeCase):
         report = self.record_failure()
         ask_id = report['ask_id']
         self.assertEqual(self.quiet(loop.run_cycle, self.manifest, 'audit'), 0)
-        self.assertFalse((self.state/'escalation.json').exists())
+        self.assertTrue(read_json(self.state/'escalation.json')['recovered'])
         self.assertTrue(loop_answers.path(self.manifest, ask_id).exists())
         self.manifest.escalation.internal_to = 'worker'
         self.respond(self.answers(ask_id))
@@ -74,7 +74,7 @@ class LoopAnswersTests(FakeCase):
         with patch.object(loop.time, 'time', return_value=1000):
             first = self.record_failure()['ask_id']
         with patch.object(loop.time, 'time', return_value=4600):
-            second = self.record_failure()['ask_id']
+            second = self.record_failure('runner still failed')['ask_id']
         self.assertNotEqual(first, second)
         args = [c['args'] for c in self.calls() if c['tool'] == 'anx' and 'ask' in c['args']][-1]
         self.assertEqual(args[args.index('--supersedes') + 1], first)

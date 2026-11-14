@@ -98,12 +98,24 @@ for response in responses:
 if name == 'anx' and 'ask' in args and any('check=loop_failure' in arg for arg in args):
     result = {'ask_id': 'event:ask-' + str(len(Path(os.environ['FAKE_LOG']).read_text().splitlines()))}
     if os.environ.get('FAKE_ANX_ASK_STATE'):
-        # Opt-in model of Decide's replacement semantics, exercised via real argv.
+        # Opt-in model of Decide's replacement and repeat-dedupe semantics, exercised via real argv.
         target = Path(os.environ['FAKE_ANX_ASK_STATE'])
         asks = json.loads(target.read_text()) if target.exists() else {}
-        if '--supersedes' in args:
+        title = args[args.index('ask') + 1]
+        card = args[args.index('--subject-ref') + 1] if '--subject-ref' in args else ''
+        repeated = None
+        if '--again' not in args:
+            # The same question on the same card returns the open ask or its answer.
+            repeated = next((key for key, item in asks.items()
+                             if item.get('status') in ('open', 'answered')
+                             and item.get('title') == title and item.get('card') == card), None)
+        if '--supersedes' in args and args[args.index('--supersedes') + 1] in asks:
             asks[args[args.index('--supersedes') + 1]]['status'] = 'superseded'
-        asks[result['ask_id']] = {'ask_id': result['ask_id'], 'status': 'open'}
+        if repeated:
+            result['ask_id'] = repeated
+        else:
+            asks[result['ask_id']] = {'ask_id': result['ask_id'], 'status': 'open',
+                                      'title': title, 'card': card}
         target.write_text(json.dumps(asks))
 elif name == 'anx' and 'inbox' in args and 'list' in args and os.environ.get('FAKE_ANX_ASK_STATE'):
     target = Path(os.environ['FAKE_ANX_ASK_STATE'])

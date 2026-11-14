@@ -83,7 +83,8 @@ class LoopTests(FakeCase):
         args = asks[0]['args']
         self.assertIn('Restore the loop-audit card, which keeps failing?', args)
         self.assertEqual(args[args.index('--subject-ref') + 1], 'card:loop-audit')
-        self.assertIn('--again', args)
+        self.assertNotIn('--again', args)
+        self.assertNotIn('--supersedes', args)
         self.assertEqual(self.escalations(), [])
         self.respond()
         self.assertEqual(self.invoke()[0],0)
