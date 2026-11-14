@@ -43,7 +43,7 @@ class LoopAnswersTests(FakeCase):
         report = self.record_failure()
         ask_id = report['ask_id']
         self.assertEqual(self.quiet(loop.run_cycle, self.manifest, 'audit'), 0)
-        self.assertFalse((self.state/'escalation.json').exists())
+        self.assertTrue(read_json(self.state/'escalation.json')['recovered'])
         self.assertTrue(loop_answers.path(self.manifest, ask_id).exists())
         self.manifest.escalation.internal_to = 'worker'
         self.respond(self.answers(ask_id))

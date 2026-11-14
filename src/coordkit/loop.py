@@ -168,7 +168,18 @@ def _cycle(manifest, name, settings, handle, state):
         pending_path.unlink()
         with (state/'result.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            (state/'escalation.json').unlink(missing_ok=True)
+            report = read_json(state/'escalation.json') or {}
+            # Recovery cancels delivery, but the remote ask still exists. Retain its
+            # class so the next streak can reuse it or supersede it appropriately.
+            ask_id = report.get('ask_id') or report.get('previous_ask_id')
+            if ask_id and report.get('channel') == 'anx':
+                failure_class = report.get('failure_class') if report.get('ask_id') else report.get('previous_class')
+                write_json(state/'escalation.json', {
+                    'recovered': True, 'channel': 'anx', 'ask_id': ask_id,
+                    'failure_class': failure_class,
+                    'previous_answers': loop_answers.retained_answers(report)})
+            else:
+                (state/'escalation.json').unlink(missing_ok=True)
             failures_path.write_text('0\n')
         # Finalized: max_age stays armed (finalization itself is bounded), but a deadline from here on must
         # not turn this completed cycle into a failure; run_cycle checks this marker.
@@ -230,7 +241,7 @@ def record_failure(manifest, name, settings, handle, state, detail, cycle=None, 
             report = read_json(state/'escalation.json')
             # Legacy sent receipts only reached an agent inbox. Deliver to Decide immediately.
             legacy = report and report.get('sent') and report.get('channel') != 'anx'
-            if not report or legacy or (report.get('sent') and time.time() >= report['next_at']):
+            if not report or report.get('recovered') or legacy or (report.get('sent') and time.time() >= report['next_at']):
                 previous = report if report and not legacy else {}
                 answers = loop_answers.retained_answers(previous)
                 report = {'sent': False, 'channel': 'anx', 'card': f'card:{handle}',
@@ -263,7 +274,7 @@ def retry_escalation(manifest, name, handle, state):
 def _retry_escalation(manifest, name, handle, state):
     path = state/'escalation.json'
     report = read_json(path)
-    if not report or (report.get('sent') and report.get('channel') == 'anx'):
+    if not report or report.get('recovered') or (report.get('sent') and report.get('channel') == 'anx'):
         return
     try:
         card = report.get('card') or f'card:{handle}'

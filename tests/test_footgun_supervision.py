@@ -98,7 +98,7 @@ class SupervisionTests(FakeCase):
         self.assertEqual(read_json(state/'skip.json')['reason'],'cycle_lock_held')
         self.assertEqual(self.quiet(loop.run_cycle,self.manifest,'audit'),0)
         self.assertEqual(int((state/'fails').read_text()),0)
-        self.assertFalse((state/'escalation.json').exists())
+        self.assertTrue(read_json(state/'escalation.json')['recovered'])
         self.assertEqual((state/'cycle.lock').read_text(),'')
 
     def test_loop_whole_cycle_deadline(self):
