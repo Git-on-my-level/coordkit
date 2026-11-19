@@ -168,7 +168,18 @@ def _cycle(manifest, name, settings, handle, state):
         pending_path.unlink()
         with (state/'result.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            (state/'escalation.json').unlink(missing_ok=True)
+            report = read_json(state/'escalation.json') or {}
+            # Recovery cancels delivery, but the remote ask still exists. Retain its
+            # class so the next streak can reuse it or supersede it appropriately.
+            ask_id = report.get('ask_id') or report.get('previous_ask_id')
+            if ask_id and report.get('channel') == 'anx':
+                failure_class = report.get('failure_class') if report.get('ask_id') else report.get('previous_class')
+                write_json(state/'escalation.json', {
+                    'recovered': True, 'channel': 'anx', 'ask_id': ask_id,
+                    'failure_class': failure_class,
+                    'previous_answers': loop_answers.retained_answers(report)})
+            else:
+                (state/'escalation.json').unlink(missing_ok=True)
             failures_path.write_text('0\n')
         # Finalized: max_age stays armed (finalization itself is bounded), but a deadline from here on must
         # not turn this completed cycle into a failure; run_cycle checks this marker.
@@ -182,7 +193,7 @@ def _cycle(manifest, name, settings, handle, state):
     except (ToolError, ManifestError, OSError, ValueError) as exc:
         error_file = run_dir/'err.txt'
         error_file.write_text(str(exc) + '\n')
-        record_failure(manifest, name, settings, handle, state, str(exc), cycle, error_file)
+        record_failure(manifest, name, settings, handle, state, str(exc), cycle, error_file, exc)
         # pending.json resumes this cycle id. ANX drops a second receipt with the
         # same run id, so a retryable failure must not spend it on infra_error.
         # Record the attempt under a new id so last-run time still moves.
@@ -204,7 +215,18 @@ def _receipt(client, name, handle, run_id, outcome, summary, finalized=False):
     return True
 
 
-def record_failure(manifest, name, settings, handle, state, detail, cycle=None, error_file=None):
+def _failure_class(detail, exc=None):
+    """A stable signature of the failure class: its kind only, never a cycle id, run path,
+    count or message tail. While the class is unchanged the escalation refiles an identical
+    brief so ANX repeat-dedupe returns the one open ask instead of stacking another copy."""
+    if isinstance(exc, ToolError):
+        return exc.category
+    if exc is not None:
+        return type(exc).__name__
+    return str(detail).split(':', 1)[0].strip() or 'failure'
+
+
+def record_failure(manifest, name, settings, handle, state, detail, cycle=None, error_file=None, exc=None):
     cycle = cycle or uuid.uuid4().hex
     error_file = error_file or state/'skip.json'
     # Skip writers cannot take cycle.lock; serialize just counters and escalation receipts.
@@ -219,19 +241,22 @@ def record_failure(manifest, name, settings, handle, state, detail, cycle=None, 
             report = read_json(state/'escalation.json')
             # Legacy sent receipts only reached an agent inbox. Deliver to Decide immediately.
             legacy = report and report.get('sent') and report.get('channel') != 'anx'
-            if not report or legacy or (report.get('sent') and time.time() >= report['next_at']):
+            if not report or report.get('recovered') or legacy or (report.get('sent') and time.time() >= report['next_at']):
                 previous = report if report and not legacy else {}
                 answers = loop_answers.retained_answers(previous)
                 report = {'sent': False, 'channel': 'anx', 'card': f'card:{handle}',
                           'sent_count': previous.get('sent_count', 0),
                           'previous_ask_id': previous.get('ask_id'),
+                          'previous_class': previous.get('failure_class'),
                           'previous_answers': answers,
-                          'cycle': cycle, 'error_file': str(error_file), 'ask': {
-                    'situation': f'Loop {name} has failed {failures} consecutive cycles: {detail}',
+                          'failure_class': _failure_class(detail, exc),
+                          'cycle': cycle, 'error_file': str(error_file), 'detail': detail,
+                          'failures': failures, 'ask': {
+                    'situation': f'Loop {name} is failing consecutive cycles and retries have not recovered it.',
                     'impact': ('Scheduled checks are failing to complete reliably, so follow-ups can be missed '
                                'and completion updates may be absent. Repeated retries have not restored reporting; '
                                'someone needs to investigate the error and restore the loop or explicitly pause its checks.'),
-                    'recommend': f'Inspect {error_file} and restore the loop before its next scheduled cycle.',
+                    'recommend': 'Inspect the latest cycle evidence in the details and restore the loop before its next scheduled cycle.',
                     'why': 'The consecutive-failure threshold was reached; automated retries have not recovered it.'}}
                 write_json(state/'escalation.json', report)
         # Keep the threshold-crossing receipt and delivery in one critical section:
@@ -249,7 +274,7 @@ def retry_escalation(manifest, name, handle, state):
 def _retry_escalation(manifest, name, handle, state):
     path = state/'escalation.json'
     report = read_json(path)
-    if not report or (report.get('sent') and report.get('channel') == 'anx'):
+    if not report or report.get('recovered') or (report.get('sent') and report.get('channel') == 'anx'):
         return
     try:
         card = report.get('card') or f'card:{handle}'
@@ -260,17 +285,25 @@ def _retry_escalation(manifest, name, handle, state):
             if answer:
                 answers[report['previous_ask_id']] = answer
                 write_json(path, report)
-        details = f"Cycle: {report['cycle']}\nEvidence: {report['error_file']}"
+        # Cycle-varying evidence stays in details: the question and situation must refile
+        # identically or ANX repeat-dedupe cannot recognize this as the same open ask.
+        details = (f"Cycle: {report['cycle']}\nEvidence: {report['error_file']}\n"
+                   f"Consecutive failures: {report.get('failures', '?')}\nLatest error: {str(report.get('detail', ''))[:1200]}")
         if answers:
             details += '\n\nEarlier answers (the loop is still failing):\n' + '\n\n'.join(answers.values())
         brief = briefs.machine('loop_failure', subject=briefs.subject_words(card), **report['ask'],
             evidence=briefs.pr_evidence(manifest, *report['ask'].values(), details),
             details=details,
-            if_no_answer='The loop keeps retrying and reports again while failures continue; no repair is applied automatically.')
-        # Bypass the failing bus/mirror and deaf-exempt agent digests. New failure evidence
-        # replaces the previous Decide ask, retaining its answer and correlation.
+            if_no_answer='The loop keeps retrying; while the same failure continues it reuses this ask instead of filing new ones.')
+        # Bypass the failing bus/mirror and deaf-exempt agent digests. A continuing failure of the
+        # same class refiles the identical brief without --again, so dedupe returns the still-open
+        # ask (or its answer); only a new failure class supersedes it with fresh evidence.
         if not report.get('ask_id'):
-            result = AnxClient(manifest).ask(card, brief, again=True, supersedes=report.get('previous_ask_id'))
+            previous = report.get('previous_ask_id')
+            same_class = bool(previous) and report.get('failure_class') is not None \
+                and report.get('previous_class') == report.get('failure_class')
+            result = AnxClient(manifest).ask(card, brief, again=bool(previous) and not same_class,
+                                             supersedes=None if same_class else previous)
             ask_id = ask_reference(result)
             if not isinstance(ask_id, str) or not re.fullmatch(r'(?:event:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', ask_id):
                 raise ToolError('anx', 6, 'loop ask response missing a valid ask_id', 'protocol_error')
@@ -331,7 +364,7 @@ def run_cycle(manifest, name):
             directory.mkdir(parents=True, exist_ok=True)
             error_file = directory/'err.txt'
             error_file.write_text(str(exc)+'\n')
-            record_failure(manifest, name, settings, handle, state, str(exc), directory.name, error_file)
+            record_failure(manifest, name, settings, handle, state, str(exc), directory.name, error_file, exc)
             # A fresh id: a pending cycle's id must stay free for acted/no_op,
             # and each timeout has to count or ANX falls back to past_promise.
             _receipt(AnxClient(manifest), name, handle, directory.name, 'infra_error',

@@ -102,9 +102,9 @@ row('loop.py', 'STOP|writer:stop', 'loop stop with reason', 'explicit human remo
 row('loop.py', 'cycle.lock|writer:run_cycle', 'cycle begins with pid/start/deadline', 'finally truncate metadata; kernel unlock', 'loop.max_age', 'failure ask; skipped run receipt counts')
 row('loop.py', 'result.lock|fails|skip.json|writer:record_failure', 'failed, unknown or skipped cycle', 'successful cycle resets counter', 'fail_report_after cycles', 'durable escalation ask')
 row('loop.py', 'escalation.json|writer:_retry_escalation', 'failure threshold; journal pending ask before sending',
-    'any successful cycle clears the streak and pending/sent report under result.lock',
-    'retry unsent next cycle; sent_at/next_at/sent_count re-arm at failure_realert_intervals, last interval repeats',
-    'direct ANX Decide ask on loop card; previous_ask_id replaces its predecessor, previous_answers retains known rulings by ID; legacy agent-only sent receipts are delivered immediately')
+    'successful cycle cancels delivery and resets counters under result.lock; dormant recovered ask_id/failure_class/previous_answers survive until the next threshold or operator archival',
+    'retry unsent next cycle; active sent_at/next_at/sent_count re-arm at failure_realert_intervals, last interval repeats; recovered correlation has no delivery deadline',
+    'direct ANX Decide ask on loop card; failure_class/previous_class select same-class reuse without again or changed-class supersession of previous_ask_id; previous_answers retains known rulings by ID; legacy agent-only sent receipts are delivered immediately')
 row('loop_answers.py', 'state/loop-asks|.json|writer:remember',
     'successful direct loop ask returns its ID, journaled before marking send complete',
     'correlation receipts and received answers survive supersession/recovery; operator archives with bus/ask history',

@@ -40,8 +40,11 @@ class LoopEscalationTests(FakeCase):
             self.assertEqual(report['next_at'], next_at)
             self.record_failure(next_at - 1)
             self.assertEqual(len(self.asks()), count)
-        self.assertIn('7 consecutive cycles', self.asks()[-1][self.asks()[-1].index('--situation') + 1])
-        self.assertTrue(all('--again' in args for args in self.asks()))
+        self.assertIn('Consecutive failures: 7', self.asks()[-1][self.asks()[-1].index('--details') + 1])
+        asks = self.asks()
+        self.assertNotIn('--again', asks[0])          # first ever ask: nothing to bypass
+        self.assertIn('--again', asks[1])             # the class changed: a fresh ask supersedes
+        self.assertTrue(all('--again' not in args for args in asks[2:]))  # same class: dedupe only
 
     def test_custom_intervals_and_card_bypass_agent_digest_and_broken_bus(self):
         self.manifest.loop.loops = {'audit': {'receipt_prefix': 'checks-', 'failure_realert_intervals': ['5m', '2h']}}
@@ -57,38 +60,73 @@ class LoopEscalationTests(FakeCase):
         self.assertFalse(self.manifest.paths.bus_log.exists())
         self.assertEqual(self.escalations(), [])
 
-    def test_three_realerts_replace_the_previous_ask_leaving_one_open(self):
+    def test_two_consecutive_failing_cycles_leave_one_open_ask(self):
+        # Repeat-dedupe contract: a continuing failure refiles the identical brief, so ANX
+        # returns the still-open ask instead of stacking a second copy on the loop's card.
         target = self.root/'anx-asks.json'
-        previous = None
         with patch.dict(os.environ, FAKE_ANX_ASK_STATE=str(target)):
-            for at in (1000, 4600, 26200, 112600):
-                report = self.record_failure(at)
-                args = self.asks()[-1]
-                if previous:
-                    self.assertEqual(args[args.index('--supersedes') + 1], previous)
-                    self.assertEqual(report['previous_ask_id'], previous)
-                else:
-                    self.assertNotIn('--supersedes', args)
-                asks = json.loads(target.read_text())
-                self.assertEqual([key for key, item in asks.items() if item['status'] == 'open'], [report['ask_id']])
-                previous = report['ask_id']
-        self.assertEqual(len(asks), 4)
-
-    def test_answered_previous_ask_is_superseded_with_its_answer_in_details(self):
-        first = self.record_failure(1000)['ask_id']
-        self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
-            'items': [{'ask_id': first, 'status': 'answered', 'answer': {'text': 'Pause until reviewed'}}]}}})
-        second = self.record_failure(4600)
+            first = self.record_failure(1000)['ask_id']
+            second = self.record_failure(4600)['ask_id']
+        self.assertEqual(first, second)
+        asks = json.loads(target.read_text())
+        self.assertEqual([item['status'] for item in asks.values()], ['open'])
         args = self.asks()[-1]
-        self.assertEqual(args[args.index('--supersedes') + 1], first)
-        details = args[args.index('--details') + 1]
-        self.assertIn(first + ': Pause until reviewed', details)
-        self.assertTrue(second['sent'])
-        # A delivered answer is retained even after the next replacement is open.
-        self.respond()
-        third = self.record_failure(26200)
-        self.assertTrue(third['sent'])
-        self.assertIn(first + ': Pause until reviewed', self.asks()[-1][self.asks()[-1].index('--details') + 1])
+        self.assertNotIn('--again', args)
+        self.assertNotIn('--supersedes', args)
+        situation = [args[args.index('--situation') + 1] for args in self.asks()]
+        self.assertEqual(len(set(situation)), 1, 'cycle-varying text must not reach the deduped fields')
+
+    def test_realerts_of_one_failure_class_reuse_the_single_open_ask(self):
+        target = self.root/'anx-asks.json'
+        with patch.dict(os.environ, FAKE_ANX_ASK_STATE=str(target)):
+            first = self.record_failure(1000)['ask_id']
+            for at in (4600, 26200, 112600):
+                report = self.record_failure(at)
+                self.assertEqual(report['ask_id'], first)
+                args = self.asks()[-1]
+                self.assertNotIn('--again', args)
+                self.assertNotIn('--supersedes', args)
+        asks = json.loads(target.read_text())
+        self.assertEqual(len(asks), 1)
+        self.assertEqual(asks[first]['status'], 'open')
+
+    def test_a_new_failure_class_supersedes_the_open_ask(self):
+        target = self.root/'anx-asks.json'
+        with patch.dict(os.environ, FAKE_ANX_ASK_STATE=str(target)):
+            first = self.record_failure(1000, 'network timeout')['ask_id']
+            second = self.record_failure(4600, 'manifest invalid')['ask_id']
+            self.assertNotEqual(first, second)
+            args = self.asks()[-1]
+            self.assertIn('--again', args)
+            self.assertEqual(args[args.index('--supersedes') + 1], first)
+            # The new class then continues: its next realert dedupes back to its own open ask.
+            self.assertEqual(self.record_failure(26200, 'manifest invalid')['ask_id'], second)
+            asks = json.loads(target.read_text())
+            self.assertEqual([key for key, item in asks.items() if item['status'] == 'open'], [second])
+
+    def test_answered_ask_is_reused_until_a_new_failure_class_supersedes_it(self):
+        target = self.root/'anx-asks.json'
+        with patch.dict(os.environ, FAKE_ANX_ASK_STATE=str(target)):
+            first = self.record_failure(1000)['ask_id']
+            state = json.loads(target.read_text())
+            state[first]['status'] = 'answered'
+            target.write_text(json.dumps(state))
+            self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
+                'items': [{'ask_id': first, 'status': 'answered', 'answer': {'text': 'Pause until reviewed'}}]}}})
+            second = self.record_failure(4600)
+            self.assertEqual(second['ask_id'], first, 'an answered ask is returned, not refiled')
+            args = self.asks()[-1]
+            self.assertNotIn('--again', args)
+            self.assertNotIn('--supersedes', args)
+            self.assertEqual(len(json.loads(target.read_text())), 1)
+            # A different failure class files a fresh ask that retains the earlier ruling in details.
+            self.respond()
+            third = self.record_failure(26200, 'manifest invalid')
+            args = self.asks()[-1]
+            self.assertIn('--again', args)
+            self.assertEqual(args[args.index('--supersedes') + 1], first)
+            self.assertIn(first + ': Pause until reviewed', args[args.index('--details') + 1])
+            self.assertTrue(third['sent'])
 
     def test_answer_lookup_paginates_and_does_not_consume_replies(self):
         first = self.record_failure(1000)['ask_id']
@@ -123,7 +161,7 @@ class LoopEscalationTests(FakeCase):
         first = self.record_failure(1000)['ask_id']
         self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {'ok': True, 'result': {
             'items': [], 'next_cursor': 'repeated'}}})
-        pending = self.record_failure(4600)
+        pending = self.record_failure(4600, 'runner still failed')
         self.assertFalse(pending['sent'])
         self.assertEqual(pending['previous_ask_id'], first)
         self.assertEqual(len(self.asks()), 1)
@@ -234,7 +272,7 @@ class LoopEscalationTests(FakeCase):
         self.respond()
         with patch.object(loop.time, 'time', return_value=3000):
             loop.retry_escalation(self.manifest, 'audit', 'loop-audit', self.state)
-        self.assertIn('original error', self.asks()[-1][self.asks()[-1].index('--situation') + 1])
+        self.assertIn('original error', self.asks()[-1][self.asks()[-1].index('--details') + 1])
 
     def test_concurrent_success_cannot_clear_threshold_report_before_send_attempt(self):
         # Queue a successful-cycle reset as soon as the failure report is durable.
@@ -293,7 +331,71 @@ class LoopEscalationTests(FakeCase):
         with patch.object(loop.time, 'time', return_value=4600), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(loop.run_cycle(self.manifest, 'audit'), 0)
         self.assertEqual(len(self.asks()), 1)
-        self.assertFalse((self.state/'escalation.json').exists())
+        self.assertTrue(read_json(self.state/'escalation.json')['recovered'])
+
+    def test_recovery_of_unsent_replacement_retains_the_remote_predecessors_class(self):
+        target = self.root/'anx-asks.json'
+        with patch.dict(os.environ, FAKE_ANX_ASK_STATE=str(target)):
+            first = self.record_failure(1000)['ask_id']
+            self.respond({'tool': 'anx', 'contains': ['ask'], 'exit': 2, 'stderr': 'ANX unavailable'})
+            pending = self.record_failure(4600, 'manifest invalid')
+            self.assertFalse(pending['sent'])
+            self.assertNotIn('ask_id', pending)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(loop.run_cycle(self.manifest, 'audit'), 0)
+            recovered = read_json(self.state/'escalation.json')
+            self.assertEqual(recovered['ask_id'], first)
+            self.assertEqual(recovered['failure_class'], 'runner failed')
+            self.respond()
+            replacement = self.record_failure(5000, 'manifest invalid')
+            self.assertNotEqual(replacement['ask_id'], first)
+            args = self.asks()[-1]
+            self.assertIn('--again', args)
+            self.assertEqual(args[args.index('--supersedes') + 1], first)
+            self.assertEqual(sum(item['status'] == 'open' for item in json.loads(target.read_text()).values()), 1)
+
+    def test_recovery_preserves_ask_class_across_restart_and_next_streak(self):
+        for answered in (False, True):
+            for changed_class in (False, True):
+                with self.subTest(answered=answered, changed_class=changed_class):
+                    (self.state/'escalation.json').unlink(missing_ok=True)
+                    self.respond()
+                    target = self.root/f'asks-{answered}-{changed_class}.json'
+                    with patch.dict(os.environ, FAKE_ANX_ASK_STATE=str(target)):
+                        first = self.record_failure(1000)['ask_id']
+                        if answered:
+                            asks = json.loads(target.read_text())
+                            asks[first]['status'] = 'answered'
+                            target.write_text(json.dumps(asks))
+                            self.respond({'tool': 'anx', 'contains': ['inbox', 'list'], 'json': {
+                                'ok': True, 'result': {'items': [{'ask_id': first, 'answer': 'Pause until reviewed'}]}}})
+                        # Repeated successful cycles must retain correlation without sending.
+                        count = len(self.asks())
+                        for _ in range(2):
+                            with contextlib.redirect_stdout(io.StringIO()):
+                                self.assertEqual(loop.run_cycle(self.manifest, 'audit'), 0)
+                        self.assertEqual(len(self.asks()), count)
+                        self.manifest = load(self.file)
+                        self.manifest.loop.fail_report_after = 2
+                        detail = 'manifest invalid' if changed_class else 'runner failed'
+                        self.assertTrue(self.record_failure(2000, detail)['recovered'])
+                        self.assertEqual(len(self.asks()), count, 'recovery must cancel stale delivery below threshold')
+                        report = self.record_failure(2001, detail)
+                        self.assertEqual(report['sent_count'], 1, 'new streak resets the reminder schedule')
+                        args = self.asks()[-1]
+                        self.assertEqual('--again' in args, changed_class)
+                        self.assertEqual('--supersedes' in args, changed_class)
+                        if changed_class:
+                            self.assertNotEqual(report['ask_id'], first)
+                            self.assertEqual(args[args.index('--supersedes') + 1], first)
+                            if answered:
+                                self.assertIn('Pause until reviewed', args[args.index('--details') + 1])
+                        else:
+                            self.assertEqual(report['ask_id'], first)
+                        asks = json.loads(target.read_text())
+                        self.assertEqual(sum(item['status'] == 'open' for item in asks.values()),
+                                         0 if answered and not changed_class else 1)
+                        self.manifest.loop.fail_report_after = 1
 
     def test_stop_suppresses_overdue_reminders(self):
         self.record_failure(1000)

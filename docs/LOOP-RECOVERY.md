@@ -29,21 +29,30 @@ records `channel`, `sent_count`, `sent_at` and `next_at` on success. Unsent
 notifications retain their payload on retry. The result lock serializes sends,
 skipped-cycle counters and successful-cycle resets. An old `sent: true` receipt
 without `channel: "anx"` is delivered to Decide on the next invocation; it is not
-proof of human delivery. A successful cycle clears the entire escalation state,
-including an unsent ask. A stopped loop sends nothing until explicitly resumed.
+proof of human delivery. A successful cycle cancels pending delivery and resets
+failure and reminder counters. If an ANX ask ID is known, it retains only
+`recovered`, `channel`, `ask_id`, `failure_class` and `previous_answers` as dormant
+correlation in `escalation.json`. A pending replacement without its own ask ID
+retains its predecessor's ID and class instead. No recovered report sends before
+a new streak reaches the failure threshold. A stopped loop sends nothing until
+explicitly resumed.
 
-Asks use `--again` because continued failure is new evidence. Each reminder also
-uses `--supersedes event:<previous-ask>` to replace its predecessor, leaving one
-open ask for the streak. If that ask was answered, its answer appears in the new
-ask's details; known answer context carries forward to later reminders. Answers
-are retained locally after delivery. Before replacement, a read-only inbox lookup
-also checks for an answer not yet consumed locally, following at most ten pages
-of 200 asks. An unavailable or incomplete lookup leaves the reminder pending for
-retry rather than replacing a question without its context.
-Delivery is at least once: a lost ANX response or a
-crash before the local send receipt may duplicate an ask. Recovery clears local
-escalation state; it does not withdraw existing asks or apply a repair. The owner
-should disposition outdated asks in ANX.
+Reminders for the same failure class reuse a stable question and situation
+without `--again` or `--supersedes`; cycle ID, evidence path, failure count and
+error text live in details. ANX repeat-dedupe returns the existing open or
+answered ask. A changed failure class uses `--again` and
+`--supersedes event:<previous-ask>` to replace its predecessor with fresh evidence.
+This correlation survives successful cycles, so a later streak of the same class
+reuses the old ask while a different class supersedes it. A new streak restarts
+the reminder schedule at its first interval.
+
+Known answer context carries forward in details. Before reuse or replacement, a
+read-only inbox lookup checks for an answer not yet consumed locally, following
+at most ten pages of 200 asks. An unavailable or incomplete lookup leaves the
+reminder pending for retry. Returned ask IDs are journaled before local send
+completion, so retrying local registration does not create another ask. Recovery
+does not withdraw existing asks or apply a repair; the owner should disposition
+outdated asks in ANX.
 
 Returned ask IDs are journaled before send completion and indexed under
 `state/loop-asks/`, surviving supersession and loop recovery. Both old and new ask
